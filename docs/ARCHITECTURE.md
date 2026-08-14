@@ -24,17 +24,38 @@ i.e. each language directory holds a complete, self-consistent edition.
 wrote. It is off by default.
 
 The v0.1 goal is the **platform**, not the domain. Everything that depends on the
-exact shape of a `bio.md` or of `MetaData.json` sits behind a narrow contract and
-is marked `TODO(domain)`. The pieces below are deliberately *not* finished in v0.1:
+exact shape of a `bio.md` or of `MetaData.json` sits behind a narrow contract, and
+the point of that separation is that filling one in must not require touching
+orchestration, routing, retry, state or CLI code. That property is the actual
+deliverable, and it held: the domain rules below were added afterwards, entirely
+within their contracts.
 
-- the metadata target schema (`src/pipelines/extraction/MetadataContract.ts`)
-- extraction chunk-merge rules for comma-separated list fields
-- tolerances for Markdown structure equivalence
-- catalogue classification: `type`, `gender`, `country`, romanized `title`,
-  and search aliases (`src/pipelines/catalog/names.ts`)
+| Rule | Where it lives now |
+|---|---|
+| `DD.MM.YYYY` dates, list punctuation, uppercase document types, `ranking` range | `src/pipelines/extraction/normalize.ts` |
+| The v2 rule that `id`/`title`/`gender`/`type`/`country`/`bio`/`dataStatus` are index facts, not dossier fields | `normalize.ts` — lifted out and routed to the catalogue |
+| Chunk merge: union list fields, first-wins scalars | `src/pipelines/extraction/merge.ts` |
+| Markdown structure tolerance (`strict` \| `lenient` \| `off`) | `src/documents/markdown/skeleton.ts`, `StructureGuard` |
+| ASCII `title`, romanization, search aliases | `src/pipelines/catalog/{names,romanize}.ts` |
+| Catalogue classification (`type`, `gender`, `country`) | noticed by `extract`, consumed by `catalog` — see §6a |
 
-Replacing any of them must not require touching orchestration, routing, retry,
-state or CLI code. That property is the actual deliverable.
+What is still open is listed as `TODO(domain)` in the code; grep for it.
+
+### §6a — how `catalog` classifies without calling a model
+
+`Catalog-Index.md` §1 assigns `type`, `gender`, `country` and the Latin `title`
+to `index.json`, and `MetaData.md` forbids them in a dossier. Neither is
+derivable from a dossier — but all four are derivable from the **article**, which
+`extract` has open anyway.
+
+So `extract` asks for them in a `catalog` key, `normalize.ts` lifts them out of
+the dossier before it is written, and they land on the `catalogHints` channel.
+`catalog` reads them and stays LLM-free, with a strict precedence: **an existing
+index row wins**, then the hint, then the configured default. An index row is the
+one artefact here a human may have edited, so nothing derived overwrites it.
+
+The alternative — a second classification pass over the corpus — would have cost
+a full extra round trip per entry to learn what the first pass already knew.
 
 ## 2. Layering
 
@@ -59,9 +80,9 @@ Dependencies point **inward**. No module imports from a layer above it.
         │ │   llm   │    │  documents  │  │  prompts   │ │    state    │
         │ │ gateway │    │  context    │  │ templates  │ │ journal     │
         │ └────┬────┘    └─────────────┘  └────────────┘ └─────────────┘
-        │ ┌────▼────────────────┐
+        │ ┌────▼─────────────────┐
         │ │ routing │ reliability│
-        │ └─────────────────────┘
+        │ └──────────────────────┘
         └──────────────► config ─────────► shared (types, errors, fs, hash)
 ```
 
@@ -233,9 +254,9 @@ capability and context fit for free from `RoutingContext.candidates`.
      cannot be rewritten. The structure guard becomes a safety net rather than
      the defence;
    - because the key *is* the hash of the text, a repeated string — `Гитарист`
-     in every dossier, a boilerplate paragraph — is translated **once per run**
-     (`TranslationMemory`), and a dropped or invented key is a validation failure
-     the gateway retries rather than a silently damaged output.
+     in every dossier, a boilerplate paragraph — is translated **once**
+     (`TranslationMemory`), and a key that comes back missing or malformed is
+     caught rather than silently written out.
 
    Link targets inside a sentence are masked as `⟦1⟧` rather than removed, so the
    translator still sees a whole sentence while the URL costs nothing; every mask
@@ -243,10 +264,41 @@ capability and context fit for free from `RoutingContext.candidates`.
 
    Whole-document translation remains available as `tasks.translate.mode:
    document` for cases where maximum surrounding context matters more than cost.
-4. **Budgets.** `cost.budget` caps requests / tokens / USD per run; exceeding it
+4. **Repair the gap, not the batch.** Models answer 39 of 40 keys often enough
+   that it must not cost a second full batch — and it did: a run journal here
+   showed two identical, separately billed translation calls because one
+   fragment of twenty was dropped.
+
+   So the first call for a batch accepts a **partial** answer, and only the keys
+   that are missing or malformed are re-asked, on their own. The last repair
+   round is strict, so a gap that survives repair still becomes an ordinary
+   validation failure and inherits retry-then-fall-back-to-a-stronger-model — on
+   a payload of the few keys that need it. A response that is unusable *as a
+   whole* (no JSON, not an object) skips the ladder and fails immediately, since
+   re-asking for individual keys cannot repair it.
+
+   The same cheap-axis-first shape as the context ladder, one level down:
+   `tasks.*.repairAttempts: 0` collapses it back to all-or-nothing.
+
+   A fragment with no letters in it — a year span, a lone placeholder — is never
+   sent at all. It has no words to translate, and it was a recurring reason for a
+   model to drop a key.
+5. **Say what to do about reasoning.** Reasoning tokens bill at the output rate
+   and routinely exceed the answer: 78% of the output tokens in one measured run
+   here. `reasoning.dialect: none` sends no reasoning parameter and leaves the
+   model's default in place; **any other dialect states the intent in both
+   directions**, so `enabled: false` is an instruction to stop rather than mere
+   silence. That distinction is the only way to quiet a model that reasons unless
+   told otherwise. `exclude` hides the traces; it does not make them free, and the
+   run summary now names the reasoning share so the cause is visible.
+6. **Budgets.** `cost.budget` caps requests / tokens / USD per run; exceeding it
    stops or warns per config.
-5. **Skip work.** Resume by fingerprint plus `output.onExisting: skip` means a
-   re-run over an unchanged corpus issues zero LLM calls.
+7. **Skip work.** Resume by fingerprint plus `output.onExisting: skip` means a
+   re-run over an unchanged corpus issues zero LLM calls. With
+   `tasks.*.useTranslationMemory: persistent` a re-run over a *grown* corpus pays
+   only for the strings that are new — the cache file is namespaced by prompt
+   version, so editing a prompt starts a fresh one rather than handing back the
+   strings the edit was meant to change.
 
 ## 7. Prompts
 

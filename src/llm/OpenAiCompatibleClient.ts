@@ -107,29 +107,41 @@ function toWireResponseFormat(format: ResponseFormat | undefined): Record<string
   };
 }
 
-/** Each gateway family spells "think harder" differently; the model config says which. */
-function reasoningFields(target: ModelTarget): Record<string, unknown> {
+/**
+ * Each gateway family spells "think harder" differently; the model config says
+ * which dialect to use — and, crucially, whether to say anything at all.
+ *
+ * `dialect: none` sends nothing, which leaves the model's own default in place.
+ * Any other dialect states the intent explicitly in both directions, because a
+ * model that reasons unless told otherwise bills those tokens at the output rate
+ * and there is no other way to stop it.
+ */
+export function reasoningFields(target: Pick<ModelTarget, 'reasoning'>): Record<string, unknown> {
   const { reasoning } = target;
-  if (!reasoning.enabled || reasoning.dialect === 'none') return {};
+  if (reasoning.dialect === 'none') return {};
 
   switch (reasoning.dialect) {
     case 'reasoning_effort':
-      return { reasoning_effort: reasoning.effort };
+      return { reasoning_effort: reasoning.enabled ? reasoning.effort : 'none' };
     case 'reasoning':
-      return {
-        reasoning: {
-          effort: reasoning.effort,
-          ...(reasoning.maxTokens ? { max_tokens: reasoning.maxTokens } : {}),
-          exclude: reasoning.exclude,
-        },
-      };
+      return reasoning.enabled
+        ? {
+            reasoning: {
+              effort: reasoning.effort,
+              ...(reasoning.maxTokens ? { max_tokens: reasoning.maxTokens } : {}),
+              exclude: reasoning.exclude,
+            },
+          }
+        : { reasoning: { enabled: false } };
     case 'thinking':
-      return {
-        thinking: {
-          type: 'enabled',
-          budget_tokens: reasoning.maxTokens ?? effortToBudget(reasoning.effort),
-        },
-      };
+      return reasoning.enabled
+        ? {
+            thinking: {
+              type: 'enabled',
+              budget_tokens: reasoning.maxTokens ?? effortToBudget(reasoning.effort),
+            },
+          }
+        : { thinking: { type: 'disabled' } };
     default:
       return {};
   }

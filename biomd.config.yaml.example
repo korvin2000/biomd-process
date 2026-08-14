@@ -38,6 +38,9 @@ output:
     translation: '{lang}/{slug}.bio.md'
     catalogIndex: 'index.json'
     catalogLocalizedIndex: 'index-{lang}.json'
+    # Internal hand-off from `extract` to `catalog`; not part of the published
+    # format, dot-prefixed so the consuming site ignores the directory.
+    catalogHints: '.hints/{slug}.json'
   onExisting: overwrite # skip | overwrite | fail
   jsonIndent: 2
 
@@ -59,6 +62,13 @@ tasks:
     requiredFields:
       - metadata.forename
       - metadata.surname
+    # A date that cannot be read as DD.MM.YYYY (or a partial form of it):
+    # drop it and note the loss, or reject the answer and spend a retry on it.
+    onInvalidDate: drop
+    # `type`/`gender`/`country`/Latin `title` belong to index.json, not to a
+    # dossier — but the article is open anyway, so a model that notices them
+    # writes them to the catalogHints channel for `catalog` to pick up.
+    emitCatalogHints: true
 
   translate:
     enabled: true
@@ -66,7 +76,11 @@ tasks:
     outputChannel: translation
     targetLanguages: [en, de]
     skipSourceLanguage: true
-    verifyStructure: true
+    # strict | lenient | off. strict is right for `segments` mode, where the
+    # skeleton is never sent and so cannot legitimately change; lenient lets a
+    # translator re-flow adjacent paragraphs in `document` mode but still
+    # refuses a lost heading, container, table or URL.
+    verifyStructure: strict
     # segments: send only the prose. Headings, list markers, ::: containers and
     #   their src:/position:/size: attributes, code and every URL stay here and
     #   are spliced back locally, so structure survives by construction and only
@@ -75,7 +89,14 @@ tasks:
     #   tokens, and the structure guard becomes the only defence.
     mode: segments
     maxSegmentsPerCall: 40
-    useTranslationMemory: true
+    # Models routinely answer 39 of 40 keys. A repair call re-asks for just the
+    # missing ones instead of re-sending — and re-paying for — the whole batch.
+    # 0 restores all-or-nothing retries.
+    repairAttempts: 1
+    # off | run | persistent. `persistent` keeps the cache in run.memoryDir, so a
+    # re-run over a grown corpus pays only for the strings that are new. The file
+    # is keyed by prompt version, so editing a prompt starts a fresh one.
+    useTranslationMemory: run
 
   # Per-language edition of the dossier. Only the prose values are sent, keyed by
   # content hash; dates, ranking, url, every media target and every unknown field
@@ -86,7 +107,8 @@ tasks:
     outputChannel: metadata
     targetLanguages: [] # empty follows tasks.translate.targetLanguages
     maxStringsPerCall: 60
-    useTranslationMemory: true
+    repairAttempts: 1
+    useTranslationMemory: run
 
   # Catalogue aggregation. Runs last, uses no LLM, and reports the editions that
   # actually landed on disk.
@@ -95,7 +117,12 @@ tasks:
     indexChannel: catalogIndex
     localizedIndexChannel: catalogLocalizedIndex
     localizedNames: true
+    # Search-only aliases after the display name: the bare surname, the inverted
+    # order, and a romanization for a non-Latin edition.
+    generateAliases: true
     preserveIds: true
+    # Only for an entry nothing else classified: an existing index row wins,
+    # then the extraction hint, then this.
     defaultType: guitarist
 
 # --------------------------------------------------------------------------
@@ -243,6 +270,7 @@ prompts:
 run:
   concurrency: 4
   stateDir: .biomd/runs
+  memoryDir: .biomd/memory # only used by useTranslationMemory: persistent
   resume: auto # auto | off | <runId>
   dryRun: false
   failFast: false

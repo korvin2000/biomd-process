@@ -14,7 +14,6 @@ import type { DocumentSegment } from '../../documents/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
 import { keyOf, type LocalizationUnit } from '../localization/StringTable.js';
-import { TranslationMemory } from '../localization/TranslationMemory.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
 import { translateUnits } from '../shared/stringBatch.js';
 import { StructureGuard } from './StructureGuard.js';
@@ -49,9 +48,6 @@ const DEFAULT_CONTEXT_STRATEGY = 'chunked';
 export class TranslationPipeline implements DocumentPipeline {
   readonly id = PIPELINE_ID;
   readonly description = 'Translate a document into the configured languages, preserving Markdown structure.';
-
-  /** One memory for the whole run, shared by every task of this pipeline. */
-  private memory: TranslationMemory | undefined;
 
   async plan(item: WorkItem, context: PlanContext): Promise<TaskSeed[]> {
     const config = context.config.tasks.translate;
@@ -129,7 +125,11 @@ export class TranslationPipeline implements DocumentPipeline {
       targetLanguage: targetLang,
       units,
       maxPerCall: config.maxSegmentsPerCall,
-      memory: this.memoryFor(config),
+      repairAttempts: config.repairAttempts,
+      memory: await context.memories.acquire(
+        `${PIPELINE_ID}-${await context.prompts.versionOf(SEGMENTS_PROMPT_ID)}`,
+        config.useTranslationMemory,
+      ),
       variables: (part) => ({
         ...config.promptVariables,
         sourceLanguage: document.language,
@@ -220,12 +220,6 @@ export class TranslationPipeline implements DocumentPipeline {
   }
 
   // --- shared --------------------------------------------------------------
-
-  private memoryFor(config: TranslateTaskConfig): TranslationMemory | undefined {
-    if (!config.useTranslationMemory) return undefined;
-    this.memory ??= new TranslationMemory(true);
-    return this.memory;
-  }
 
   private promptId(config: TranslateTaskConfig): string {
     return config.mode === 'segments' ? SEGMENTS_PROMPT_ID : PIPELINE_ID;

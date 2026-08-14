@@ -34,13 +34,28 @@ export const reasoningDialectSchema = z.enum([
   'none',
 ]);
 
+/**
+ * Reasoning is a **cost** setting, not just a quality one: reasoning tokens are
+ * billed at the output rate and can easily outweigh the answer itself.
+ *
+ * The two fields therefore mean different things:
+ *
+ * - `dialect: none` (the default) — never send a reasoning parameter at all.
+ *   Whatever the model does by default is what you get.
+ * - any other `dialect` — the model *is* told what to do: `enabled: true` asks it
+ *   to reason at `effort`, and `enabled: false` asks it **not to**, which is the
+ *   only way to stop a model that reasons unless told otherwise.
+ *
+ * Note that `exclude` only hides the traces from the response. The tokens are
+ * still generated and still billed; to stop paying for them, disable reasoning.
+ */
 export const reasoningSchema = z.object({
   enabled: z.boolean().default(false),
   effort: z.enum(['minimal', 'low', 'medium', 'high']).default('medium'),
-  dialect: reasoningDialectSchema.default('reasoning_effort'),
+  dialect: reasoningDialectSchema.default('none'),
   /** Upper bound on thinking tokens, for dialects that accept one. */
   maxTokens: z.number().int().positive().optional(),
-  /** Keep reasoning traces out of the parsed answer. Costs nothing to leave on. */
+  /** Keep reasoning traces out of the parsed answer. Does not make them free. */
   exclude: z.boolean().default(true),
 });
 
@@ -270,6 +285,9 @@ export const outputSchema = z.object({
       translation: '{lang}/{slug}.bio.md',
       catalogIndex: 'index.json',
       catalogLocalizedIndex: 'index-{lang}.json',
+      // Internal hand-off from `extract` to `catalog`, not part of the published
+      // format — dot-prefixed so the consuming site ignores the directory.
+      catalogHints: '.hints/{slug}.json',
     }),
   onExisting: z.enum(['skip', 'overwrite', 'fail']).default('overwrite'),
   /** Pretty-print JSON artifacts. */
@@ -281,49 +299,6 @@ export const outputSchema = z.object({
 // ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------
-
-const taskBase = z.object({
-  enabled: z.boolean().default(false),
-  /** Routing pool name; falls back to `default`. */
-  pool: identifier.optional(),
-  /** Per-task override of the global context strategy. */
-  contextStrategy: identifier.optional(),
-  /** Extra variables handed to this task's prompt templates. */
-  promptVariables: z.record(z.unknown()).default({}),
-});
-
-export const extractTaskSchema = taskBase
-  .extend({
-    outputChannel: z.string().default('metadata'),
-    /** Fail the task when the model returns none of these fields. */
-    requiredFields: z.array(z.string()).default([]),
-    /** TODO(domain): point at a JSON Schema file to override the built-in contract. */
-    schemaFile: z.string().optional(),
-  })
-  .default({});
-
-export const translateTaskSchema = taskBase
-  .extend({
-    outputChannel: z.string().default('translation'),
-    targetLanguages: z.array(languageCode).default([]),
-    /** Never translate a document into the language it is already in. */
-    skipSourceLanguage: z.boolean().default(true),
-    /** Reject a translation whose Markdown skeleton diverges from the source. */
-    verifyStructure: z.boolean().default(true),
-    /**
-     * `segments` sends only the translatable prose, with markup, containers,
-     * code and URLs held back and spliced in locally — cheaper, and structurally
-     * safe by construction. `document` sends the whole Markdown, which gives the
-     * model maximum surrounding context at the cost of tokens and of trusting it
-     * with the markup.
-     */
-    mode: z.enum(['segments', 'document']).default('segments'),
-    /** Text spans per LLM call in `segments` mode. */
-    maxSegmentsPerCall: z.number().int().positive().default(40),
-    /** Reuse the translation of an identical span across the whole run. */
-    useTranslationMemory: z.boolean().default(true),
-  })
-  .default({});
 
 /**
  * Dossier fields whose values are prose and therefore translated. An allowlist,
@@ -353,7 +328,12 @@ const DEFAULT_LOCALIZABLE_FIELDS = [
   'documents.*.label',
 ];
 
-/** Fields the format guide encodes as comma-separated lists. */
+/**
+ * Fields the format guide encodes as comma-separated lists. Shared by three
+ * places that must agree about them: extraction normalizes their punctuation,
+ * chunk merge unions them instead of taking the first chunk's, and localization
+ * translates their items individually so `Guitarist` is billed once per run.
+ */
 const DEFAULT_LIST_FIELDS = [
   'metadata.relatives',
   'metadata.instruments',
@@ -365,6 +345,94 @@ const DEFAULT_LIST_FIELDS = [
   'metadata.jobs',
 ];
 
+/** How long a translation cache lives. `true`/`false` stay valid as `run`/`off`. */
+const memoryLifetime = z
+  .union([z.boolean(), z.enum(['off', 'run', 'persistent'])])
+  .default('run')
+  .transform((value) => (typeof value === 'boolean' ? (value ? 'run' : 'off') : value));
+
+const taskBase = z.object({
+  enabled: z.boolean().default(false),
+  /** Routing pool name; falls back to `default`. */
+  pool: identifier.optional(),
+  /** Per-task override of the global context strategy. */
+  contextStrategy: identifier.optional(),
+  /** Extra variables handed to this task's prompt templates. */
+  promptVariables: z.record(z.unknown()).default({}),
+});
+
+export const extractTaskSchema = taskBase
+  .extend({
+    outputChannel: z.string().default('metadata'),
+    /** Fail the task when the model returns none of these fields. */
+    requiredFields: z.array(z.string()).default([]),
+    /** Comma-separated list fields: punctuation normalized, chunks unioned. */
+    listFields: z.array(z.string()).default(DEFAULT_LIST_FIELDS),
+    /**
+     * A date that cannot be read as `DD.MM.YYYY` (or a partial form of it).
+     * `drop` keeps the rest of the dossier and notes the loss — every field is
+     * optional, so a missing date degrades gracefully. `reject` turns it into a
+     * validation failure and spends a retry, then a stronger model, on it.
+     */
+    onInvalidDate: z.enum(['drop', 'reject']).default('drop'),
+    /**
+     * Write the classification a model noticed but a dossier may not keep
+     * (`type`, `gender`, `country`, Latin `title`) to the `catalogHints`
+     * channel, where `catalog` picks it up. Costs nothing: the article was read
+     * for the dossier anyway.
+     */
+    emitCatalogHints: z.boolean().default(true),
+    hintsChannel: z.string().default('catalogHints'),
+    /** TODO(domain): point at a JSON Schema file to override the built-in contract. */
+    schemaFile: z.string().optional(),
+  })
+  .default({});
+
+export const translateTaskSchema = taskBase
+  .extend({
+    outputChannel: z.string().default('translation'),
+    targetLanguages: z.array(languageCode).default([]),
+    /** Never translate a document into the language it is already in. */
+    skipSourceLanguage: z.boolean().default(true),
+    /**
+     * Reject a translation whose Markdown skeleton diverges from the source.
+     * `strict` compares token for token — right for `segments` mode, where the
+     * skeleton was never sent and so cannot legitimately change. `lenient` lets
+     * a translator re-flow adjacent paragraphs but still refuses a lost heading,
+     * container, table or URL. `off` disables the check. `true`/`false` are
+     * accepted as `strict`/`off`.
+     */
+    verifyStructure: z
+      .union([z.boolean(), z.enum(['off', 'lenient', 'strict'])])
+      .default('strict')
+      .transform((value) => (typeof value === 'boolean' ? (value ? 'strict' : 'off') : value)),
+    /**
+     * `segments` sends only the translatable prose, with markup, containers,
+     * code and URLs held back and spliced in locally — cheaper, and structurally
+     * safe by construction. `document` sends the whole Markdown, which gives the
+     * model maximum surrounding context at the cost of tokens and of trusting it
+     * with the markup.
+     */
+    mode: z.enum(['segments', 'document']).default('segments'),
+    /** Text spans per LLM call in `segments` mode. */
+    maxSegmentsPerCall: z.number().int().positive().default(40),
+    /**
+     * Follow-up calls that re-ask **only** for the fragments an answer left out.
+     * Models routinely return 39 of 40 keys; repairing the one is far cheaper
+     * than re-sending the batch. `0` restores all-or-nothing retries.
+     */
+    repairAttempts: z.number().int().min(0).max(3).default(1),
+    /**
+     * Reuse the translation of an identical span. `run` keeps the cache for one
+     * run; `persistent` also writes it to `run.memoryDir`, so a re-run over a
+     * grown corpus pays only for what is new. The file is keyed by prompt
+     * version, so editing a prompt starts a fresh cache rather than handing back
+     * the strings the edit was meant to change. `true`/`false` mean `run`/`off`.
+     */
+    useTranslationMemory: memoryLifetime,
+  })
+  .default({});
+
 export const localizeTaskSchema = taskBase
   .extend({
     outputChannel: z.string().default('metadata'),
@@ -375,8 +443,10 @@ export const localizeTaskSchema = taskBase
     listFields: z.array(z.string()).default(DEFAULT_LIST_FIELDS),
     /** Strings per LLM call. Larger batches cost fewer requests but risk truncation. */
     maxStringsPerCall: z.number().int().positive().default(60),
-    /** Reuse a translation of the same source string across the whole run. */
-    useTranslationMemory: z.boolean().default(true),
+    /** Follow-up calls that re-ask only for the values an answer left out. */
+    repairAttempts: z.number().int().min(0).max(3).default(1),
+    /** Reuse a translation of the same source string. See `tasks.translate`. */
+    useTranslationMemory: memoryLifetime,
   })
   .default({});
 
@@ -393,8 +463,19 @@ export const catalogTaskSchema = z
     localizedNames: z.boolean().default(true),
     /** Keep ids from an existing index at the output path; ids must never be reused. */
     preserveIds: z.boolean().default(true),
-    /** TODO(domain): classification is not derivable from a dossier yet. */
+    /** Where `extract` left the classification it noticed while reading the article. */
+    hintsChannel: z.string().default('catalogHints'),
+    /**
+     * `type` for an entry nothing else classified. The catalogue's own value
+     * always wins, then the extraction hint, then this.
+     */
     defaultType: z.string().default('musician'),
+    /**
+     * Search aliases beyond the display name — the bare surname, the inverted
+     * order, and a romanization for non-Latin scripts. `Catalog-Index.md` §10 is
+     * explicit that aliases are what makes cross-script search work.
+     */
+    generateAliases: z.boolean().default(true),
   })
   .default({});
 
@@ -434,6 +515,8 @@ export const runSchema = z
   .object({
     concurrency: z.number().int().min(1).max(64).default(4),
     stateDir: z.string().default('.biomd/runs'),
+    /** Where a `persistent` translation memory is kept. Safe to delete. */
+    memoryDir: z.string().default('.biomd/memory'),
     /** `auto` resumes the latest unfinished run; a run id resumes that one. */
     resume: z.union([z.literal('auto'), z.literal('off'), z.string().min(1)]).default('auto'),
     dryRun: z.boolean().default(false),
@@ -592,6 +675,10 @@ function crossFieldChecks(config: z.infer<typeof rawShape>, ctx: z.RefinementCtx
         'Metadata localization is enabled but no target languages are listed, ' +
         'in tasks.localize.targetLanguages or tasks.translate.targetLanguages.',
     });
+  }
+
+  if (config.tasks.extract.enabled && config.tasks.extract.emitCatalogHints) {
+    requireChannel('extract', config.tasks.extract.hintsChannel);
   }
 
   if (config.tasks.catalog.enabled) {

@@ -112,10 +112,19 @@ export function printSummary(summary: RunSummary, snapshot: MetricsSnapshot, run
     `LLM         ${snapshot.llmRequests} requests · ${snapshot.retries} retries · ` +
       `${snapshot.fallbacks} fallbacks\n`,
   );
+  // Reasoning is a share of the output tokens, and often the majority of them.
+  // Naming it here is what turns "why did that cost so much" into a config change.
+  const reasoning =
+    snapshot.reasoningTokens > 0
+      ? pc.dim(
+          `, ${formatTokens(snapshot.reasoningTokens)} of it reasoning` +
+            ` (${Math.round((snapshot.reasoningTokens / Math.max(1, snapshot.completionTokens)) * 100)}%)`,
+        )
+      : '';
   OUT.write(
     `Tokens      ${formatTokens(snapshot.promptTokens)} in ` +
       `(${formatTokens(snapshot.cachedPromptTokens)} cached) · ` +
-      `${formatTokens(snapshot.completionTokens)} out\n`,
+      `${formatTokens(snapshot.completionTokens)} out${reasoning}\n`,
   );
   OUT.write(`Cost        ${formatCost(snapshot.costUsd)}\n`);
   OUT.write(`Journal     ${runDir}\n`);

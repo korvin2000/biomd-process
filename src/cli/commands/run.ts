@@ -29,8 +29,18 @@ interface RunOptions {
 }
 
 export function createRunCommand(): Command {
-  return new Command('run')
-    .description('Process the configured corpus (extraction and/or translation)')
+  return (
+    new Command('run')
+      .description('Process the configured corpus (extraction and/or translation)')
+      /**
+       * `run` is the default command, so anything commander cannot place lands
+       * here — and this command spends money. `biomd -c f config check` (options
+       * before the subcommand) would otherwise be read as `run` with `config`
+       * and `check` as ignorable extras, and would quietly process the corpus
+       * instead of validating it. An unexpected argument must be an error.
+       */
+      .allowExcessArguments(false)
+  )
     .option('-c, --config <file>', 'path to the config file')
     .option('-n, --dry-run', 'plan the run and print what it would do, without calling any model')
     .option('--concurrency <n>', 'parallel tasks')

@@ -9,6 +9,8 @@ import {
   type TaskSeed,
   type WorkItem,
 } from '../../core/types.js';
+import type { Artifact } from '../../io/types.js';
+import type { JsonValue } from '../../shared/json.js';
 import { extractJsonBlock, safeJsonParse } from '../../shared/json.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
 import { hasField, mergeMetadata } from './merge.js';
@@ -19,6 +21,7 @@ import {
   metadataSchema,
   type MetadataDocument,
 } from './MetadataContract.js';
+import { liftCatalogHints, normalizeValues, type NormalizeOptions } from './normalize.js';
 
 const PIPELINE_ID = 'extract';
 /** Metadata dossiers are small; a generous ceiling still fits any of them. */
@@ -65,29 +68,44 @@ export class ExtractionPipeline implements DocumentPipeline {
         ...config.promptVariables,
         language: document.language,
         requiredFields: config.requiredFields,
+        catalogHints: config.emitCatalogHints,
         schemaText: JSON.stringify(metadataJsonSchema, null, 2),
         partial: attempt.partial || segment.total > 1,
         partLabel: segment.label,
       }),
       section: (segment) => ({ title: 'Article', body: segment.text, volatile: true, fence: 'markdown' }),
-      parse: (text) => this.parse(text),
-      merge: (parts) => mergeMetadata(parts),
+      parse: (text) => this.parse(text, this.normalizeOptions(config)),
+      merge: (parts) => mergeMetadata(parts, config.listFields),
       accept: (value) => this.accept(value, config),
     });
 
+    // The index-owned fields are lifted once, on the merged document: they are a
+    // property of the entry, not of whichever chunk happened to mention them.
+    const lifted = liftCatalogHints(outcome.value);
+    const artifacts: Artifact[] = [
+      {
+        channel: config.outputChannel,
+        format: 'json',
+        body: lifted.document as unknown as Record<string, never>,
+        pathVars: this.pathVars(document),
+      },
+    ];
+
+    if (config.emitCatalogHints && Object.keys(lifted.hints).length > 0) {
+      artifacts.push({
+        channel: config.hintsChannel,
+        format: 'json',
+        body: { slug: document.slug, language: document.language, ...lifted.hints } as JsonValue,
+        pathVars: this.pathVars(document),
+      });
+    }
+
     return {
-      artifacts: [
-        {
-          channel: config.outputChannel,
-          format: 'json',
-          body: outcome.value as unknown as Record<string, never>,
-          pathVars: this.pathVars(document),
-        },
-      ],
+      artifacts,
       usage: outcome.usage,
       costUsd: outcome.costUsd,
       contextAttempt: outcome.attempt.id,
-      notes: outcome.notes,
+      notes: [...outcome.notes, ...lifted.notes],
     };
   }
 
@@ -95,7 +113,7 @@ export class ExtractionPipeline implements DocumentPipeline {
    * Models wrap JSON in prose more often than they should; recovering the block
    * locally is free, while a re-ask costs a whole round trip.
    */
-  private parse(text: string): Parsed<MetadataDocument> {
+  private parse(text: string, options: NormalizeOptions): Parsed<MetadataDocument> {
     const block = extractJsonBlock(text);
     if (!block) return { ok: false, reason: 'response contained no JSON object' };
 
@@ -107,7 +125,18 @@ export class ExtractionPipeline implements DocumentPipeline {
       const first = parsed.error.issues[0];
       return { ok: false, reason: `schema violation at ${first?.path.join('.') || '(root)'}: ${first?.message}` };
     }
-    return { ok: true, value: parsed.data };
+
+    // Shape is the schema's job; the format guide's rules are the normalizer's.
+    // An ISO date is rewritten here for free — only what cannot be read at all
+    // is handed back as a rejection, and only when the config asks for that.
+    const normalized = normalizeValues(parsed.data, options);
+    if (normalized.rejection) return { ok: false, reason: normalized.rejection };
+
+    return { ok: true, value: normalized.document, notes: normalized.notes };
+  }
+
+  private normalizeOptions(config: ExtractTaskConfig): NormalizeOptions {
+    return { listFields: config.listFields, onInvalidDate: config.onInvalidDate };
   }
 
   /**
@@ -145,6 +174,10 @@ export class ExtractionPipeline implements DocumentPipeline {
     return {
       schema: METADATA_SCHEMA_NAME,
       requiredFields: [...config.requiredFields].sort(),
+      // Normalization decides what a conforming dossier looks like, so changing
+      // it has to invalidate the ones already written under the old rules.
+      listFields: [...config.listFields].sort(),
+      onInvalidDate: config.onInvalidDate,
       promptVariables: config.promptVariables,
     };
   }

@@ -28,6 +28,9 @@ replaced by its rendering in the target language.
 8. Values are independent of each other. They come from many different records
    and are given to you together only to save a round trip; do not try to make a
    sentence or a story out of them.
+9. **Answer every key you were given.** A key you omit leaves that field in its
+   source language. If a value puzzles you, return it unchanged rather than
+   leaving it out.
 
 ## Output shape
 

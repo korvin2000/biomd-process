@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { interpolateEnv } from '../src/config/env.js';
 import { deepMerge, pruneUndefined } from '../src/config/merge.js';
 import { appConfigSchema } from '../src/config/schema.js';
+import { createRunCommand } from '../src/cli/commands/run.js';
 import { minimalConfig } from './helpers/config.js';
 
 describe('env interpolation', () => {
@@ -86,5 +87,20 @@ describe('config schema', () => {
   it('rejects unknown top-level keys instead of ignoring a typo', () => {
     const input = { ...minimalConfig(), tsaks: {} };
     expect(appConfigSchema.safeParse(input).success).toBe(false);
+  });
+});
+
+describe('run command argument handling', () => {
+  /**
+   * `run` is the default command and it spends money, so anything commander
+   * cannot place lands here. `biomd -c f config check` used to be read as `run`
+   * with two ignorable extras and processed the whole corpus instead of
+   * validating the config.
+   */
+  it('refuses stray positional arguments rather than processing the corpus', async () => {
+    const command = createRunCommand().exitOverride();
+    await expect(command.parseAsync(['-c', 'x.yaml', 'config', 'check'], { from: 'user' })).rejects.toThrow(
+      /too many arguments/i,
+    );
   });
 });

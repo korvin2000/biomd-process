@@ -50,7 +50,9 @@ export function createReportCommand(): Command {
       );
       process.stdout.write(
         `Tokens      ${formatTokens(totals.promptTokens)} in (${formatTokens(totals.cachedPromptTokens)} cached) · ` +
-          `${formatTokens(totals.completionTokens)} out\n`,
+          `${formatTokens(totals.completionTokens)} out` +
+          (totals.reasoningTokens ? pc.dim(`, ${formatTokens(totals.reasoningTokens)} of it reasoning`) : '') +
+          '\n',
       );
       process.stdout.write(`Cost        ${formatCost(totals.costUsd)}\n`);
 

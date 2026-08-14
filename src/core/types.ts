@@ -8,6 +8,7 @@ import type { Artifact, ArtifactWriter } from '../io/types.js';
 import type { PathVars } from '../io/PathTemplate.js';
 import type { Logger } from '../observability/Logger.js';
 import type { PromptRepository } from '../prompts/PromptRepository.js';
+import type { TranslationMemoryRegistry } from '../pipelines/localization/TranslationMemoryRegistry.js';
 import { PipelineError } from '../shared/errors.js';
 
 /**
@@ -118,6 +119,8 @@ export interface ExecutionContext {
   estimator: TokenEstimator;
   /** Read-only here: pipelines resolve paths but never write. */
   writer: ArtifactWriter;
+  /** Shared translation caches; the registry owns their scope and lifetime. */
+  memories: TranslationMemoryRegistry;
   logger: Logger;
   signal: AbortSignal;
 }

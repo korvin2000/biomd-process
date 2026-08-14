@@ -9,6 +9,7 @@ import type { Artifact, ArtifactWriter, WrittenArtifact } from '../io/types.js';
 import type { Logger } from '../observability/Logger.js';
 import type { MetricsCollector } from '../observability/Metrics.js';
 import type { ProgressReporter, ProgressTaskInfo } from '../observability/ProgressReporter.js';
+import type { TranslationMemoryRegistry } from '../pipelines/localization/TranslationMemoryRegistry.js';
 import type { PromptRepository } from '../prompts/PromptRepository.js';
 import type { RunStore } from '../state/RunStore.js';
 import type { RunStatus, RunTotals, TaskRecord } from '../state/types.js';
@@ -26,6 +27,7 @@ export interface OrchestratorDeps {
   contexts: ContextStrategyRegistry;
   estimator: TokenEstimator;
   writer: ArtifactWriter;
+  memories: TranslationMemoryRegistry;
   store: RunStore;
   metrics: MetricsCollector;
   progress: ProgressReporter;
@@ -183,6 +185,7 @@ export class Orchestrator {
         contexts: this.deps.contexts,
         estimator: this.deps.estimator,
         writer: this.deps.writer,
+        memories: this.deps.memories,
         logger: logger.child({ taskId: task.taskId, pipeline: task.pipeline }),
         signal: controller.signal,
       });
@@ -219,6 +222,23 @@ export class Orchestrator {
         pipeline: task.pipeline,
       });
       written.push(result);
+
+      /**
+       * The expensive silence: the model was called and billed, and then
+       * `output.onExisting: skip` threw the answer away because a file was
+       * already there. Legitimate when re-running deliberately, ruinous after a
+       * prompt edit — which invalidates every fingerprint, so *every* task runs,
+       * pays, and is discarded. The planner-level `run.skipExistingOutputs`
+       * makes the same decision for free, before anything is spent.
+       */
+      if (result.skipped && !this.deps.config.run.dryRun) {
+        this.deps.logger.warn(
+          `Discarded a paid result: ${result.relativePath} already exists and output.onExisting is "skip". ` +
+            'Set run.skipExistingOutputs: true to skip these tasks before they are billed, ' +
+            'or output.onExisting: overwrite to keep what this run produced.',
+          { taskId: task.taskId, channel: result.channel },
+        );
+      }
       await this.deps.store.append({
         type: 'artifact.written',
         taskId: task.taskId,

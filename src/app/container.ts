@@ -23,6 +23,7 @@ import { PipelineRegistry } from '../core/PipelineRegistry.js';
 import { CatalogPipeline } from '../pipelines/catalog/CatalogPipeline.js';
 import { ExtractionPipeline } from '../pipelines/extraction/ExtractionPipeline.js';
 import { LocalizePipeline } from '../pipelines/localization/LocalizePipeline.js';
+import { TranslationMemoryRegistry } from '../pipelines/localization/TranslationMemoryRegistry.js';
 import { TranslationPipeline } from '../pipelines/translation/TranslationPipeline.js';
 import { ObserverHub } from './ObserverHub.js';
 
@@ -44,6 +45,7 @@ export interface App {
   segmenter: Segmenter;
   source: SourceProvider;
   writer: ArtifactWriter;
+  memories: TranslationMemoryRegistry;
   pipelines: PipelineRegistry;
   metrics: MetricsCollector;
   budget: BudgetGuard;
@@ -119,6 +121,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
     segmenter,
     source: new FileSystemSource(config.input, paths, estimator),
     writer: new FileArtifactWriter(config.output, paths, dryRun),
+    memories: new TranslationMemoryRegistry(paths.resolve(config.run.memoryDir), logger, dryRun),
     pipelines: new PipelineRegistry()
       .register(new ExtractionPipeline())
       .register(new TranslationPipeline())

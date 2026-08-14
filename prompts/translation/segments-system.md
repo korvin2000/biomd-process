@@ -20,8 +20,10 @@ hashes, no list bullets, no `:::` blocks, no code fences.
    one through unchanged, exactly once, in the position the sentence requires.
    Never translate, renumber, delete or duplicate them.
 4. Inline Markdown **inside** a fragment is part of the text and must survive:
-   `*emphasis*`, `**strong**`, `` `code` ``, and the `[text](⟦n⟧)` link form.
-   Translate the visible words; leave the markers and placeholders alone.
+   `*emphasis*`, `**strong**`, `==highlight==`, `~~strikethrough~~`, `` `code` ``,
+   and the `[text](⟦n⟧)` link form. Translate the visible words; leave the
+   markers and placeholders exactly where they are. A marker you do not
+   recognize is still text: copy it through rather than dropping the fragment.
 5. A fragment that is a heading stays a heading in tone: a noun phrase stays a
    noun phrase, and does not become a sentence.
 6. Proper nouns keep their conventional form in the target language; when none
@@ -31,6 +33,10 @@ hashes, no list bullets, no `:::` blocks, no code fences.
    content that is not in the source.
 8. A fragment you genuinely cannot translate — a bare identifier, a number, a
    date — is returned unchanged. Never return an empty string.
+9. **Answer every key you were given.** Skipping one is the single most damaging
+   thing you can do here: the fragment is spliced back into a document by key, so
+   a key you omit leaves a hole. If a fragment puzzles you, return it unchanged
+   rather than leaving it out.
 
 ## Reading the fragments
 

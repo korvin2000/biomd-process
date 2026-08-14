@@ -12,6 +12,7 @@ import type { Artifact, ArtifactWriter } from '../../io/types.js';
 import { EMPTY_USAGE } from '../../llm/types.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
+import type { CatalogHints } from '../extraction/normalize.js';
 import { IdAllocator, type CatalogRow } from './IdAllocator.js';
 import { displayNamesOf, latinTitleOf, type DossierNames } from './names.js';
 
@@ -26,19 +27,20 @@ const PIPELINE_ID = 'catalog';
  * than what was planned — a language whose translation failed simply does not
  * appear among that entry's editions.
  *
- * No LLM calls. Everything here is derivable from the outputs and the config.
+ * **No LLM calls, still.** The classification the format needs — `type`,
+ * `gender`, `country`, a Latin `title` — is not derivable from a dossier, but it
+ * *was* derivable from the article, which `extract` had open anyway. So it is
+ * collected there and left on the `catalogHints` channel, and this pipeline only
+ * chooses between sources. That keeps the aggregation deterministic and free,
+ * and adds no second pass over the corpus.
  *
- * TODO(domain): the classification fields are the open part of this format.
- *  - `type` (`guitarist`, `composer`, `luthier`, `hidden`, …) is guessed as
- *    `tasks.catalog.defaultType` for new rows; existing rows keep theirs.
- *  - `gender` and `country` are preserved when already present and omitted
- *    otherwise — neither is reliably derivable from a dossier.
- *  - `title` falls back to de-slugging when no Latin edition exists; a real
- *    romanization pass (LLM-assisted) belongs here.
- *  - `img` is preserved but never invented.
- *  - Search aliases beyond the display name are not generated yet; see
- *    `Catalog-Index.md` §10, which is explicit that aliases are what makes
- *    CJK search work.
+ * Precedence for every classification field: **the existing index wins**, then
+ * the extraction hint, then a configured default. An index row is the one thing
+ * here a human may have edited by hand, so nothing derived is allowed to
+ * overwrite it.
+ *
+ * `img` is preserved but never invented: media is a curation decision, and a
+ * wrong portrait is worse than the gender-based default the format specifies.
  */
 export class CatalogPipeline implements CorpusPipeline {
   readonly id = PIPELINE_ID;
@@ -56,6 +58,7 @@ export class CatalogPipeline implements CorpusPipeline {
         contract: {
           languages: this.editionLanguages(context.config).sort(),
           localizedNames: config.localizedNames,
+          generateAliases: config.generateAliases,
           defaultType: config.defaultType,
         },
         // Promptless: the version only has to be stable.
@@ -87,21 +90,25 @@ export class CatalogPipeline implements CorpusPipeline {
       }
 
       const dossiers = await this.readDossiers(item, editions, context);
+      const hints = await this.readHints(item, context);
       const previous = allocator.previous(item.slug);
       const row: CatalogRow = {
         id: allocator.idFor(item.slug),
-        title: previous?.title ?? latinTitleOf(item.slug, dossiers),
+        title: previous?.title ?? latinTitleOf(item.slug, dossiers, hints.title),
         lang: editions.join(','),
-        type: previous?.type ?? config.defaultType,
+        type: previous?.type ?? hints.type ?? config.defaultType,
         md: `/${item.slug}${context.config.input.slugSuffix}`,
         ...(dossiers.size > 0 ? { json: `/${item.slug}.bio.json` } : {}),
-        ...(previous?.gender ? { gender: previous.gender } : {}),
-        ...(previous?.country ? { country: previous.country } : {}),
+        ...pick('gender', previous?.gender ?? hints.gender),
+        ...pick('country', previous?.country ?? hints.country),
         ...(previous?.img ? { img: previous.img } : {}),
       };
       rows.push(row);
 
-      if (config.localizedNames) this.collectNames(row, dossiers, names);
+      if (!previous && (hints.gender || hints.country || hints.type)) {
+        notes.push(`${item.slug}: classified from the extraction hint (${describe(hints)}).`);
+      }
+      if (config.localizedNames) this.collectNames(row, dossiers, names, config.generateAliases);
     }
 
     const artifacts: Artifact[] = [
@@ -170,12 +177,27 @@ export class CatalogPipeline implements CorpusPipeline {
     return dossiers;
   }
 
+  /**
+   * The classification `extract` noticed while it had the article open.
+   *
+   * Read from the source-language edition: nationality and craft are properties
+   * of the person, so any edition would do, and the source one is the edition
+   * guaranteed to exist. A missing file is normal — extraction may be off, or
+   * the article may simply not have said.
+   */
+  private async readHints(item: WorkItem, context: ExecutionContext): Promise<CatalogHints> {
+    const file = this.pathOf(context.writer, context.config.tasks.catalog.hintsChannel, item, item.language);
+    if (!(await pathExists(file))) return {};
+    return (await readJsonFile<CatalogHints>(file).catch(() => ({}))) ?? {};
+  }
+
   private collectNames(
     row: CatalogRow,
     dossiers: ReadonlyMap<string, DossierNames>,
     names: Map<string, Map<string, string[]>>,
+    aliases: boolean,
   ): void {
-    for (const [lang, entries] of displayNamesOf(row, dossiers)) {
+    for (const [lang, entries] of displayNamesOf(row, dossiers, { aliases })) {
       const bucket = names.get(lang) ?? new Map<string, string[]>();
       bucket.set(row.id, entries);
       names.set(lang, bucket);
@@ -200,4 +222,16 @@ export class CatalogPipeline implements CorpusPipeline {
 
 function byNumericId([a]: [string, string[]], [b]: [string, string[]]): number {
   return (Number(a) || 0) - (Number(b) || 0);
+}
+
+/** Omits the key entirely when there is no value — the format has no empty strings. */
+function pick(key: string, value: string | undefined): Record<string, string> {
+  return value ? { [key]: value } : {};
+}
+
+function describe(hints: CatalogHints): string {
+  return Object.entries(hints)
+    .filter(([, value]) => Boolean(value))
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(', ');
 }

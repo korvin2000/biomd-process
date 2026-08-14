@@ -13,6 +13,8 @@ import { soleItem, type ExecutionContext, type PlannedTask } from '../../core/ty
 export interface ParsedOk<T> {
   ok: true;
   value: T;
+  /** Anything the parser silently fixed and the user should still be told about. */
+  notes?: string[];
 }
 export interface ParsedFail {
   ok: false;
@@ -96,16 +98,21 @@ export async function runWithEscalation<T>(spec: EscalationSpec<T>): Promise<Esc
 
     try {
       const parts: T[] = [];
+      const parseNotes: string[] = [];
       for (const segment of attempt.segments) {
         const outcome = await callSegment(spec, attempt, segment, isFinal && attempt.segments.length === 1);
         usage = addUsage(usage, outcome.usage);
         costUsd += outcome.costUsd;
         parts.push(outcome.value);
+        parseNotes.push(...outcome.notes);
       }
 
       const merged = spec.merge(parts, attempt);
       const verdict = spec.accept(merged, attempt);
       if (verdict.ok) {
+        // Only the accepted attempt's fixes are worth reporting; a rejected
+        // attempt's notes describe a document that was thrown away.
+        notes.push(...dedupe(parseNotes));
         return { value: merged, attempt, usage, costUsd, notes };
       }
 
@@ -134,7 +141,7 @@ async function callSegment<T>(
   attempt: ContextAttempt,
   segment: DocumentSegment,
   checkAcceptance: boolean,
-): Promise<{ value: T; usage: TokenUsage; costUsd: number }> {
+): Promise<{ value: T; usage: TokenUsage; costUsd: number; notes: string[] }> {
   const { context, task } = spec;
   const prompt = await context.prompts.render(spec.promptId, spec.variables(attempt, segment));
   const messages = MessageBuilder.build(prompt, [spec.section(segment)]);
@@ -171,7 +178,11 @@ async function callSegment<T>(
   if (!parsed) {
     throw new PipelineError('Response passed validation but produced no value', { details: { taskId: task.taskId } });
   }
-  return { value: parsed.value, usage: result.totalUsage, costUsd: result.totalCostUsd };
+  return { value: parsed.value, usage: result.totalUsage, costUsd: result.totalCostUsd, notes: parsed.notes ?? [] };
+}
+
+function dedupe(notes: readonly string[]): string[] {
+  return [...new Set(notes)];
 }
 
 /** Largest usable input window across the routing pool this task will use. */

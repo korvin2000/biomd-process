@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { Segmenter } from '../src/documents/Segmenter.js';
 import { splitBlocks } from '../src/documents/markdown/blocks.js';
 import { compareSkeletons, markdownSkeleton } from '../src/documents/markdown/skeleton.js';
+import { StructureGuard } from '../src/pipelines/translation/StructureGuard.js';
 import { HeuristicTokenEstimator } from '../src/llm/TokenEstimator.js';
 import type { SourceDocument } from '../src/documents/types.js';
 
@@ -142,5 +143,39 @@ describe('markdown skeleton', () => {
     const tokens = markdownSkeleton('::: image\nsrc: /a.jpg\ncaption: Hello\n:::');
     expect(tokens).toContain('kv:src');
     expect(tokens).not.toContain('kv:caption');
+  });
+});
+
+describe('markdown skeleton, lenient mode', () => {
+  const SOURCE = '## Section\n\nOne sentence.\n\nAnother sentence.\n\n[A link](https://example.org/a)\n';
+
+  it('tolerates a translator joining two adjacent paragraphs', () => {
+    const reflowed = '## Section\n\nOne sentence. Another sentence.\n\n[A link](https://example.org/a)\n';
+    expect(compareSkeletons(SOURCE, reflowed).ok).toBe(false);
+    expect(compareSkeletons(SOURCE, reflowed, { mode: 'lenient' }).ok).toBe(true);
+  });
+
+  it('still refuses a lost heading', () => {
+    const broken = SOURCE.replace('## Section', 'Section');
+    expect(compareSkeletons(SOURCE, broken, { mode: 'lenient' }).ok).toBe(false);
+  });
+
+  it('still refuses a rewritten link target', () => {
+    const broken = SOURCE.replace('https://example.org/a', 'https://example.org/b');
+    expect(compareSkeletons(SOURCE, broken, { mode: 'lenient' }).ok).toBe(false);
+  });
+});
+
+describe('StructureGuard strictness', () => {
+  const source = '# Title\n\nOne.\n\nTwo.\n';
+  const reflowed = '# Title\n\nOne. Two.\n';
+
+  it('maps the legacy booleans onto strict and off', () => {
+    expect(new StructureGuard(true).verify(source, reflowed).ok).toBe(false);
+    expect(new StructureGuard(false).verify(source, reflowed).ok).toBe(true);
+  });
+
+  it('accepts re-flowed prose when told to be lenient', () => {
+    expect(new StructureGuard('lenient').verify(source, reflowed).ok).toBe(true);
   });
 });

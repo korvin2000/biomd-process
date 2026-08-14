@@ -6,7 +6,7 @@
  * actually make — a dropped `:::` container, a heading turned into bold text, a
  * rewritten URL, an invented paragraph — without a diff of the prose itself.
  *
- * TODO(domain): extend with table shape and footnote ids once the corpus needs it.
+ * TODO(domain): footnote ids, once the corpus has any.
  */
 
 const FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
@@ -28,6 +28,30 @@ export interface SkeletonComparison {
   sourceLength: number;
   targetLength: number;
 }
+
+/**
+ * How much divergence counts as "the same document".
+ *
+ * - `strict` — token for token. The right default: in segment mode the skeleton
+ *   *cannot* legitimately change, because it was never sent, so any difference
+ *   is a bug on this side rather than a translator's licence.
+ * - `lenient` — for whole-document mode, where a translator may legitimately
+ *   join two short paragraphs into one. Runs of consecutive body-text lines
+ *   collapse to a single token, so re-flowing prose passes. Headings,
+ *   containers, fences, rules, tables, list markers and every link and image
+ *   target are still compared exactly — those are never a stylistic choice.
+ *   The price is that deleting one of two adjacent paragraphs also passes,
+ *   which is why this is opt-in.
+ */
+export type SkeletonMode = 'strict' | 'lenient';
+
+export interface CompareOptions {
+  mode?: SkeletonMode;
+  maxDifferences?: number;
+}
+
+/** Tokens that stand for a run of prose rather than a structural element. */
+const FLOWABLE = new Set(['p', 'quote']);
 
 export function markdownSkeleton(content: string): string[] {
   const tokens: string[] = [];
@@ -91,9 +115,10 @@ export function markdownSkeleton(content: string): string[] {
  * Reported positions are token indices, which map to "the Nth structural
  * element" — precise enough to point a human at the paragraph.
  */
-export function compareSkeletons(source: string, target: string, maxDifferences = 5): SkeletonComparison {
-  const a = markdownSkeleton(source);
-  const b = markdownSkeleton(target);
+export function compareSkeletons(source: string, target: string, options: CompareOptions = {}): SkeletonComparison {
+  const { mode = 'strict', maxDifferences = 5 } = options;
+  const a = collapse(markdownSkeleton(source), mode);
+  const b = collapse(markdownSkeleton(target), mode);
   const differences: string[] = [];
 
   const length = Math.max(a.length, b.length);
@@ -110,6 +135,18 @@ export function compareSkeletons(source: string, target: string, maxDifferences 
     sourceLength: a.length,
     targetLength: b.length,
   };
+}
+
+/** In `lenient` mode a run of body-text tokens counts as one re-flowable block. */
+function collapse(tokens: readonly string[], mode: SkeletonMode): string[] {
+  if (mode === 'strict') return [...tokens];
+
+  const result: string[] = [];
+  for (const token of tokens) {
+    if (FLOWABLE.has(token) && result.at(-1) === 'text+') continue;
+    result.push(FLOWABLE.has(token) ? 'text+' : token);
+  }
+  return result;
 }
 
 /** Targets of links and images must survive translation byte for byte. */

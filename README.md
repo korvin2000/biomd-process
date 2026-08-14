@@ -19,10 +19,12 @@ out/en/paco.bio.json    dossier localized into English
 out/index.json          catalogue index + index-en.json, index-ru.json
 ```
 
-> **Status: v0.1 — the platform, not the domain.** The orchestration, routing,
-> reliability, cost control, resume and observability layers are complete and
-> tested. Everything that depends on the exact shape of a `bio.md` or of
-> `MetaData.json` sits behind a narrow contract and is marked `TODO(domain)`.
+> **Status: v0.1.** The orchestration, routing, reliability, cost control, resume
+> and observability layers are complete and tested, and the domain rules that
+> `docs/MetaData.md` and `docs/Catalog-Index.md` specify are implemented behind
+> the narrow contracts that were built for them — date and list normalization,
+> structure tolerance, catalogue classification, Latin titles and search aliases.
+> Grep `TODO(domain)` for what is still open.
 > See [Extending](#extending) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
@@ -179,16 +181,17 @@ await runJob(app);
 
 ## Known gaps in v0.1
 
-- The metadata target schema is a thin placeholder over `docs/MetaData.md`; the
-  full field rules and date-format validation are `TODO(domain)`.
-- Chunk merging for extraction takes the first non-empty value per field;
-  comma-separated list fields should be unioned instead.
-- Structure verification is exact-match on a Markdown skeleton; tolerances are
-  not yet configurable.
-- The catalogue derives ids, paths and display names, but `type`, `gender`,
-  `country` and romanized titles are preserved-or-defaulted, not inferred, and
-  search aliases beyond the bare surname are not generated.
-- The translation memory is per-run; persisting it across runs is a clear next win.
+- `tasks.extract.schemaFile` — pointing the extraction contract at an external
+  JSON Schema is declared but not implemented.
+- The Markdown skeleton does not model footnote ids.
+- `img` in `index.json` is preserved but never invented: choosing a portrait is
+  a curation decision, and a wrong one is worse than the format's gender default.
+- Search aliases for CJK names depend entirely on the extraction hint — no
+  algorithm gets from 塞戈维亚 back to "Segovia". That is a property of the
+  problem, not of this implementation.
+- A dossier's `dates`/`ranking`/`url` are language-invariant *by construction*
+  (they are never sent to a model), but nothing cross-checks editions that were
+  authored outside this tool.
 - No streaming, no provider batch APIs, no web UI.
 
 ## Development

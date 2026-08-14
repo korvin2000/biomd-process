@@ -31,6 +31,7 @@ export class MetricsCollector {
     this.totals.promptTokens += record.usage.promptTokens;
     this.totals.completionTokens += record.usage.completionTokens;
     this.totals.cachedPromptTokens += record.usage.cachedPromptTokens;
+    this.totals.reasoningTokens += record.usage.reasoningTokens;
     this.totals.costUsd += record.costUsd;
     if (record.outcome === 'error' && record.errorKind) this.countError(record.errorKind);
   }

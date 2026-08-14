@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { IdAllocator, type CatalogRow } from '../src/pipelines/catalog/IdAllocator.js';
 import { displayNamesOf, latinTitleOf, type DossierNames } from '../src/pipelines/catalog/names.js';
+import { foldToAscii, isLatinScript, romanizeCyrillic } from '../src/pipelines/catalog/romanize.js';
 
 const existing: CatalogRow[] = [
   { id: '3', title: 'Andres Segovia', type: 'guitarist', md: '/andres-segovia.bio.md', country: 'es', gender: 'm' },
@@ -50,13 +51,24 @@ describe('catalogue names', () => {
     ['en', { metadata: { forename: 'Paco', surname: 'de Lucia' } }],
   ]);
 
-  it('uses the dossier name as the display name, with the surname as an alias', () => {
+  it('leads with the display name and follows it with search-only aliases', () => {
     const names = displayNamesOf(row, dossiers);
-    expect(names.get('ru')).toEqual(['Пако де Лусия', 'де Лусия']);
+    expect(names.get('ru')).toEqual(['Пако де Лусия', 'де Лусия', 'де Лусия Пако', 'Pako de Lusiya', 'de Lusiya']);
   });
 
-  it('still emits a language whose name matches the title, because it carries an alias', () => {
-    expect(displayNamesOf(row, dossiers).get('en')).toEqual(['Paco de Lucia', 'de Lucia']);
+  it('romanizes only a name a Latin keyboard cannot already type', () => {
+    expect(displayNamesOf(row, dossiers).get('en')).toEqual(['Paco de Lucia', 'de Lucia', 'de Lucia Paco']);
+  });
+
+  it('emits the display name alone when aliases are turned off', () => {
+    expect(displayNamesOf(row, dossiers, { aliases: false }).get('en')).toEqual(['Paco de Lucia', 'de Lucia']);
+  });
+
+  it('does not invert a comma-separated roster forename', () => {
+    const roster = new Map<string, DossierNames>([
+      ['ru', { metadata: { forename: 'Сергей,Виктор', surname: 'Авторы' } }],
+    ]);
+    expect(displayNamesOf(row, roster).get('ru')).not.toContain('Авторы Сергей,Виктор');
   });
 
   it('omits a language whose only entry would repeat the Latin title', () => {
@@ -73,8 +85,35 @@ describe('catalogue names', () => {
     expect(latinTitleOf('paco-de-lucia', dossiers)).toBe('Paco de Lucia');
   });
 
-  it('de-slugs when no Latin edition exists', () => {
+  it('folds diacritics out of the title, which §5.3 wants in plain ASCII', () => {
+    const accented = new Map<string, DossierNames>([['es', { metadata: { forename: 'Andrés', surname: 'Segovia' } }]]);
+    expect(latinTitleOf('andres-segovia', accented)).toBe('Andres Segovia');
+  });
+
+  it('trusts the extraction hint above everything else', () => {
+    expect(latinTitleOf('andres-segovia', dossiers, 'Andrés Segovia')).toBe('Andres Segovia');
+  });
+
+  it('de-slugs when no Latin edition exists, keeping particles lowercase', () => {
     const cyrillicOnly = new Map<string, DossierNames>([['ru', { metadata: { forename: 'Пако', surname: 'де Лусия' } }]]);
-    expect(latinTitleOf('paco-de-lucia', cyrillicOnly)).toBe('Paco De Lucia');
+    // The slug is human-authored Latin; transliterating would give "Pako de Lusiya".
+    expect(latinTitleOf('paco-de-lucia', cyrillicOnly)).toBe('Paco de Lucia');
+  });
+});
+
+describe('romanization', () => {
+  it('folds Latin letters that carry no combining mark', () => {
+    expect(foldToAscii('Søren Æblerød')).toBe('Soren Aeblerod');
+    expect(foldToAscii('Straße')).toBe('Strasse');
+  });
+
+  it('transliterates Cyrillic and leaves other scripts alone', () => {
+    expect(romanizeCyrillic('Андрес Сеговия')).toBe('Andres Segoviya');
+    expect(romanizeCyrillic('Segovia')).toBeUndefined();
+  });
+
+  it('knows a Latin-script name from a Cyrillic one', () => {
+    expect(isLatinScript('Andrés Segovia')).toBe(true);
+    expect(isLatinScript('Андрес Сеговия')).toBe(false);
   });
 });

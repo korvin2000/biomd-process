@@ -69,6 +69,11 @@ llm:
       maxOutputTokens: 16384
       capabilities: [json_schema, json_object, tools, prompt_cache]
       pricing: { inputPer1M: 0.15, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
+      # Reasoning tokens bill at the output rate and can outweigh the answer.
+      # `dialect` names the wire format; `enabled: false` is an instruction to
+      # the provider, not merely silence — omit the block to leave the model's
+      # own default alone.
+      reasoning: { enabled: false, dialect: reasoning }
       tags: [remote, cheap]
 
     - id: or-quality
@@ -78,6 +83,7 @@ llm:
       maxOutputTokens: 16384
       capabilities: [json_schema, tools, reasoning, prompt_cache]
       pricing: { inputPer1M: 3, outputPer1M: 15, cachedInputPer1M: 0.3 }
+      reasoning: { enabled: false, dialect: reasoning }
       params: { temperature: 0.1 }
       tags: [remote, quality]
 

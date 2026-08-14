@@ -4,21 +4,22 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { JsonObject } from '../../shared/json.js';
 
 /**
- * The extraction output contract.
+ * The extraction output contract — the *shape* half of `docs/MetaData.md`.
  *
- * TODO(domain): this is a **thin placeholder** that mirrors `docs/MetaData.md`
- * closely enough to run end to end. Before production use it still needs:
- *   - the full field list and per-field descriptions from `docs/MetaData.md` §`metadata`;
- *   - `DD.MM.YYYY` date validation (and the "year only" variant the doc allows);
- *   - the rule that `dates`, `ranking` and `url` are language-invariant, which
- *     means cross-checking editions rather than validating one file;
- *   - rejection of the fields that moved to `index.json`
- *     (`id`, `title`, `gender`, `type`, `country`, `bio`, `dataStatus`);
- *   - normalization of comma-separated list fields.
+ * This module answers "is this a metadata document at all"; the rules that turn
+ * a plausible answer into a conforming one — `DD.MM.YYYY` dates, comma-list
+ * punctuation, uppercase document types, and the v2 rule that `id` / `title` /
+ * `gender` / `type` / `country` / `bio` / `dataStatus` belong to `index.json`
+ * and not here — live in {@link ./normalize.js}. The split is deliberate: a
+ * schema violation is worth a retry, whereas an ISO date is worth a rewrite, and
+ * conflating the two spends a round trip on something free to fix locally.
  *
- * Deliberately permissive for now: `passthrough()` keeps unknown keys instead of
- * dropping data the model found, which matches the "preserve unknown fields"
- * rule in the format guide.
+ * Deliberately permissive on unknown keys: `passthrough()` keeps what the model
+ * found rather than dropping it, which is the format guide's rule 12.
+ *
+ * The language-invariance of `dates`, `ranking` and `url` is not checked here
+ * because it is not a property of one file: `localize` guarantees it structurally
+ * by never sending those fields to a model at all.
  */
 
 const mediaItem = z.object({

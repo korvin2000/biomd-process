@@ -67,6 +67,7 @@ export async function runJob(app: App, options: RunJobOptions = {}): Promise<Run
       contexts: app.contexts,
       estimator: app.estimator,
       writer: app.writer,
+      memories: app.memories,
       store,
       metrics: app.metrics,
       progress: options.progress ?? nullProgressReporter,
@@ -75,6 +76,7 @@ export async function runJob(app: App, options: RunJobOptions = {}): Promise<Run
 
     return { runId: store.runId, runDir: store.dir, plan, summary };
   } finally {
+    await app.memories.close();
     detach();
   }
 }

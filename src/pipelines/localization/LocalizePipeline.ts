@@ -103,7 +103,11 @@ export class LocalizePipeline implements DocumentPipeline {
       targetLanguage: targetLang,
       units,
       maxPerCall: config.maxStringsPerCall,
-      memory: this.memoryFor(config),
+      repairAttempts: config.repairAttempts,
+      memory: await context.memories.acquire(
+        `${PIPELINE_ID}-${await context.prompts.versionOf(PIPELINE_ID)}`,
+        config.useTranslationMemory,
+      ),
       variables: (part) => ({
         ...config.promptVariables,
         sourceLanguage: item.language,
@@ -157,11 +161,6 @@ export class LocalizePipeline implements DocumentPipeline {
 
   private async hashOf(file: string): Promise<string> {
     return readTextFile(file).catch(() => '');
-  }
-
-  private memoryFor(config: LocalizeTaskConfig): TranslationMemory {
-    this.memory ??= new TranslationMemory(config.useTranslationMemory);
-    return this.memory;
   }
 
   private result(
