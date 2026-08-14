@@ -1,0 +1,106 @@
+[
+  {
+    "id": "1",
+    "title": "Agustin Barrios Mangore",
+    "lang": "ru",
+    "type": "guitarist",
+    "gender": "m",
+    "country": "py",
+    "md": "/agustin-barrios.bio.md",
+    "json": "/agustin-barrios.bio.json",
+    "img": "photos/agustin-barrios.jpg"
+  },
+  {
+    "id": "2",
+    "title": "Agustin Barrios Mangore",
+    "lang": "ru",
+    "type": "guitarist",
+    "md": "/barrios.bio.md",
+    "json": "/agustin-barrios.bio.json"
+  },
+  {
+    "id": "3",
+    "title": "Andres Segovia",
+    "lang": "ru,de",
+    "type": "guitarist",
+    "gender": "m",
+    "country": "es",
+    "md": "/andres-segovia.bio.md",
+    "json": "/andres-segovia.bio.json",
+    "img": "photos/andres-segovia.jpg"
+  },
+  {
+    "id": "4",
+    "title": "Project Authors",
+    "lang": "ru",
+    "type": "musician",
+    "gender": "mixed",
+    "country": "ua",
+    "md": "/authors.bio.md",
+    "json": "/authors.bio.json",
+    "img": "photos/authors.jpg"
+  },
+  {
+    "id": "5",
+    "title": "Django Reinhardt",
+    "lang": "ru,en",
+    "type": "guitarist",
+    "gender": "m",
+    "country": "fr",
+    "md": "/django-reinhardt.bio.md",
+    "json": "/django-reinhardt.bio.json",
+    "img": "photos/django-reinhardt.jpg"
+  },
+  {
+    "id": "6",
+    "title": "Jimi Hendrix",
+    "lang": "ru",
+    "type": "guitarist",
+    "gender": "m",
+    "country": "us",
+    "md": "/jimi-hendrix.bio.md",
+    "json": "/jimi-hendrix.bio.json",
+    "img": "photos/jimi-hendrix.jpg"
+  },
+  {
+    "id": "7",
+    "title": "Jovan Jovicic",
+    "lang": "ru,en",
+    "type": "guitarist",
+    "gender": "m",
+    "country": "rs",
+    "md": "/jovan-jovicic.bio.md",
+    "json": "/jovan-jovicic.bio.json",
+    "img": "photos/jovan-jovicic.jpg"
+  },
+  {
+    "id": "8",
+    "title": "Jovan Jovicic 2",
+    "lang": "ru",
+    "type": "guitarist",
+    "md": "/jovicic.bio.md",
+    "json": "/jovan-jovicic.bio.json"
+  },
+  {
+    "id": "9",
+    "title": "Paco de Lucia",
+    "lang": "ru,en",
+    "type": "guitarist",
+    "gender": "m",
+    "country": "es",
+    "md": "/paco-de-lucia.bio.md",
+    "json": "/paco-de-lucia.bio.json",
+    "img": "photos/paco-de-lucia.jpg"
+  },
+  {
+    "id": "10",
+    "title": "Adamian",
+    "lang": "ru",
+    "gender": "m",
+    "country": "it",
+    "type": "guitarist",
+    "md": "/adamjan.bio.md",
+    "json": "/adamjan.bio.json"
+
+  }
+]

@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "forename": "Пако",
+    "surname": "де Лусия",
+    "birthname": "Франсиско Густаво Санчес Гомес",
+    "birthplace": "Альхесирас, Испания",
+    "deathplace": "Плая-дель-Кармен, Мексика",
+    "dates": {
+      "born": "21.12.1947",
+      "died": "25.02.2014",
+      "activeFrom": "01.01.1961",
+      "activeTo": "25.02.2014"
+    },
+    "relatives": "Рамон де Альхесирас,Пепе де Лусия",
+    "instruments": "фламенко-гитара",
+    "genres": "фламенко,джаз-фьюжн,музыка мира",
+    "bands": "Секстет Пако де Лусии,Los Chiquitos de Algeciras",
+    "awards": "Премия принцессы Астурийской в области искусств,Премии «Латинская Грэмми»",
+    "teachers": "Антонио Санчес Пасино,Рамон де Альхесирас",
+    "jobs": "Гитарист,Композитор,Продюсер",
+    "ranking": 98,
+    "url": "https://fundacionpacodelucia.com/legado/"
+  },
+  "media": {
+    "photos": [
+      {
+        "label": "Основной портрет",
+        "target": "https://placehold.co/420x560?text=Paco+de+Lucia"
+      },
+      {
+        "label": "Записи фламенко",
+        "target": "https://placehold.co/500x500?text=Flamenco+Recordings"
+      }
+    ],
+    "music": []
+  },
+  "documents": [
+    {
+      "label": "Официальная биография Фонда Пако де Лусии",
+      "type": "REFERENCE",
+      "target": "https://fundacionpacodelucia.com/legado/"
+    }
+  ]
+}

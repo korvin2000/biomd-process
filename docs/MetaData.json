@@ -1,0 +1,51 @@
+{
+    "metadata": {
+        "forename": "Имя",
+        "surname": "Фамилия",
+        "birthname": "Полное имя при рождении",
+        "birthplace": "Город, Страна",
+        "deathplace": "Город, Страна",
+        "dates": {
+            "born": "11.02.1920",
+            "died": "11.02.1990",
+            "activeFrom": "11.02.1940",
+            "activeTo": "11.02.1980"
+        },
+        "relatives": "Первый родственник,Второй родственник",
+        "instruments": "классическая гитара",
+        "genres": "классика,фольклор",
+        "bands": "Название ансамбля",
+        "awards": "Название награды",
+        "teachers": "Имя наставника",
+        "disciples": "Имя ученика",
+        "jobs": "Гитарист,Композитор",
+        "ranking": 50,
+        "url": "https://example.org/source"
+    },
+    "media": {
+        "photos": [
+            {
+                "label": "Основной портрет",
+                "target": "photos/slug.jpg"
+            }
+        ],
+        "music": [
+            {
+                "label": "Название записи",
+                "target": "music/mp/track.mp3"
+            }
+        ]
+    },
+    "documents": [
+        {
+            "label": "Название документа",
+            "type": "ARTICLE",
+            "target": "documents/article.pdf"
+        },
+        {
+            "label": "Расшифровка слушания",
+            "type": "TRANSCRIPT",
+            "target": "embedded"
+        }
+    ]
+}

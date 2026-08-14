@@ -1,0 +1,50 @@
+{
+  "metadata": {
+    "forename": "Агустин",
+    "surname": "Барриос",
+    "birthname": "Агустин Пио Барриос Феррейра",
+    "birthplace": "Мисьонес, Парагвай",
+    "deathplace": "Сан-Сальвадор, Сальвадор",
+    "dates": {
+      "born": "05.05.1885",
+      "died": "07.08.1944",
+      "activeFrom": "01.01.1900",
+      "activeTo": "07.08.1944"
+    },
+    "instruments": "классическая гитара",
+    "genres": "классика,парагвайский фольклор",
+    "teachers": "Густаво Соса Эскалада",
+    "jobs": "Гитарист,Композитор,Педагог",
+    "ranking": 94,
+    "url": "https://en.wikipedia.org/wiki/Agust%C3%ADn_Barrios"
+  },
+  "media": {
+    "photos": [
+      {
+        "label": "Основной портрет",
+        "target": "https://placehold.co/324x438?text=Agustin+Barrios"
+      },
+      {
+        "label": "Большой портрет",
+        "target": "https://placehold.co/794x1142?text=Agustin+Barrios+Portrait"
+      }
+    ],
+    "music": [
+      {
+        "label": "Julia Florida",
+        "target": "music/mp/juliaflorida.wav"
+      },
+      {
+        "label": "La Catedral — прелюдия",
+        "target": "music/wma/la_catedral_prelude.wma"
+      }
+    ]
+  },
+  "documents": [
+    {
+      "label": "Барриос Мангори — жизнь и творчество",
+      "type": "ARTICLE",
+      "target": "barrios1.htm"
+    }
+  ]
+}

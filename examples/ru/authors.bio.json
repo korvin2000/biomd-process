@@ -1,0 +1,48 @@
+{
+  "metadata": {
+    "forename": "Сергей,Виктор,Александр,Константин",
+    "surname": "Тавровские",
+    "birthname": "Коллектив проекта «Гитаристы и композиторы»",
+    "birthplace": "Украина и Польша",
+    "dates": {
+      "activeFrom": "01.01.2001"
+    },
+    "relatives": "Сергей Тавровский,Виктор Тавровский,Александр Тавровский,Константин Тавровский",
+    "instruments": "классическая гитара",
+    "genres": "классика,просветительство",
+    "bands": "Проект «Гитаристы и композиторы»",
+    "awards": "Упоминание в альманахе «Ренессанс гитары-2002»",
+    "teachers": "Виктор Борисович Негруш",
+    "jobs": "Гитарист,Педагог,Философ,Программист,Хранитель проекта",
+    "ranking": 65,
+    "url": "http://www.abc-guitars.com/"
+  },
+  "media": {
+    "photos": [
+      {
+        "label": "Сергей Тавровский",
+        "target": "https://placehold.co/300x404?text=Sergey+Tavrovsky"
+      },
+      {
+        "label": "Виктор Тавровский",
+        "target": "https://placehold.co/300x404?text=Viktor+Tavrovsky"
+      },
+      {
+        "label": "Александр Тавровский",
+        "target": "https://placehold.co/300x404?text=Alexander+Tavrovsky"
+      },
+      {
+        "label": "Константин Тавровский",
+        "target": "https://placehold.co/840x630?text=Konstantin+Tavrovsky"
+      }
+    ],
+    "music": []
+  },
+  "documents": [
+    {
+      "label": "Печатный отзыв «Ренессанс гитары-2002»",
+      "type": "SCAN",
+      "target": "articles/about_us/rg_2002.jpg"
+    }
+  ]
+}

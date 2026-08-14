@@ -1,0 +1,93 @@
+# OpenRouter only — no local infrastructure.
+#
+# Every call is billed, so this config leans on the cost controls: cheapest model
+# first, escalation only when the cheap one is rejected, a hard USD budget, and a
+# client-side rate limit so 429s are avoided rather than retried.
+#
+#   OPENROUTER_API_KEY=sk-or-... biomd run -c config/examples/openrouter-only.yaml
+
+version: 1
+
+project:
+  # Paths resolve against the repo root, not against this file's directory.
+  rootDir: ../..
+
+input:
+  baseDir: examples
+  include: ['*/**.bio.md']
+
+tasks:
+  extract:
+    enabled: true
+    pool: cheap
+    requiredFields: [metadata.forename, metadata.surname]
+  translate:
+    enabled: true
+    pool: quality
+    targetLanguages: [en, de]
+    # Sending prose only removes markup and URLs before anything is billed:
+    # ~18% of the bytes on the sample corpus, more on article-heavy documents.
+    # The larger win is that structure cannot break, so no retry is spent on it.
+    mode: segments
+  localize:
+    enabled: true
+    pool: quality
+
+llm:
+  endpoints:
+    - id: openrouter
+      baseUrl: https://openrouter.ai/api/v1
+      apiKey: ${OPENROUTER_API_KEY}
+      headers:
+        HTTP-Referer: ${OPENROUTER_SITE_URL:-https://example.org}
+        X-Title: ${OPENROUTER_APP_NAME:-biomd-process}
+      requestsPerMinute: 120
+
+  models:
+    - id: cheap
+      endpoint: openrouter
+      model: openai/gpt-4o-mini
+      contextWindow: 128000
+      maxOutputTokens: 16384
+      capabilities: [json_schema, json_object, tools, prompt_cache]
+      pricing: { inputPer1M: 0.15, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
+      tags: [cheap]
+
+    - id: mid
+      endpoint: openrouter
+      model: google/gemini-2.5-flash
+      contextWindow: 1000000
+      maxOutputTokens: 65536
+      capabilities: [json_schema, json_object, tools, prompt_cache]
+      pricing: { inputPer1M: 0.3, outputPer1M: 2.5 }
+      tags: [cheap, wide]
+
+    - id: quality
+      endpoint: openrouter
+      model: anthropic/claude-sonnet-4.5
+      contextWindow: 200000
+      maxOutputTokens: 16384
+      capabilities: [json_schema, tools, reasoning, prompt_cache]
+      pricing: { inputPer1M: 3, outputPer1M: 15, cachedInputPer1M: 0.3 }
+      reasoning: { enabled: false, effort: medium, dialect: reasoning }
+      params: { temperature: 0.1 }
+      tags: [quality]
+
+  routing:
+    strategy: cost-optimized
+    pools:
+      default: [cheap, mid, quality]
+      cheap: [cheap, mid, quality]
+      quality: [quality, mid]
+
+reliability:
+  retry: { maxAttempts: 4, initialDelayMs: 1000, maxDelayMs: 30000, jitter: full }
+  fallback: { maxTargets: 3 }
+
+cost:
+  budget:
+    maxCostUsd: 5
+  onExceeded: stop
+
+run:
+  concurrency: 6

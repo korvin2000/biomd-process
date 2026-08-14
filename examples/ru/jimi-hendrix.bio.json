@@ -1,0 +1,40 @@
+{
+  "metadata": {
+    "forename": "Джими",
+    "surname": "Хендрикс",
+    "birthname": "Джеймс Маршалл Хендрикс",
+    "birthplace": "Сиэтл, штат Вашингтон, США",
+    "deathplace": "Лондон, Англия, Великобритания",
+    "dates": {
+      "born": "05.08.1942",
+      "died": "04.08.1970",
+      "activeFrom": "01.01.1963",
+      "activeTo": "18.09.1970"
+    },
+    "relatives": "Эл Хендрикс,Леон Хендрикс",
+    "instruments": "электрогитара,вокал",
+    "genres": "рок,блюз,психоделический рок,ритм-энд-блюз",
+    "bands": "The Jimi Hendrix Experience,Band of Gypsys",
+    "awards": "Зал славы рок-н-ролла,Премия «Грэмми» за вклад в музыку",
+    "teachers": "Самоучка",
+    "jobs": "Гитарист,Певец,Автор песен,Продюсер",
+    "ranking": 99,
+    "url": "https://www.jimihendrix.com/biography/"
+  },
+  "media": {
+    "photos": [
+      {
+        "label": "Основной портрет",
+        "target": "https://placehold.co/420x560?text=Jimi+Hendrix"
+      }
+    ],
+    "music": []
+  },
+  "documents": [
+    {
+      "label": "Официальная биография Джими Хендрикса",
+      "type": "REFERENCE",
+      "target": "https://www.jimihendrix.com/biography/"
+    }
+  ]
+}

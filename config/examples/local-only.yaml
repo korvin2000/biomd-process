@@ -1,0 +1,72 @@
+# Local gateway only — LiteLLM, OmniRoute, 9router, vLLM, or Ollama's OpenAI shim.
+#
+# Nothing leaves the machine and nothing is billed, so the interesting knobs are
+# throughput rather than cost: raise concurrency to what the box can serve, and
+# let the sequential strategy prefer the bigger local model.
+#
+#   biomd run -c config/examples/local-only.yaml
+
+version: 1
+
+project:
+  # Paths resolve against the repo root, not against this file's directory.
+  rootDir: ../..
+
+input:
+  baseDir: examples
+  include: ['*/**.bio.md']
+
+tasks:
+  extract:
+    enabled: true
+    pool: small
+    requiredFields: [metadata.forename, metadata.surname]
+  translate:
+    enabled: true
+    pool: large
+    targetLanguages: [en, de]
+    mode: segments
+  localize:
+    enabled: true
+    pool: large
+
+llm:
+  endpoints:
+    - id: local
+      baseUrl: ${LOCAL_LLM_BASE_URL:-http://localhost:4000/v1}
+      apiKey: ${LOCAL_LLM_API_KEY:-sk-local}
+      # A local server has a fixed number of slots; queueing here beats
+      # queueing inside the server.
+      maxConcurrent: 4
+
+  models:
+    - id: small
+      endpoint: local
+      model: ${LOCAL_SMALL_MODEL:-openai/gpt-oss-20b}
+      contextWindow: 131072
+      maxOutputTokens: 8192
+      capabilities: [json_object, prompt_cache]
+      tags: [local, fast]
+
+    - id: large
+      endpoint: local
+      model: ${LOCAL_LARGE_MODEL:-openai/gpt-oss-120b}
+      contextWindow: 131072
+      maxOutputTokens: 8192
+      capabilities: [json_object, prompt_cache]
+      params: { temperature: 0.1 }
+      tags: [local, quality]
+
+  routing:
+    # Everything is free, so ranking by price is meaningless: take the declared order.
+    strategy: sequential
+    pools:
+      default: [large, small]
+      small: [small, large]
+      large: [large, small]
+
+run:
+  concurrency: 4
+
+cost:
+  budget: { maxRequests: 0, maxCostUsd: 0 }

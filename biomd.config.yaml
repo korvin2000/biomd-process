@@ -1,0 +1,254 @@
+# biomd-process — main configuration
+#
+# Everything here has a default (see src/config/schema.ts); this file shows the
+# knobs you are most likely to touch. Secrets come from the environment:
+# `${VAR}` is substituted at load time, `${VAR:-fallback}` supplies a default.
+#
+#   biomd config check     validate this file and print the effective values
+#   biomd run --dry-run    plan the whole job without spending a token
+
+version: 1
+
+project:
+  name: biomd-process
+  rootDir: .
+
+# --------------------------------------------------------------------------
+# Which documents to process
+# --------------------------------------------------------------------------
+input:
+  baseDir: input
+  include:
+    - '*/**.bio.md'
+  exclude:
+    - '**/node_modules/**'
+  # 'auto' derives the language from the first directory under baseDir
+  # (examples/ru/paco-de-lucia.bio.md -> ru)
+  sourceLanguage: auto
+  slugSuffix: .bio.md
+  limit: 0 # 0 = no limit
+
+# --------------------------------------------------------------------------
+# Where results go. Templates are relative to output.baseDir.
+# --------------------------------------------------------------------------
+output:
+  baseDir: out
+  channels:
+    metadata: '{lang}/{slug}.bio.json'
+    translation: '{lang}/{slug}.bio.md'
+    catalogIndex: 'index.json'
+    catalogLocalizedIndex: 'index-{lang}.json'
+  onExisting: skip # skip | overwrite | fail
+  jsonIndent: 2
+
+# --------------------------------------------------------------------------
+# What to do with them. Enable any combination.
+#
+# With all four on, ru/x.bio.md produces:
+#   out/ru/x.bio.json   dossier extracted from the article
+#   out/en/x.bio.md     translated article
+#   out/en/x.bio.json   dossier localized into English
+#   out/index.json      catalogue index + index-<lang>.json name files
+# --------------------------------------------------------------------------
+tasks:
+  extract:
+    enabled: true
+    pool: extract
+    outputChannel: metadata
+    # A response missing all of these is rejected and retried / escalated.
+    requiredFields:
+      - metadata.forename
+      - metadata.surname
+
+  translate:
+    enabled: true
+    pool: translate
+    outputChannel: translation
+    targetLanguages: [en]
+    skipSourceLanguage: true
+    verifyStructure: true
+    # segments: send only the prose. Headings, list markers, ::: containers and
+    #   their src:/position:/size: attributes, code and every URL stay here and
+    #   are spliced back locally, so structure survives by construction and only
+    #   words are billed. Identical fragments are translated once per run.
+    # document: send the whole Markdown. More context for the translator, more
+    #   tokens, and the structure guard becomes the only defence.
+    mode: segments
+    maxSegmentsPerCall: 40
+    useTranslationMemory: true
+
+  # Per-language edition of the dossier. Only the prose values are sent, keyed by
+  # content hash; dates, ranking, url, every media target and every unknown field
+  # are copied from the source and cannot be altered by a model.
+  localize:
+    enabled: true
+    pool: translate
+    outputChannel: metadata
+    targetLanguages: [] # empty follows tasks.translate.targetLanguages
+    maxStringsPerCall: 60
+    useTranslationMemory: true
+
+  # Catalogue aggregation. Runs last, uses no LLM, and reports the editions that
+  # actually landed on disk.
+  catalog:
+    enabled: true
+    indexChannel: catalogIndex
+    localizedIndexChannel: catalogLocalizedIndex
+    localizedNames: true
+    preserveIds: true
+    defaultType: guitarist
+
+# --------------------------------------------------------------------------
+# LLM endpoints (any OpenAI-compatible URL) and the models they serve
+# --------------------------------------------------------------------------
+llm:
+  endpoints:
+    # Local gateway: LiteLLM / OmniRoute / 9router / vLLM / Ollama shim
+    - id: local
+      baseUrl: ${LOCAL_LLM_BASE_URL:-http://localhost:4000/v1}
+      apiKey: ${LOCAL_LLM_API_KEY:-sk-local}
+      maxConcurrent: 4
+      requestsPerMinute: 0
+
+    - id: openrouter
+      baseUrl: https://openrouter.ai/api/v1
+      apiKey: ${OPENROUTER_API_KEY}
+      headers:
+        HTTP-Referer: https://www.abc-guitars.com
+        X-Title: biomd-process
+      requestsPerMinute: 120
+
+  models:
+    - id: local-small
+      endpoint: local
+      model: ${LOCAL_LLM_MODEL:-openai/gpt-oss-20b}
+      contextWindow: 131072
+      maxOutputTokens: 8192
+      capabilities: [json_object, prompt_cache]
+      pricing: { inputPer1M: 0, outputPer1M: 0 }
+      tags: [local, cheap]
+
+    - id: or-cheap
+      endpoint: openrouter
+      model: deepseek/deepseek-v4-flash
+      contextWindow: 128000
+      maxOutputTokens: 16384
+      capabilities: [json_schema, json_object, tools, prompt_cache]
+      pricing: { inputPer1M: 0.07, outputPer1M: 0.17, cachedInputPer1M: 0.075 }
+      tags: [remote, cheap]
+
+    - id: or-quality
+      endpoint: openrouter
+      model: anthropic/claude-sonnet-4.5
+      contextWindow: 200000
+      maxOutputTokens: 16384
+      capabilities: [json_schema, tools, reasoning, prompt_cache]
+      pricing: { inputPer1M: 3, outputPer1M: 15, cachedInputPer1M: 0.3 }
+      reasoning: { enabled: false, effort: medium, dialect: reasoning }
+      params: { temperature: 0.1 }
+      tags: [remote, quality]
+
+  routing:
+    # cost-optimized | context-optimized | sequential | round-robin
+    strategy: cost-optimized
+    pools:
+      default: [or-cheap]
+      # Extraction is mechanical: start cheap, escalate only on failure.
+      extract: [or-cheap]
+      # Translation is quality-sensitive: prefer the strong model first.
+      translate: [or-cheap]
+    options: {}
+
+  defaults:
+    timeoutMs: 120000
+    params:
+      temperature: 0.2
+
+# --------------------------------------------------------------------------
+# Failure handling. `retry` = same model; `fallback` = next model in the pool.
+# --------------------------------------------------------------------------
+reliability:
+  retry:
+    maxAttempts: 3
+    initialDelayMs: 500
+    maxDelayMs: 20000
+    factor: 2
+    jitter: full
+    respectRetryAfter: true
+  fallback:
+    maxTargets: 3
+    onValidationFailure: true
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 5
+    resetAfterMs: 30000
+
+# --------------------------------------------------------------------------
+# Spending guard rails. 0 = unlimited.
+# --------------------------------------------------------------------------
+cost:
+  budget:
+    maxRequests: 0
+    maxTotalTokens: 0
+    maxCostUsd: 0
+  onExceeded: stop
+
+# --------------------------------------------------------------------------
+# How much of a document to send, and in what order to escalate.
+#   full             whole document, one call
+#   truncation-first head slice first, whole document only if that is rejected
+#   chunked          split into token-bounded chunks, merge the results
+#   staged           head -> head+tail -> chunked
+# --------------------------------------------------------------------------
+context:
+  strategy: truncation-first
+  tokenEstimator:
+    type: heuristic
+    charsPerToken: 3.2 # cyrillic/CJK pack fewer chars per token than latin
+  reserveOutputTokens: 2048
+  safetyMarginRatio: 0.9
+  truncation:
+    headTokens: 1500
+    tailTokens: 0
+  chunking:
+    maxTokens: 2500
+    overlapTokens: 150
+    splitOn: heading
+
+# --------------------------------------------------------------------------
+# Prompt templates live in files so they can be edited and diffed on their own.
+# A template change alters the task fingerprint and invalidates cached results.
+# --------------------------------------------------------------------------
+prompts:
+  dir: prompts
+  templates:
+    extract:
+      system: extraction/system.md
+      user: extraction/user.md
+    # Used by tasks.translate.mode = document
+    translate:
+      system: translation/system.md
+      user: translation/user.md
+    # Used by tasks.translate.mode = segments
+    translateSegments:
+      system: translation/segments-system.md
+      user: translation/segments-user.md
+    localize:
+      system: localization/system.md
+      user: localization/user.md
+  variables:
+    projectName: Guitar codex
+
+# --------------------------------------------------------------------------
+run:
+  concurrency: 1
+  stateDir: .biomd/runs
+  resume: auto # auto | off | <runId>
+  dryRun: false
+  failFast: false
+  skipExistingOutputs: false
+
+logging:
+  level: info
+  console: pretty # pretty | json | off
+  file: .biomd/logs/biomd.jsonl

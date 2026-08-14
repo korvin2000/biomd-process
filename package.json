@@ -1,0 +1,53 @@
+{
+  "name": "biomd-process",
+  "version": "0.1.0",
+  "description": "Extensible LLM batch-processing platform for bio.md documents: metadata extraction and structure-preserving translation.",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.10"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "biomd": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "config"
+  ],
+  "scripts": {
+    "biomd": "tsx src/cli/main.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare": "node -e \"0\""
+  },
+  "dependencies": {
+    "cli-progress": "^3.12.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "eta": "^3.5.0",
+    "fast-glob": "^3.3.3",
+    "openai": "^4.77.0",
+    "p-queue": "^8.0.1",
+    "picocolors": "^1.1.1",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.1",
+    "zod-to-json-schema": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cli-progress": "^3.11.6",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
+  }
+}

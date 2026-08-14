@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "forename": "Джанго",
+    "surname": "Рейнхардт",
+    "birthname": "Жан Рейнхардт",
+    "birthplace": "Либерши, Бельгия",
+    "deathplace": "Самуа-сюр-Сен, Франция",
+    "dates": {
+      "born": "23.01.1910",
+      "died": "16.05.1953",
+      "activeFrom": "01.01.1928",
+      "activeTo": "16.05.1953"
+    },
+    "relatives": "Жозеф Рейнхардт,Бабик Рейнхардт",
+    "instruments": "гитара,банджо-гитара",
+    "genres": "джаз,джаз-мануш,свинг",
+    "bands": "Квинтет «Хот-клуба Франции»",
+    "teachers": "Самоучка",
+    "jobs": "Гитарист,Композитор",
+    "ranking": 95,
+    "url": "https://www.jazz.com/encyclopedia/reinhardt-django-jean-baptiste"
+  },
+  "media": {
+    "photos": [
+      {
+        "label": "Концертный портрет",
+        "target": "https://placehold.co/500x620?text=Django+Reinhardt"
+      },
+      {
+        "label": "Квинтет «Хот-клуба Франции»",
+        "target": "https://placehold.co/500x620?text=Hot+Club+Quintette"
+      }
+    ],
+    "music": []
+  },
+  "documents": [
+    {
+      "label": "Статья в энциклопедии Jazz.com",
+      "type": "REFERENCE",
+      "target": "https://www.jazz.com/encyclopedia/reinhardt-django-jean-baptiste"
+    }
+  ]
+}
