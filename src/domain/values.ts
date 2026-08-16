@@ -22,21 +22,92 @@ import { resolveDocumentType } from './vocabulary.js';
 const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /**
- * `"1893-02-21"` | `"21.2.1893"` | `"21/02/1893"` → `"21.02.1893"`.
+ * How much of a date is known.
  *
- * Partial dates are **not representable** in this format: `external/02`
- * requires a date not known to the day to be omitted rather than approximated,
- * and `external/05` §5.11 lists `"born": "1885"` as an anti-pattern. So a bare
- * year, a month-and-year, `"c. 1885"` and every qualified form return
- * `undefined` — the prose belongs in the article.
+ * `external/02` says a date not known to the day is not representable and must
+ * be omitted. That rule loses real information — a biography that says "born in
+ * 1885" then publishes nothing at all — so this deployment lowers the floor
+ * instead of dropping the fact, and the floor is a setting
+ * (`catalogue.datePrecision`) rather than a constant.
+ *
+ * The published form is the canonical `DD.MM.YYYY` **truncated from the left**:
+ *
+ * | precision | value |
+ * |---|---|
+ * | `day` | `"21.02.1893"` |
+ * | `month` | `"02.1893"` |
+ * | `year` | `"1893"` |
+ *
+ * That shape is deliberate. VD-DATE requires a consumer to treat a value that
+ * does not match `\d{1,2}\.\d{1,2}\.\d{4}` as **absent**, so a strict reader
+ * silently ignores `"1893"` and behaves exactly as it would have if the field
+ * had been dropped — while a reader that wants the year can have it.
+ */
+export type DatePrecision = 'day' | 'month' | 'year';
+
+const PRECISION_RANK: Record<DatePrecision, number> = { day: 3, month: 2, year: 1 };
+
+/** Month names in the corpus languages, so a spelled-out month costs no retry. */
+const MONTH_NAMES: Record<string, number> = {};
+{
+  const table: Record<string, string[]> = {
+    // Russian, nominative and genitive — an article writes "21 февраля 1893".
+    ru: [
+      'январ', 'феврал', 'март', 'апрел', 'ма', 'июн', 'июл', 'август', 'сентябр', 'октябр', 'ноябр', 'декабр',
+    ],
+    en: ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'],
+    es: ['ener', 'febrer', 'marz', 'abril', 'may', 'juni', 'juli', 'agost', 'septiembr', 'octubr', 'noviembr', 'diciembr'],
+    de: ['januar', 'februar', 'märz', 'april', 'mai', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'dezember'],
+    fr: ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
+    it: ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'],
+    pt: ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'],
+  };
+  for (const stems of Object.values(table)) {
+    stems.forEach((stem, index) => {
+      MONTH_NAMES[stem] = index + 1;
+    });
+  }
+}
+
+/** Qualifiers that mean "about". The year survives them; the hedge does not. */
+const APPROXIMATE = /^(?:c\.?|ca\.?|circa|about|around|~|ок\.?|около|прибл\.?|примерно|etwa|vers|hacia)\s+/i;
+
+/**
+ * `"1893-02-21"` | `"21.2.1893"` | `"21 февраля 1893"` → `"21.02.1893"`.
+ * `"05.1885"` | `"May 1885"` → `"05.1885"`. `"c. 1885"` → `"1885"`.
+ *
+ * Wide on input, narrow on output, and never a guess: a date whose day is not
+ * stated is emitted as the month or the year it *is* known to, not padded to
+ * the first of the month. `minPrecision` is the floor — anything coarser than
+ * it returns `undefined`, so passing `'day'` restores the specification's own
+ * behaviour exactly.
  *
  * The calendar is checked as well as the grammar. A consumer only validates day
  * 1–31 and month 1–12 and must not crash on `31.02.1900`, but a *producer* that
  * writes it has published a date that does not exist.
  */
-export function normalizeDate(raw: string): string | undefined {
-  const value = raw.trim();
+export function normalizeDate(raw: string, minPrecision: DatePrecision = 'day'): string | undefined {
+  const parsed = parseDate(raw);
+  if (!parsed) return undefined;
+  if (PRECISION_RANK[parsed.precision] < PRECISION_RANK[minPrecision]) return undefined;
+  return parsed.value;
+}
+
+export interface ParsedDate {
+  value: string;
+  precision: DatePrecision;
+  year: number;
+  month?: number;
+  day?: number;
+}
+
+/** The reading of a date value, whatever its precision. */
+export function parseDate(raw: string): ParsedDate | undefined {
+  const value = raw.trim().replace(/[,;]+$/, '').replace(APPROXIMATE, '').trim();
   if (!value) return undefined;
+
+  // Ranges and open-ended forms name two dates; neither is *the* date.
+  if (/[–—]|\s-\s|\d{4}\s*[-–—/]\s*\d{4}/.test(value)) return undefined;
 
   const iso = /^(\d{4})[-.](\d{1,2})[-.](\d{1,2})$/.exec(value);
   if (iso) return assemble(iso[3], iso[2], iso[1]);
@@ -44,21 +115,82 @@ export function normalizeDate(raw: string): string | undefined {
   const dotted = /^(\d{1,2})[.\-/\s](\d{1,2})[.\-/\s](\d{4})$/.exec(value);
   if (dotted) return assemble(dotted[1], dotted[2], dotted[3]);
 
+  const isoMonth = /^(\d{4})[-.](\d{1,2})$/.exec(value);
+  if (isoMonth) return assemble(undefined, isoMonth[2], isoMonth[1]);
+
+  const dottedMonth = /^(\d{1,2})[.\-/](\d{4})$/.exec(value);
+  if (dottedMonth) return assemble(undefined, dottedMonth[1], dottedMonth[2]);
+
+  const spelled = spelledOut(value);
+  if (spelled) return spelled;
+
+  const year = /^(\d{4})(?:\s*(?:г\.?|года|year))?$/i.exec(value);
+  if (year) return assemble(undefined, undefined, year[1]);
+
   return undefined;
 }
 
-function assemble(day = '', month = '', year = ''): string | undefined {
-  const d = Number(day);
-  const m = Number(month);
-  const y = Number(year);
+/** Grammar glue between the parts of a spelled-out date, in the corpus languages. */
+const DATE_FILLER = /^(?:г|гг|года|году|of|the|de|del|dell|dello|di|der|des|el|le|la|em|no|nel|en)$/;
 
-  if (!Number.isInteger(d) || !Number.isInteger(m) || !Number.isInteger(y)) return undefined;
-  if (m < 1 || m > 12 || d < 1 || y < 1000 || y > 9999) return undefined;
+/** `"21 февраля 1893"`, `"February 1893"`, `"Feb 21, 1893"`, `"21 de marzo de 1893"`. */
+function spelledOut(value: string): ParsedDate | undefined {
+  const words = value
+    .toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word && !DATE_FILLER.test(word));
+  if (words.length < 2 || words.length > 3) return undefined;
+
+  let day: string | undefined;
+  let month: number | undefined;
+  let year: string | undefined;
+
+  for (const word of words) {
+    if (/^\d{4}$/.test(word)) {
+      year ??= word;
+      continue;
+    }
+    if (/^\d{1,2}(?:st|nd|rd|th|-?(?:го|е))?$/.test(word)) {
+      day ??= word.replace(/\D/g, '');
+      continue;
+    }
+    // A word that is neither a number nor a month name means this is prose,
+    // not a date — reading half of it would invent the other half.
+    const named = monthOf(word);
+    if (named === undefined || month !== undefined) return undefined;
+    month = named;
+  }
+
+  if (!year || month === undefined) return undefined;
+  return assemble(day, String(month), year);
+}
+
+function monthOf(word: string): number | undefined {
+  for (const [stem, index] of Object.entries(MONTH_NAMES)) {
+    if (word.startsWith(stem)) return index;
+  }
+  return undefined;
+}
+
+function assemble(day: string | undefined, month: string | undefined, year = ''): ParsedDate | undefined {
+  const y = Number(year);
+  if (!Number.isInteger(y) || y < 1000 || y > 9999) return undefined;
+  if (month === undefined || month === '') return { value: year, precision: 'year', year: y };
+
+  const m = Number(month);
+  if (!Number.isInteger(m) || m < 1 || m > 12) return undefined;
+  if (day === undefined || day === '') {
+    return { value: `${pad(m)}.${year}`, precision: 'month', year: y, month: m };
+  }
+
+  const d = Number(day);
+  if (!Number.isInteger(d) || d < 1) return undefined;
 
   const limit = m === 2 && !isLeapYear(y) ? 28 : (DAYS_IN_MONTH[m - 1] ?? 31);
   if (d > limit) return undefined;
 
-  return `${pad(d)}.${pad(m)}.${year}`;
+  return { value: `${pad(d)}.${pad(m)}.${year}`, precision: 'day', year: y, month: m, day: d };
 }
 
 function isLeapYear(year: number): boolean {
@@ -66,10 +198,52 @@ function isLeapYear(year: number): boolean {
 }
 
 /** True for a value already in the canonical or tolerated authored form. */
-export function isValidDate(value: string): boolean {
-  if (!/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(value.trim())) return false;
-  const [day, month] = value.trim().split('.').map(Number);
-  return (day ?? 0) >= 1 && (day ?? 0) <= 31 && (month ?? 0) >= 1 && (month ?? 0) <= 12;
+export function isValidDate(value: string, minPrecision: DatePrecision = 'day'): boolean {
+  const trimmed = value.trim();
+  const precision = datePrecisionOf(trimmed);
+  if (!precision || PRECISION_RANK[precision] < PRECISION_RANK[minPrecision]) return false;
+
+  const parts = trimmed.split('.').map(Number);
+  const day = precision === 'day' ? parts[0] : undefined;
+  const month = precision === 'day' ? parts[1] : precision === 'month' ? parts[0] : undefined;
+
+  if (day !== undefined && (day < 1 || day > 31)) return false;
+  if (month !== undefined && (month < 1 || month > 12)) return false;
+  return true;
+}
+
+/** How precise an already-canonical value is, by counting its components. */
+export function datePrecisionOf(value: string): DatePrecision | undefined {
+  const trimmed = value.trim();
+  if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(trimmed)) return 'day';
+  if (/^\d{1,2}\.\d{4}$/.test(trimmed)) return 'month';
+  if (/^\d{4}$/.test(trimmed)) return 'year';
+  return undefined;
+}
+
+/**
+ * True when `candidate` is a strictly sharper reading of `current` — same year,
+ * same month where both state one.
+ *
+ * This is the one case where a fresh reading may overwrite a value already on
+ * disk: `"1893"` and `"21.02.1893"` are not two competing facts, they are one
+ * fact known to two depths, and refusing the sharper one keeps a placeholder
+ * forever.
+ */
+export function refinesDate(current: string, candidate: string): boolean {
+  const from = parseDate(current);
+  const to = parseDate(candidate);
+  if (!from || !to) return false;
+  if (PRECISION_RANK[to.precision] <= PRECISION_RANK[from.precision]) return false;
+
+  if (from.year !== to.year) return false;
+  if (from.month !== undefined && from.month !== to.month) return false;
+  return true;
+}
+
+/** The year of a canonical value, for the arithmetic an age check needs. */
+export function yearOf(value: string): number | undefined {
+  return parseDate(value)?.year;
 }
 
 // ---------------------------------------------------------------------------

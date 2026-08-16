@@ -62,7 +62,7 @@ export function createRunCommand(): Command {
 }
 
 /** Every pipeline `--only` may name. A typo would otherwise disable all of them. */
-const PIPELINE_IDS = ['extract', 'translate', 'localize', 'catalog'] as const;
+const PIPELINE_IDS = ['extract', 'websearch', 'translate', 'localize', 'portrait', 'catalog'] as const;
 
 async function runAction(options: RunOptions & { resumeRun?: string }): Promise<void> {
   const unknown = splitList(options.only)?.filter((id) => !PIPELINE_IDS.includes(id as never)) ?? [];
@@ -130,8 +130,10 @@ function buildOverrides(options: RunOptions & { resumeRun?: string }): DeepParti
     output: { baseDir: options.out },
     tasks: {
       extract: { enabled: only('extract') },
+      websearch: { enabled: only('websearch') },
       translate: { enabled: only('translate'), targetLanguages: languages },
       localize: { enabled: only('localize'), targetLanguages: languages },
+      portrait: { enabled: only('portrait') },
       catalog: { enabled: only('catalog') },
     },
     llm: { routing: { strategy: options.strategy } },

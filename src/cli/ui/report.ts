@@ -86,7 +86,9 @@ export function printPlan(app: App, plan: JobPlan): void {
     OUT.write(
       pc.dim(
         '\nEstimate assumes the whole document reaches the first-choice model. ' +
-          'Segment mode, metadata localization and prompt caching send less; retries and fallbacks cost more.\n',
+          'Segment mode, metadata localization and prompt caching send less; retries and fallbacks cost more. ' +
+          'Web search is the largest overestimate here: it sends an identity card, not the article, ' +
+          'and skips the call entirely for an entry with no gaps.\n',
       ),
     );
   }

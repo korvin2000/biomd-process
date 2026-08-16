@@ -66,6 +66,15 @@ export const capabilitySchema = z.enum([
   'reasoning',
   'prompt_cache',
   'vision',
+  /**
+   * The model can search the web as part of answering — a hosted search model
+   * (`perplexity/sonar`, `*-search-preview`), a gateway plugin (OpenRouter's
+   * `plugins: [{ id: "web" }]` or an `:online` model suffix), or a server-side
+   * tool. Declared per model, and `tasks.websearch` routes only to targets that
+   * have it: a model without search answers the same questions from memory,
+   * confidently and without a source.
+   */
+  'web_search',
 ]);
 
 export const pricingSchema = z.object({
@@ -288,6 +297,10 @@ export const outputSchema = z.object({
       // Internal hand-off from `extract` to `catalog`, not part of the published
       // format — dot-prefixed so the consuming site ignores the directory.
       catalogHints: '.hints/{slug}.json',
+      // The chosen portrait, plus the runners-up and why they lost. Internal.
+      portraitHints: '.hints/{slug}.portrait.json',
+      // Classification the web supplied that `index.json` owns. Internal.
+      websearchHints: '.hints/{slug}.web.json',
     }),
   onExisting: z.enum(['skip', 'overwrite', 'fail']).default('overwrite'),
   /** Pretty-print JSON artifacts. */
@@ -485,6 +498,111 @@ export const localizeTaskSchema = taskBase
   .default({});
 
 /**
+ * Filling the gaps an article does not contain, from the web.
+ *
+ * Every default here is set to keep the task cheap and quiet: it asks only
+ * about fields that are genuinely absent, it never sends the article, and it
+ * refuses an answer that arrives without a source.
+ */
+export const webSearchTaskSchema = taskBase
+  .extend({
+    /** The dossier is rewritten in place, so this is `extract`'s channel. */
+    outputChannel: z.string().default('metadata'),
+    /** `country` belongs to `index.json`, so it travels on its own hint channel. */
+    hintsChannel: z.string().default('websearchHints'),
+    /** Which facts this task may go looking for. */
+    fields: z
+      .array(z.enum(['born', 'died', 'birthplace', 'deathplace', 'country', 'url']))
+      .default(['born', 'died', 'birthplace', 'deathplace', 'country']),
+    /**
+     * Route only to models that declare the `web_search` capability.
+     *
+     * Leaving this on is what separates "searched and found" from "recalled and
+     * asserted": a model without search will answer these questions anyway.
+     */
+    requireWebSearchCapability: z.boolean().default(true),
+    /** Drop any value that arrives without a usable source URL. */
+    requireSource: z.boolean().default(true),
+    /** Drop any value the answer itself rates below this. */
+    minConfidence: z.number().min(0).max(1).default(0.7),
+    /**
+     * Age past which an undated death becomes a question.
+     *
+     * Not a claim that anyone has died — it is the age past which "the article
+     * does not mention a death" stops being evidence that there was none,
+     * because the article may simply predate it.
+     */
+    livenessAgeYears: z.number().int().min(1).max(130).default(78),
+    /** Also ask for a sharper form of a date already known to the year or month. */
+    upgradePrecision: z.boolean().default(false),
+    /**
+     * `lead` sends the article's opening paragraph so a namesake can be told
+     * apart; `none` sends only the fact table. The article itself is never sent.
+     */
+    includeContext: z.enum(['none', 'lead']).default('lead'),
+    contextChars: z.number().int().nonnegative().default(600),
+    /** `url` fills an empty `metadata.url` from the best source; `none` keeps provenance in the run log only. */
+    recordSources: z.enum(['none', 'url']).default('url'),
+  })
+  .default({});
+
+/**
+ * Portrait selection from an existing image index. Promptless and LLM-free:
+ * the whole decision is name matching plus the index's own `ai` block.
+ */
+export const portraitTaskSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** The image index (`images/artists.json`), relative to `project.rootDir`. */
+    indexFile: z.string().default('images/artists.json'),
+    /**
+     * Prepended to the index's `relPath` to make a `VD-PATH-ASSET` value.
+     *
+     * `img` resolves against the **catalogue root**, so this is where the
+     * scanned image tree sits under it: `pages/` + `photo/s/x.jpg` →
+     * `pages/photo/s/x.jpg`.
+     */
+    assetPrefix: z.string().default('pages/'),
+    outputChannel: z.string().default('portraitHints'),
+    /**
+     * How sure the matcher must be that the picture shows *this* person.
+     *
+     * The score is identity only: a beautiful portrait of the wrong person is
+     * not a candidate, and picture quality never compensates for a weak name
+     * match (`image-index-spec.md` §16). 0.9 accepts a clean family-name match
+     * on a file the archive files under this person, and refuses a fuzzy one
+     * with no corroboration.
+     */
+    minIdentity: z.number().min(0).max(1).default(0.9),
+    /** Worst visual tier allowed to win: 1 = one face and a person class. */
+    maxTier: z.number().int().min(1).max(4).default(2),
+    /** Smaller than this on the short side and there is nothing to crop. */
+    minPixels: z.number().int().nonnegative().default(80),
+    /** A record sleeve is artwork with a name printed on it, not a photograph. */
+    excludeReleaseCovers: z.boolean().default(true),
+    /** Runners-up kept in the hint file, for tuning and for review. */
+    keepCandidates: z.number().int().min(0).max(50).default(8),
+    /**
+     * What to publish when nothing clears `minIdentity`.
+     *
+     * `omit` (default) writes no `img`, which is what `external/03` §3.4.9
+     * already specifies: the reader substitutes the gender default, and those
+     * synthetic assets stay out of the entry's gallery. `default` writes the
+     * asset path explicitly — visible in `index.json`, at the price of the
+     * placeholder leading the gallery.
+     */
+    onLowConfidence: z.enum(['omit', 'default']).default('omit'),
+    defaultPortraits: z
+      .object({
+        m: z.string().default('photos/default-male.svg'),
+        f: z.string().default('photos/default-female.svg'),
+        mixed: z.string().default('photos/default-mixed.svg'),
+      })
+      .default({}),
+  })
+  .default({});
+
+/**
  * Catalogue aggregation. Promptless and LLM-free: it reads what the other
  * pipelines produced and indexes it.
  */
@@ -505,6 +623,10 @@ export const catalogTaskSchema = z
     merge: z.boolean().default(true),
     /** Where `extract` left the classification it noticed while reading the article. */
     hintsChannel: z.string().default('catalogHints'),
+    /** Where `portrait` left the picture it chose. Read only when that task runs. */
+    portraitChannel: z.string().default('portraitHints'),
+    /** Where `websearch` left the classification it found. Lowest precedence. */
+    websearchChannel: z.string().default('websearchHints'),
     /**
      * Search aliases beyond the display name — the bare surname, the inverted
      * order, and a romanization for non-Latin scripts. Aliases are what makes
@@ -517,8 +639,10 @@ export const catalogTaskSchema = z
 export const tasksSchema = z
   .object({
     extract: extractTaskSchema,
+    websearch: webSearchTaskSchema,
     translate: translateTaskSchema,
     localize: localizeTaskSchema,
+    portrait: portraitTaskSchema,
     catalog: catalogTaskSchema,
   })
   .default({});
@@ -545,6 +669,20 @@ export const catalogueSchema = z
       .array(z.string().regex(/^[a-z]{2}$/, 'must be a lowercase ISO 639-1 code'))
       .min(1)
       .default(['en', 'es', 'ja', 'de', 'fr', 'it', 'pt', 'ru', 'zh', 'ko']),
+    /**
+     * The coarsest date this catalogue publishes.
+     *
+     * `external/02` says a date not known to the day is not representable and
+     * must be omitted — which throws away a real fact whenever an article says
+     * only "born in 1885". `month` and `year` lower that floor and publish the
+     * canonical form truncated from the left: `"02.1893"`, `"1893"`.
+     *
+     * The cost is stated once, here: VD-DATE requires a consumer to treat a
+     * value outside `\d{1,2}\.\d{1,2}\.\d{4}` as **absent**, so a strict reader
+     * ignores a partial date and behaves exactly as if the field had been
+     * dropped. Nothing breaks; a reader that wants the year has to ask for it.
+     */
+    datePrecision: z.enum(['day', 'month', 'year']).default('year'),
     /** `type` for a biography nothing else classified. */
     defaultType: z.string().default('musician'),
     /**
@@ -564,7 +702,7 @@ export const catalogueSchema = z
   .default({});
 
 /** Tasks that drive an LLM and therefore require prompt templates. */
-const LLM_TASK_IDS = new Set(['extract', 'translate', 'localize']);
+const LLM_TASK_IDS = new Set(['extract', 'websearch', 'translate', 'localize']);
 
 // ---------------------------------------------------------------------------
 // Prompts, run, logging
@@ -577,6 +715,7 @@ export const promptsSchema = z
       .record(z.object({ system: z.string().min(1), user: z.string().min(1) }))
       .default({
         extract: { system: 'extraction/system.md', user: 'extraction/user.md' },
+        websearch: { system: 'websearch/system.md', user: 'websearch/user.md' },
         translate: { system: 'translation/system.md', user: 'translation/user.md' },
         translateSegments: { system: 'translation/segments-system.md', user: 'translation/segments-user.md' },
         localize: { system: 'localization/system.md', user: 'localization/user.md' },
@@ -656,6 +795,8 @@ export type ExtractTaskConfig = z.infer<typeof extractTaskSchema>;
 export type TranslateTaskConfig = z.infer<typeof translateTaskSchema>;
 export type LocalizeTaskConfig = z.infer<typeof localizeTaskSchema>;
 export type CatalogTaskConfig = z.infer<typeof catalogTaskSchema>;
+export type PortraitTaskConfig = z.infer<typeof portraitTaskSchema>;
+export type WebSearchTaskConfig = z.infer<typeof webSearchTaskSchema>;
 export type PromptsConfig = z.infer<typeof promptsSchema>;
 export type RunConfig = z.infer<typeof runSchema>;
 export type LoggingConfig = z.infer<typeof loggingSchema>;
@@ -763,6 +904,26 @@ function crossFieldChecks(config: z.infer<typeof rawShape>, ctx: z.RefinementCtx
     if (config.tasks.catalog.localizedNames) {
       requireChannel('catalog', config.tasks.catalog.localizedIndexChannel);
     }
+    requireChannel('catalog', config.tasks.catalog.portraitChannel);
+    requireChannel('catalog', config.tasks.catalog.websearchChannel);
+  }
+
+  if (config.tasks.websearch.enabled) {
+    requireChannel('websearch', config.tasks.websearch.hintsChannel);
+
+    const searchable = config.llm.models.filter(
+      (model) => model.enabled && model.capabilities.includes('web_search'),
+    );
+    if (config.tasks.websearch.requireWebSearchCapability && searchable.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models'],
+        message:
+          'Task "websearch" routes only to models declaring the `web_search` capability, and none does. ' +
+          'Add it to a search-capable model (a hosted search model, or one with an `:online`/web-plugin ' +
+          'gateway setting), or set tasks.websearch.requireWebSearchCapability: false.',
+      });
+    }
   }
 }
 
@@ -772,4 +933,5 @@ const rawShape = z.object({
   tasks: tasksSchema,
   prompts: promptsSchema,
   output: outputSchema,
+  catalogue: catalogueSchema,
 });

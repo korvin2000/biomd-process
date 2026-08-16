@@ -20,11 +20,14 @@ import { Router } from '../routing/Router.js';
 import { RoutingStrategyRegistry } from '../routing/StrategyRegistry.js';
 import { TargetStatsRegistry } from '../routing/TargetStats.js';
 import { PipelineRegistry } from '../core/PipelineRegistry.js';
+import { ImageIndexStore } from '../images/ImageIndexStore.js';
 import { CatalogPipeline } from '../pipelines/catalog/CatalogPipeline.js';
 import { ExtractionPipeline } from '../pipelines/extraction/ExtractionPipeline.js';
 import { LocalizePipeline } from '../pipelines/localization/LocalizePipeline.js';
+import { PortraitPipeline } from '../pipelines/portrait/PortraitPipeline.js';
 import { TranslationMemoryRegistry } from '../pipelines/localization/TranslationMemoryRegistry.js';
 import { TranslationPipeline } from '../pipelines/translation/TranslationPipeline.js';
+import { WebSearchPipeline } from '../pipelines/websearch/WebSearchPipeline.js';
 import { ObserverHub } from './ObserverHub.js';
 
 export interface App {
@@ -45,6 +48,8 @@ export interface App {
   segmenter: Segmenter;
   source: SourceProvider;
   writer: ArtifactWriter;
+  /** The image index behind portrait selection; cached for the whole run. */
+  images: ImageIndexStore;
   memories: TranslationMemoryRegistry;
   pipelines: PipelineRegistry;
   metrics: MetricsCollector;
@@ -104,6 +109,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
   );
 
   const segmenter = new Segmenter(estimator);
+  const images = new ImageIndexStore(paths);
   const app: App = {
     config,
     configFile: loaded.file,
@@ -121,11 +127,14 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
     segmenter,
     source: new FileSystemSource(config.input, paths, estimator),
     writer: new FileArtifactWriter(config.output, paths, dryRun),
+    images,
     memories: new TranslationMemoryRegistry(paths.resolve(config.run.memoryDir), logger, dryRun),
     pipelines: new PipelineRegistry()
       .register(new ExtractionPipeline())
+      .register(new WebSearchPipeline())
       .register(new TranslationPipeline())
       .register(new LocalizePipeline())
+      .register(new PortraitPipeline(images))
       .register(new CatalogPipeline()),
     metrics,
     budget,

@@ -1,30 +1,34 @@
 # biomd-process
 
-Batch-process `bio.md` Markdown documents with LLMs. Four task types ship with it:
+Batch-process `bio.md` Markdown documents with LLMs. Six task types ship with it:
 
 - **`extract`** — heuristic metadata extraction into a dossier JSON.
+- **`websearch`** — the facts the article does not contain, from a model with web
+  search; also re-checks a death the article is too old to mention.
 - **`translate`** — structure-preserving translation into a configurable list of
   languages.
 - **`localize`** — the per-language *edition* of the dossier, with the
   language-invariant fields copied verbatim.
+- **`portrait`** — LLM-free selection of the entry's portrait out of an existing
+  image index.
 - **`catalog`** — optional, LLM-free aggregation into `index.json` and the
   `index-<lang>.json` name files.
 
-Any combination can run in one job. With all four on, `ru/paco.bio.md` produces:
+Any combination can run in one job. With all of them on, `ru/paco.bio.md` produces:
 
 ```
-out/ru/paco.bio.json    dossier extracted from the article
+out/ru/paco.bio.json    dossier extracted from the article, completed from the web
 out/en/paco.bio.md      translated article
 out/en/paco.bio.json    dossier localized into English
-out/index.json          catalogue index + index-en.json, index-ru.json
+out/index.json          catalogue index (incl. the chosen portrait) + index-en.json, index-ru.json
 ```
 
-> **Status: v0.1.** The orchestration, routing, reliability, cost control, resume
-> and observability layers are complete and tested, and the domain rules that
-> `docs/MetaData.md` and `docs/Catalog-Index.md` specify are implemented behind
-> the narrow contracts that were built for them — date and list normalization,
-> structure tolerance, catalogue classification, Latin titles and search aliases.
-> Grep `TODO(domain)` for what is still open.
+> **Status: v0.3.** The orchestration, routing, reliability, cost control, resume
+> and observability layers are complete and tested. The published format lives in
+> `src/domain`, implemented against the normative specification in `external/`,
+> and `biomd validate` checks the output against its invariant list. v0.3 added
+> the two sources of fact an article does not contain — an image index and the
+> web — and made a year-only date publishable instead of dropped.
 > See [Extending](#extending) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
@@ -62,6 +66,8 @@ to execute.
 | `models` | List resolved model targets, pools, and a routing preview. |
 | `prompts list` / `prompts show <task>` | Inspect and render templates without spending tokens. |
 | `report [runId]` | Summarize a finished run from its journal. |
+| `portrait <who…>` | Search the image index for one person and print the ranking with its reasoning. Spends nothing. |
+| `validate [dir]` | Check a published catalogue against the format invariants. Spends nothing. |
 
 Useful `run` flags: `--only extract,translate`, `--lang en,de`, `--limit 10`,
 `--concurrency 8`, `--strategy context-optimized`, `--budget-usd 5`,
@@ -111,6 +117,13 @@ editions by construction rather than by instruction.
 On top of that, prompts are assembled stable-part-first so provider caches hit
 across the corpus, context strategies escalate cheapest-first, and budgets in
 requests, tokens or USD stop a run before it overspends.
+
+**Asking the right source.** An article that never states a birthplace does not
+start stating one on the third context rung, so `websearch` asks a different
+source instead — and only about fields that are genuinely missing, sending an
+eight-line identity card rather than the article. The portrait is chosen from an
+image index by name matching and the index's own classification, with no model
+involved at all.
 
 **Resume.** Each task carries a fingerprint over its input, its prompt templates
 and its output contract. Re-running an unchanged corpus issues zero calls; editing
@@ -179,13 +192,13 @@ const app = createApp(loaded, {
 await runJob(app);
 ```
 
-## Known gaps in v0.1
+## Known gaps
 
-- `tasks.extract.schemaFile` — pointing the extraction contract at an external
-  JSON Schema is declared but not implemented.
 - The Markdown skeleton does not model footnote ids.
-- `img` in `index.json` is preserved but never invented: choosing a portrait is
-  a curation decision, and a wrong one is worse than the format's gender default.
+- Two people with the same name cannot be told apart in the image index —
+  `photo/w/john_williams/` is the guitarist or the film composer depending on
+  facts no filename carries. `portrait` never overwrites a curated `img`, which
+  is the answer there.
 - Search aliases for CJK names depend entirely on the extraction hint — no
   algorithm gets from 塞戈维亚 back to "Segovia". That is a property of the
   problem, not of this implementation.

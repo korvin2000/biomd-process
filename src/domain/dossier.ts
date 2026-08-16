@@ -38,7 +38,9 @@ import {
   normalizeRanking,
   normalizeTarget,
   normalizeUrl,
+  refinesDate,
   text,
+  type DatePrecision,
 } from './values.js';
 import { resolveDocumentType, resolveEntryType, resolveGender } from './vocabulary.js';
 
@@ -47,6 +49,12 @@ export interface DossierOptions {
   supportedLanguages: readonly string[];
   /** Keep a craft the vocabulary does not know, rather than dropping it. */
   allowUnknownTypes?: boolean;
+  /**
+   * The coarsest date this catalogue publishes (`catalogue.datePrecision`).
+   * Defaults to the specification's own floor, so a caller that says nothing
+   * still gets `external/02` behaviour.
+   */
+  datePrecision?: DatePrecision;
 }
 
 export interface SanitizeResult {
@@ -210,7 +218,7 @@ function sanitizeMetadata(
     if (value) meta[key] = value;
   }
 
-  const dates = sanitizeDates(raw['dates'], notes);
+  const dates = sanitizeDates(raw['dates'], options.datePrecision ?? 'day', notes);
   if (dates) meta.dates = dates;
 
   if (raw['ranking'] !== undefined && raw['ranking'] !== null) {
@@ -257,7 +265,11 @@ function normalizeListValue(value: unknown, key: string, notes: string[]): strin
   return normalizeCsvList(raw) || undefined;
 }
 
-function sanitizeDates(raw: unknown, notes: string[]): Record<string, string> | undefined {
+function sanitizeDates(
+  raw: unknown,
+  precision: DatePrecision,
+  notes: string[],
+): Record<string, string> | undefined {
   if (!isObject(raw)) return undefined;
 
   const dates: Record<string, string> = {};
@@ -267,13 +279,13 @@ function sanitizeDates(raw: unknown, notes: string[]): Record<string, string> | 
     const value = text((raw as Record<string, unknown>)[key]);
     if (!value) continue;
 
-    const normalized = normalizeDate(value);
+    const normalized = normalizeDate(value, precision);
     if (!normalized) {
       dropped.push(`${key}="${value}"`);
       continue;
     }
     if (normalized !== value) {
-      notes.push(`Rewrote dates.${key} "${value}" as "${normalized}" (VD-DATE: DD.MM.YYYY).`);
+      notes.push(`Rewrote dates.${key} "${value}" as "${normalized}" (VD-DATE, ${precision} precision).`);
     }
     dates[key] = normalized;
   }
@@ -284,8 +296,8 @@ function sanitizeDates(raw: unknown, notes: string[]): Record<string, string> | 
 
   if (dropped.length > 0) {
     notes.push(
-      `Dropped unrepresentable date(s): ${dropped.join(', ')} — ` +
-        'a date not known to the day has no representation and belongs in the article.',
+      `Dropped unreadable date(s): ${dropped.join(', ')} — ` +
+        `nothing at least as precise as a ${precision} could be read from them.`,
     );
   }
   return Object.keys(dates).length > 0 ? dates : undefined;
@@ -428,6 +440,18 @@ export function mergeDossier(base: Dossier, incoming: Dossier, options: DossierO
       merged.metadata.dates = { ...(value as object), ...(merged.metadata.dates ?? {}) };
       const after = Object.keys(merged.metadata.dates).length;
       if (after > before) filled.push(`metadata.dates (+${after - before})`);
+
+      // The one overwrite this function performs: `1893` and `21.02.1893` are
+      // not two facts in conflict, they are one fact known to two depths.
+      for (const [dateKey, incomingValue] of Object.entries((value ?? {}) as Record<string, unknown>)) {
+        const current = merged.metadata.dates?.[dateKey as keyof typeof merged.metadata.dates];
+        if (typeof current !== 'string' || typeof incomingValue !== 'string') continue;
+        if (!refinesDate(current, incomingValue)) continue;
+
+        (merged.metadata.dates as Record<string, string>)[dateKey] = incomingValue;
+        filled.push(`metadata.dates.${dateKey} (${current} → ${incomingValue})`);
+        notes.push(`Sharpened dates.${dateKey} from "${current}" to "${incomingValue}".`);
+      }
       continue;
     }
 

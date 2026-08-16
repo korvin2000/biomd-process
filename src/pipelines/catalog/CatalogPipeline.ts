@@ -58,6 +58,7 @@ export class CatalogPipeline implements CorpusPipeline {
           generateAliases: config.generateAliases,
           merge: config.merge,
           catalogue: context.config.catalogue,
+          portraits: context.config.tasks.portrait.enabled,
         },
         promptVersion: 'none',
         usesLlm: false,
@@ -65,8 +66,10 @@ export class CatalogPipeline implements CorpusPipeline {
         // Everything the index describes must exist before it is indexed.
         dependsOn: [
           { pipeline: 'extract', scope: 'all' },
+          { pipeline: 'websearch', scope: 'all' },
           { pipeline: 'translate', scope: 'all' },
           { pipeline: 'localize', scope: 'all' },
+          { pipeline: 'portrait', scope: 'all' },
         ],
       },
     ];
@@ -221,16 +224,39 @@ export class CatalogPipeline implements CorpusPipeline {
 
   /**
    * The classification `extract` noticed while it had the article open, or
-   * migrated out of an existing version 1 dossier.
+   * migrated out of an existing version 1 dossier, plus the portrait `portrait`
+   * chose.
    *
    * Read from the source-language edition: nationality and craft are properties
    * of the person, so any edition would do, and the source one is the edition
    * guaranteed to exist. A missing file is normal.
+   *
+   * Precedence between the two hint files matters for one field. `extract`'s
+   * `img` came out of a hand-authored version 1 dossier — a curated choice —
+   * while `portrait`'s was derived by matching names against an image index. So
+   * the authored one wins, and the whole chain reads: **existing index row →
+   * authored hint → matched portrait → nothing** (and "nothing" is itself the
+   * specified way to get the default portrait).
    */
   private async readHints(item: WorkItem, context: ExecutionContext): Promise<CatalogHints> {
-    const file = this.pathOf(context.writer, context.config.tasks.catalog.hintsChannel, item, item.language);
-    if (!(await pathExists(file))) return {};
-    return (await readJsonFile<CatalogHints>(file).catch(() => ({}))) ?? {};
+    const config = context.config.tasks.catalog;
+    const [article, web, portrait] = await Promise.all([
+      this.readHintFile<CatalogHints>(config.hintsChannel, item, context),
+      this.readHintFile<CatalogHints>(config.websearchChannel, item, context),
+      this.readHintFile<{ img?: string }>(config.portraitChannel, item, context),
+    ]);
+
+    // Spread order *is* the precedence: what the article said outranks what a
+    // search found, and a derived portrait fills only a gap.
+    const hints: CatalogHints = { ...(web ?? {}), ...(article ?? {}) };
+    if (!hints.img && portrait?.img) hints.img = portrait.img;
+    return hints;
+  }
+
+  private async readHintFile<T>(channel: string, item: WorkItem, context: ExecutionContext): Promise<T | undefined> {
+    const file = this.pathOf(context.writer, channel, item, item.language);
+    if (!(await pathExists(file))) return undefined;
+    return (await readJsonFile<T>(file).catch(() => undefined)) ?? undefined;
   }
 
   private collectNames(

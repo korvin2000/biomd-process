@@ -10,11 +10,14 @@ import {
 } from '../src/domain/dossier.js';
 import type { Dossier } from '../src/domain/types.js';
 import {
+  datePrecisionOf,
+  isValidDate,
   normalizeCsvList,
   normalizeDate,
   normalizeRanking,
   normalizeTarget,
   normalizeUrl,
+  refinesDate,
   slugOf,
   normalizeId,
   isValidSlug,
@@ -34,11 +37,33 @@ describe('VD-DATE', () => {
     expect(normalizeDate('21/02/1893')).toBe('21.02.1893');
   });
 
-  it('refuses a partial date — the format cannot represent one', () => {
+  it('reads a month spelled out in any corpus language', () => {
+    expect(normalizeDate('21 февраля 1893')).toBe('21.02.1893');
+    expect(normalizeDate('February 21, 1893')).toBe('21.02.1893');
+    expect(normalizeDate('21 de marzo de 1893')).toBe('21.03.1893');
+  });
+
+  it('refuses a partial date at day precision, the specification default', () => {
     expect(normalizeDate('1885')).toBeUndefined();
     expect(normalizeDate('05.1885')).toBeUndefined();
     expect(normalizeDate('1893-02')).toBeUndefined();
     expect(normalizeDate('c. 1885')).toBeUndefined();
+  });
+
+  it('keeps what is known when the floor is lowered', () => {
+    expect(normalizeDate('1885', 'year')).toBe('1885');
+    expect(normalizeDate('05.1885', 'year')).toBe('05.1885');
+    expect(normalizeDate('1893-02', 'month')).toBe('02.1893');
+    expect(normalizeDate('май 1885', 'month')).toBe('05.1885');
+    expect(normalizeDate('c. 1885', 'year')).toBe('1885');
+    expect(normalizeDate('1885 г.', 'year')).toBe('1885');
+    // A month floor still refuses a bare year.
+    expect(normalizeDate('1885', 'month')).toBeUndefined();
+  });
+
+  it('refuses a range: two dates are named and neither is the date', () => {
+    expect(normalizeDate('1885–1890', 'year')).toBeUndefined();
+    expect(normalizeDate('1885 - 1890', 'year')).toBeUndefined();
   });
 
   it('refuses a date that is not on the calendar', () => {
@@ -46,6 +71,48 @@ describe('VD-DATE', () => {
     expect(normalizeDate('29.02.1900')).toBeUndefined();
     expect(normalizeDate('29.02.2000')).toBe('29.02.2000');
     expect(normalizeDate('31.04.1990')).toBeUndefined();
+  });
+
+  it('reports precision and recognizes a sharper reading of the same date', () => {
+    expect(datePrecisionOf('21.02.1893')).toBe('day');
+    expect(datePrecisionOf('02.1893')).toBe('month');
+    expect(datePrecisionOf('1893')).toBe('year');
+    expect(datePrecisionOf('21.02.93')).toBeUndefined();
+
+    expect(refinesDate('1893', '21.02.1893')).toBe(true);
+    expect(refinesDate('02.1893', '21.02.1893')).toBe(true);
+    // Not a refinement: a different year, a different month, or no gain.
+    expect(refinesDate('1893', '21.02.1894')).toBe(false);
+    expect(refinesDate('02.1893', '21.03.1893')).toBe(false);
+    expect(refinesDate('21.02.1893', '1893')).toBe(false);
+  });
+
+  it('validates partial values only when the floor allows them', () => {
+    expect(isValidDate('1893')).toBe(false);
+    expect(isValidDate('1893', 'year')).toBe(true);
+    expect(isValidDate('02.1893', 'year')).toBe(true);
+    expect(isValidDate('13.1893', 'year')).toBe(false);
+    expect(isValidDate('21.02.1893', 'year')).toBe(true);
+  });
+});
+
+describe('date precision in a dossier', () => {
+  const YEARS: DossierOptions = { ...OPTIONS, datePrecision: 'year' };
+
+  it('keeps a year-only date when the catalogue publishes one', () => {
+    const dossier = { metadata: { dates: { born: '1885', died: '03.1960', activeFrom: 'ерунда' } } };
+
+    expect(sanitizeDossier(dossier, OPTIONS).dossier.metadata.dates).toBeUndefined();
+    expect(sanitizeDossier(dossier, YEARS).dossier.metadata.dates).toEqual({ born: '1885', died: '03.1960' });
+  });
+
+  it('sharpens a date on merge but never replaces one with a different date', () => {
+    const base: Dossier = { metadata: { dates: { born: '1885', died: '21.02.1960' } } };
+    const incoming: Dossier = { metadata: { dates: { born: '05.05.1885', died: '01.01.1961' } } };
+
+    const merged = mergeDossier(base, incoming, YEARS);
+    expect(merged.dossier.metadata.dates).toEqual({ born: '05.05.1885', died: '21.02.1960' });
+    expect(merged.filled.some((entry) => entry.includes('born'))).toBe(true);
   });
 });
 

@@ -21,7 +21,14 @@ import {
   FORBIDDEN_DOSSIER_MEMBERS,
   type EntryRow,
 } from './types.js';
-import { isValidDate, isValidSlug, normalizeId, slugOf, text } from './values.js';
+import {
+  isValidDate,
+  isValidSlug,
+  normalizeId,
+  slugOf,
+  text,
+  type DatePrecision,
+} from './values.js';
 import { foldName, splitLanguages } from './catalog.js';
 
 export type Severity = 'error' | 'warning';
@@ -57,6 +64,12 @@ export interface ValidateOptions {
   supportedLanguages?: readonly string[];
   /** Skip the checks that need the filesystem, when the snapshot has no file list. */
   checkFiles?: boolean;
+  /**
+   * The coarsest date this catalogue publishes. `day` is `external/02` as
+   * written; anything looser accepts `"02.1893"` and `"1893"` as well, because
+   * this deployment chose to keep a partial date rather than lose the fact.
+   */
+  datePrecision?: DatePrecision;
 }
 
 const LATIN_SCRIPT_LANGUAGES = new Set(['en', 'es', 'de', 'fr', 'it', 'pt']);
@@ -74,7 +87,7 @@ export function validateCatalogue(snapshot: CatalogueSnapshot, options: Validate
   const titles = new Map(rows.map((row) => [row.id, text(row.title) ?? '']));
 
   checkNameIndices(snapshot, ids, titles, add);
-  checkDossiers(snapshot, supported, add);
+  checkDossiers(snapshot, supported, options.datePrecision ?? 'day', add);
   checkEditions(snapshot, rows, supported, options.checkFiles !== false, add);
   checkCrossEdition(snapshot, rows, add);
 
@@ -260,7 +273,12 @@ function checkNameIndices(
 // dossiers
 // ---------------------------------------------------------------------------
 
-function checkDossiers(snapshot: CatalogueSnapshot, supported: readonly string[], add: Emit): void {
+function checkDossiers(
+  snapshot: CatalogueSnapshot,
+  supported: readonly string[],
+  precision: DatePrecision,
+  add: Emit,
+): void {
   for (const [path, file] of snapshot.dossiers) {
     checkJsonHygiene(file, path, add);
 
@@ -291,9 +309,15 @@ function checkDossiers(snapshot: CatalogueSnapshot, supported: readonly string[]
     const dates = meta['dates'];
     if (isObject(dates)) {
       for (const [key, value] of Object.entries(dates as Record<string, unknown>)) {
-        if (typeof value !== 'string' || !isValidDate(value)) {
-          add('error', 'INV-21', path, `dates.${key} = ${JSON.stringify(value)} is not DD.MM.YYYY.`);
+        if (typeof value !== 'string' || !isValidDate(value, precision)) {
+          const wanted = precision === 'day' ? 'DD.MM.YYYY' : `DD.MM.YYYY, MM.YYYY or YYYY (${precision} precision)`;
+          add('error', 'INV-21', path, `dates.${key} = ${JSON.stringify(value)} is not ${wanted}.`);
         }
+        // A partial date raises nothing further. `catalogue.datePrecision` is
+        // this catalogue's statement of intent, and a validator that warned on
+        // every deliberate value would make `--strict` unusable — the cost of
+        // the choice (a strict VD-DATE reader treats `"1893"` as absent) is
+        // documented where the setting is, not repeated per row.
       }
     }
 

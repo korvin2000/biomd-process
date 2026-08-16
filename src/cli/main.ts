@@ -7,6 +7,7 @@ import { AppLogger } from '../observability/Logger.js';
 import { AppError } from '../shared/errors.js';
 import { createConfigCommand } from './commands/config.js';
 import { createModelsCommand } from './commands/models.js';
+import { createPortraitCommand } from './commands/portrait.js';
 import { createPromptsCommand } from './commands/prompts.js';
 import { createReportCommand } from './commands/report.js';
 import { createRunCommand } from './commands/run.js';
@@ -21,6 +22,7 @@ const program = new Command()
   .addCommand(createConfigCommand())
   .addCommand(createModelsCommand())
   .addCommand(createPromptsCommand())
+  .addCommand(createPortraitCommand())
   .addCommand(createReportCommand())
   .addCommand(createValidateCommand());
 

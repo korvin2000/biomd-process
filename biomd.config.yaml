@@ -41,6 +41,11 @@ output:
     # Internal hand-off from `extract` to `catalog`; not part of the published
     # format, dot-prefixed so the consuming site ignores the directory.
     catalogHints: '.hints/{slug}.json'
+    # The portrait `portrait` chose, the runners-up, and why each lost. Also
+    # internal, and worth reading when a picture looks wrong.
+    portraitHints: '.hints/{slug}.portrait.json'
+    # Classification a web search supplied that index.json owns (country).
+    websearchHints: '.hints/{slug}.web.json'
   onExisting: skip # skip | overwrite | fail
   jsonIndent: 2
 
@@ -52,6 +57,14 @@ output:
 catalogue:
   # The closed set of content languages (VD-LANG). Chinese is `zh`, never `ch`.
   supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko]
+  # day | month | year — the coarsest date this catalogue publishes.
+  # external/02 says a date not known to the day must be omitted, which throws
+  # away the fact whenever an article says only "born in 1885". `year` keeps it,
+  # as the canonical form truncated from the left: "02.1893", "1893".
+  # The trade-off, stated once: VD-DATE requires a consumer to treat anything
+  # outside DD.MM.YYYY as absent, so a strict reader ignores a partial date and
+  # behaves exactly as if the field had been dropped. Nothing breaks.
+  datePrecision: year
   # `type` for a biography nothing else classified.
   defaultType: guitarist
   # `type` for an article-only entry (About, News): `hidden` keeps it out of the
@@ -64,11 +77,11 @@ catalogue:
 # --------------------------------------------------------------------------
 # What to do with them. Enable any combination.
 #
-# With all four on, ru/x.bio.md produces:
-#   out/ru/x.bio.json   dossier extracted from the article
+# With every task on, ru/x.bio.md produces:
+#   out/ru/x.bio.json   dossier extracted from the article, completed from the web
 #   out/en/x.bio.md     translated article
 #   out/en/x.bio.json   dossier localized into English
-#   out/index.json      catalogue index + index-<lang>.json name files
+#   out/index.json      catalogue index (incl. the chosen portrait) + index-<lang>.json
 # --------------------------------------------------------------------------
 tasks:
   extract:
@@ -98,6 +111,38 @@ tasks:
     # lever there is: the card *is* the prompt.
     fields: []
 
+  # Facts the article does not contain, from a model that can search.
+  #
+  # Conditional by construction: the questions are computed from the dossier, so
+  # an entry that already answers everything costs nothing — no gaps, no call.
+  # The article is never sent; what crosses the wire is a short identity card.
+  websearch:
+    enabled: true
+    pool: websearch
+    outputChannel: metadata # the dossier is completed in place
+    hintsChannel: websearchHints
+    fields: [born, died, birthplace, deathplace, country]
+    # Route only to models that declare `web_search`. This is what separates
+    # "searched and found" from "recalled and asserted" — a model without search
+    # will answer these questions anyway, fluently and without a source.
+    requireWebSearchCapability: true
+    # A value with no source URL behind it is an assertion from memory.
+    requireSource: true
+    minConfidence: 0.7
+    # Age past which an undated death becomes a question. Not a claim that
+    # anyone has died: past it, "the article does not mention a death" stops
+    # being evidence that there was none, because the article may predate it.
+    # The answer is a status (alive | dead | unknown), never a bare date, so
+    # silence about a living person can never turn into a date of death.
+    livenessAgeYears: 78
+    # Also ask for the exact day when only a year or a month is on record.
+    upgradePrecision: true
+    # none | lead. The lead paragraph is how a namesake gets told apart.
+    includeContext: lead
+    contextChars: 600
+    # url: fill an empty metadata.url from the best source found.
+    recordSources: url
+
   translate:
     enabled: true
     pool: translate
@@ -123,7 +168,7 @@ tasks:
     # Models routinely answer 39 of 40 keys. A repair call re-asks for just the
     # missing ones instead of re-sending (and re-paying for) the whole batch.
     # 0 restores all-or-nothing retries.
-    repairAttempts: 1
+    repairAttempts: 2
     # off | run | persistent. `persistent` keeps the cache in run.memoryDir, so a
     # re-run over a grown corpus pays only for the strings that are new.
     useTranslationMemory: run
@@ -135,10 +180,45 @@ tasks:
     enabled: true
     pool: translate
     outputChannel: metadata
-    targetLanguages: [] # empty follows tasks.translate.targetLanguages
+    targetLanguages: [en] # empty follows tasks.translate.targetLanguages
     maxStringsPerCall: 60
     repairAttempts: 1
     useTranslationMemory: run
+
+  # The entry's portrait, chosen out of an existing image index. No LLM: the
+  # whole decision is name matching plus the index's own `ai` block.
+  #
+  #   biomd portrait "Андрес Сеговия" --top 10
+  #
+  # shows the ranking and the reasoning for one person without running anything.
+  portrait:
+    enabled: true
+    indexFile: images/artists.json
+    # img resolves against the catalogue root, so this says where the scanned
+    # image tree sits under it: pages/ + photo/s/x.jpg -> pages/photo/s/x.jpg
+    #
+    # Bucket-relative on purpose (no leading slash). external/09 lists
+    # "/pages/photos/x.jpg" as an error — that is the *mistake* of writing img
+    # as if it resolved against the resource base. Here the image tree really
+    # does live under /pages, and the house style keeps the difference visible.
+    assetPrefix: 'pages/'
+    outputChannel: portraitHints
+    # How sure the matcher must be that the picture shows *this* person.
+    # Identity only — picture quality never compensates for a weak name match.
+    # Below it, no img is written at all, and the reader substitutes its own
+    # default portrait by gender (external/03 §3.4.9).
+    minIdentity: 0.9
+    # 1 = a person class with exactly one detected face; 2 also allows one with
+    # no face detected, or a single face in a picture classified `group`/`other`.
+    maxTier: 2
+    minPixels: 80
+    # A record sleeve is artwork with the artist's name printed on it. The
+    # archive is full of them and several classify as clean single-face portraits.
+    excludeReleaseCovers: true
+    keepCandidates: 8
+    # omit | default. `omit` is the documented fallback and keeps the synthetic
+    # placeholder out of the entry's gallery.
+    onLowConfidence: omit
 
   # Catalogue aggregation. Runs last, uses no LLM, and reports the editions that
   # actually landed on disk.
@@ -162,9 +242,8 @@ llm:
   endpoints:
     # Local gateway: LiteLLM / OmniRoute / 9router / vLLM / Ollama shim
     - id: local
-      baseUrl: ${LOCAL_LLM_BASE_URL:-http://localhost:4000/v1}
-      apiKey: ${LOCAL_LLM_API_KEY:-sk-local}
-      maxConcurrent: 4
+      baseUrl: http://192.168.1.26:8080/v1
+      maxConcurrent: 1
       requestsPerMinute: 0
 
     - id: openrouter
@@ -173,15 +252,15 @@ llm:
       headers:
         HTTP-Referer: https://www.abc-guitars.com
         X-Title: biomd-process
-      requestsPerMinute: 120
+      requestsPerMinute: 60
 
   models:
     - id: local-small
       endpoint: local
-      model: ${LOCAL_LLM_MODEL:-openai/gpt-oss-20b}
-      contextWindow: 131072
+      model: gemma4-31b-local
+      contextWindow: 65536
       maxOutputTokens: 8192
-      capabilities: [json_object, prompt_cache]
+      capabilities: [json_schema, json_object, prompt_cache]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
       tags: [local, cheap]
 
@@ -200,13 +279,33 @@ llm:
       reasoning: { enabled: false, dialect: reasoning }
       tags: [remote, cheap]
 
+    # A model that actually searches. Three ways to get one on OpenRouter, in
+    # descending order of how little has to be true for it to work:
+    #   1. a hosted search model:   model: perplexity/sonar
+    #   2. the `:online` suffix:    model: openai/gpt-4o-mini:online
+    #   3. the web plugin:          params.extra.plugins (below)
+    # The `web_search` capability is what `tasks.websearch` routes on; declaring
+    # it on a model that cannot search is how you get confident fiction.
+    - id: or-search
+      endpoint: openrouter
+      model: openai/gpt-5.6-luna
+      contextWindow: 127000
+      maxOutputTokens: 4096
+      capabilities: [json_object, tools, web_search]
+      pricing: { inputPer1M: 0.1, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
+      params:
+        temperature: 0
+        # For option 3, keep the model as it is and add:
+        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      tags: [remote, search]
+
     - id: or-quality
       endpoint: openrouter
-      model: anthropic/claude-sonnet-4.5
+      model: google/gemini-3.7-flash:batch
       contextWindow: 200000
       maxOutputTokens: 16384
       capabilities: [json_schema, tools, reasoning, prompt_cache]
-      pricing: { inputPer1M: 3, outputPer1M: 15, cachedInputPer1M: 0.3 }
+      pricing: { inputPer1M: 0.2, outputPer1M: 1, cachedInputPer1M: 0.3 }
       reasoning: { enabled: false, effort: medium, dialect: reasoning }
       params: { temperature: 0.1 }
       tags: [remote, quality]
@@ -215,11 +314,13 @@ llm:
     # cost-optimized | context-optimized | sequential | round-robin
     strategy: cost-optimized
     pools:
-      default: [or-cheap]
+      default: [local-small]
       # Extraction is mechanical: start cheap, escalate only on failure.
-      extract: [or-cheap]
+      extract: [local-small]
       # Translation is quality-sensitive: prefer the strong model first.
-      translate: [or-cheap]
+      translate: [local-small]
+      # Only models that can search belong here; see tasks.websearch.
+      websearch: [or-search]
     options: {}
 
   defaults:
@@ -288,6 +389,9 @@ prompts:
     extract:
       system: extraction/system.md
       user: extraction/user.md
+    websearch:
+      system: websearch/system.md
+      user: websearch/user.md
     # Used by tasks.translate.mode = document
     translate:
       system: translation/system.md

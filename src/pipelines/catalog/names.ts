@@ -1,6 +1,6 @@
 import type { Dossier, EntryRow } from '../../domain/types.js';
 import { text } from '../../domain/values.js';
-import { isLatinScript, romanizeCyrillic, toAscii } from './romanize.js';
+import { isLatinScript, romanizeCyrillic, toAscii } from '../../domain/romanize.js';
 
 /** The part of a dossier the catalogue reads: the name components only. */
 export type DossierNames = Pick<Dossier, 'metadata'> & { [key: string]: unknown };

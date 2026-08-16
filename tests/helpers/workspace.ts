@@ -51,6 +51,12 @@ export class Workspace {
       'prompts/localization/user.md',
       '<%= it.count %> values, <%= it.sourceLanguage %> to <%= it.targetLanguage %>.',
     );
+    await this.writeFile(
+      'prompts/websearch/system.md',
+      'Search for these facts:\n<% var card = it.fields || []; card.forEach(function (f) { %>- <%= f.key %>: <%= f.hint %>\n<% }); %>' +
+        '<% if (it.checkLiveness) { %>Also answer status: alive | dead | unknown.<% } %>',
+    );
+    await this.writeFile('prompts/websearch/user.md', 'Return JSON only.');
   }
 
   path(...segments: string[]): string {

@@ -1,4 +1,4 @@
-# biomd-process — main configuration
+# biomd-process — main configuration (copy to biomd.config.yaml and edit)
 #
 # Everything here has a default (see src/config/schema.ts); this file shows the
 # knobs you are most likely to touch. Secrets come from the environment:
@@ -41,17 +41,47 @@ output:
     # Internal hand-off from `extract` to `catalog`; not part of the published
     # format, dot-prefixed so the consuming site ignores the directory.
     catalogHints: '.hints/{slug}.json'
+    # The portrait `portrait` chose, the runners-up, and why each lost. Also
+    # internal, and worth reading when a picture looks wrong.
+    portraitHints: '.hints/{slug}.portrait.json'
+    # Classification a web search supplied that index.json owns (country).
+    websearchHints: '.hints/{slug}.web.json'
   onExisting: overwrite # skip | overwrite | fail
   jsonIndent: 2
 
 # --------------------------------------------------------------------------
+# The published format itself — see external/ for the normative specification.
+# These are deployment properties, not task settings: extract, localize, catalog
+# and `biomd validate` all have to agree about them.
+# --------------------------------------------------------------------------
+catalogue:
+  # The closed set of content languages (VD-LANG). Chinese is `zh`, never `ch`.
+  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko]
+  # day | month | year — the coarsest date this catalogue publishes.
+  # external/02 says a date not known to the day must be omitted, which throws
+  # away the fact whenever an article says only "born in 1885". `year` keeps it,
+  # as the canonical form truncated from the left: "02.1893", "1893".
+  # The trade-off, stated once: VD-DATE requires a consumer to treat anything
+  # outside DD.MM.YYYY as absent, so a strict reader ignores a partial date and
+  # behaves exactly as if the field had been dropped. Nothing breaks.
+  datePrecision: year
+  # `type` for a biography nothing else classified.
+  defaultType: guitarist
+  # `type` for an article-only entry (About, News): `hidden` keeps it out of the
+  # grid, search and the facets while leaving it routable.
+  defaultPageType: hidden
+  # The vocabulary is open in the format; false is safer for machine-produced
+  # values, where an unknown craft is usually an invented synonym.
+  allowUnknownTypes: false
+
+# --------------------------------------------------------------------------
 # What to do with them. Enable any combination.
 #
-# With all four on, ru/x.bio.md produces:
-#   out/ru/x.bio.json   dossier extracted from the article
+# With every task on, ru/x.bio.md produces:
+#   out/ru/x.bio.json   dossier extracted from the article, completed from the web
 #   out/en/x.bio.md     translated article
 #   out/en/x.bio.json   dossier localized into English
-#   out/index.json      catalogue index + index-<lang>.json name files
+#   out/index.json      catalogue index (incl. the chosen portrait) + index-<lang>.json
 # --------------------------------------------------------------------------
 tasks:
   extract:
@@ -59,16 +89,59 @@ tasks:
     pool: extract
     outputChannel: metadata
     # A response missing all of these is rejected and retried / escalated.
-    requiredFields:
-      - metadata.forename
-      - metadata.surname
-    # A date that cannot be read as DD.MM.YYYY (or a partial form of it):
-    # drop it and note the loss, or reject the answer and spend a retry on it.
-    onInvalidDate: drop
+    requiredFields: [forename, surname]
+    # An existing <slug>.bio.json — beside the article, or from a previous run —
+    # is authored data:
+    #   reuse    (default) never call a model; normalize, migrate to v2, re-emit
+    #   complete ask only for the fields it lacks, and never overwrite one it has
+    #   rebuild  ignore it and extract from scratch
+    onExistingDossier: reuse
+    # The gallery is parsed out of the article's own ::: image containers and
+    # tablature tables. Costs nothing, and the target is the path the article
+    # contains rather than one a model retyped.
+    harvest:
+      photos: true
+      music: true
+      maxItems: 60
     # `type`/`gender`/`country`/Latin `title` belong to index.json, not to a
     # dossier — but the article is open anyway, so a model that notices them
     # writes them to the catalogHints channel for `catalog` to pick up.
     emitCatalogHints: true
+    # Empty = the built-in field card. Naming fewer keys is the most direct cost
+    # lever there is: the card *is* the prompt.
+    fields: []
+
+  # Facts the article does not contain, from a model that can search.
+  #
+  # Conditional by construction: the questions are computed from the dossier, so
+  # an entry that already answers everything costs nothing — no gaps, no call.
+  # The article is never sent; what crosses the wire is a short identity card.
+  websearch:
+    enabled: false
+    pool: websearch
+    outputChannel: metadata # the dossier is completed in place
+    hintsChannel: websearchHints
+    fields: [born, died, birthplace, deathplace, country]
+    # Route only to models that declare `web_search`. This is what separates
+    # "searched and found" from "recalled and asserted" — a model without search
+    # will answer these questions anyway, fluently and without a source.
+    requireWebSearchCapability: true
+    # A value with no source URL behind it is an assertion from memory.
+    requireSource: true
+    minConfidence: 0.7
+    # Age past which an undated death becomes a question. Not a claim that
+    # anyone has died: past it, "the article does not mention a death" stops
+    # being evidence that there was none, because the article may predate it.
+    # The answer is a status (alive | dead | unknown), never a bare date, so
+    # silence about a living person can never turn into a date of death.
+    livenessAgeYears: 78
+    # Also ask for the exact day when only a year or a month is on record.
+    upgradePrecision: false
+    # none | lead. The lead paragraph is how a namesake gets told apart.
+    includeContext: lead
+    contextChars: 600
+    # url: fill an empty metadata.url from the best source found.
+    recordSources: url
 
   translate:
     enabled: true
@@ -76,10 +149,13 @@ tasks:
     outputChannel: translation
     targetLanguages: [en, de]
     skipSourceLanguage: true
+    # Copy the source article into the output tree as its original edition.
+    # INV-8 wants a file for every code in a row's `lang`, the first one
+    # included — and when input.baseDir and output.baseDir differ, nothing else
+    # puts it there. Costs nothing. Turn off when the corpus *is* the root.
+    copySourceArticle: true
     # strict | lenient | off. strict is right for `segments` mode, where the
-    # skeleton is never sent and so cannot legitimately change; lenient lets a
-    # translator re-flow adjacent paragraphs in `document` mode but still
-    # refuses a lost heading, container, table or URL.
+    # skeleton is never sent and so cannot legitimately change.
     verifyStructure: strict
     # segments: send only the prose. Headings, list markers, ::: containers and
     #   their src:/position:/size: attributes, code and every URL stay here and
@@ -90,12 +166,11 @@ tasks:
     mode: segments
     maxSegmentsPerCall: 40
     # Models routinely answer 39 of 40 keys. A repair call re-asks for just the
-    # missing ones instead of re-sending — and re-paying for — the whole batch.
+    # missing ones instead of re-sending (and re-paying for) the whole batch.
     # 0 restores all-or-nothing retries.
     repairAttempts: 1
     # off | run | persistent. `persistent` keeps the cache in run.memoryDir, so a
-    # re-run over a grown corpus pays only for the strings that are new. The file
-    # is keyed by prompt version, so editing a prompt starts a fresh one.
+    # re-run over a grown corpus pays only for the strings that are new.
     useTranslationMemory: run
 
   # Per-language edition of the dossier. Only the prose values are sent, keyed by
@@ -110,20 +185,55 @@ tasks:
     repairAttempts: 1
     useTranslationMemory: run
 
+  # The entry's portrait, chosen out of an existing image index. No LLM: the
+  # whole decision is name matching plus the index's own `ai` block.
+  #
+  #   biomd portrait "Андрес Сеговия" --top 10
+  #
+  # shows the ranking and the reasoning for one person without running anything.
+  portrait:
+    enabled: true
+    indexFile: images/artists.json
+    # img resolves against the catalogue root, so this says where the scanned
+    # image tree sits under it: pages/ + photo/s/x.jpg -> pages/photo/s/x.jpg
+    #
+    # Bucket-relative on purpose (no leading slash). external/09 lists
+    # "/pages/photos/x.jpg" as an error — that is the *mistake* of writing img
+    # as if it resolved against the resource base. Here the image tree really
+    # does live under /pages, and the house style keeps the difference visible.
+    assetPrefix: 'pages/'
+    outputChannel: portraitHints
+    # How sure the matcher must be that the picture shows *this* person.
+    # Identity only — picture quality never compensates for a weak name match.
+    # Below it, no img is written at all, and the reader substitutes its own
+    # default portrait by gender (external/03 §3.4.9).
+    minIdentity: 0.9
+    # 1 = a person class with exactly one detected face; 2 also allows one with
+    # no face detected, or a single face in a picture classified `group`/`other`.
+    maxTier: 2
+    minPixels: 80
+    # A record sleeve is artwork with the artist's name printed on it. The
+    # archive is full of them and several classify as clean single-face portraits.
+    excludeReleaseCovers: true
+    keepCandidates: 8
+    # omit | default. `omit` is the documented fallback and keeps the synthetic
+    # placeholder out of the entry's gallery.
+    onLowConfidence: omit
+
   # Catalogue aggregation. Runs last, uses no LLM, and reports the editions that
   # actually landed on disk.
   catalog:
-    enabled: false
+    enabled: true
     indexChannel: catalogIndex
     localizedIndexChannel: catalogLocalizedIndex
     localizedNames: true
     # Search-only aliases after the display name: the bare surname, the inverted
     # order, and a romanization for a non-Latin edition.
     generateAliases: true
-    preserveIds: true
-    # Only for an entry nothing else classified: an existing index row wins,
-    # then the extraction hint, then this.
-    defaultType: guitarist
+    # Update the existing index.json rather than replacing it. Turning this off
+    # deletes every row this run did not visit — and with them their ids, which
+    # index-<lang>.json joins on and which must be stable forever.
+    merge: true
 
 # --------------------------------------------------------------------------
 # LLM endpoints (any OpenAI-compatible URL) and the models they serve
@@ -141,8 +251,8 @@ llm:
       baseUrl: https://openrouter.ai/api/v1
       apiKey: ${OPENROUTER_API_KEY}
       headers:
-        HTTP-Referer: ${OPENROUTER_SITE_URL:-https://example.org}
-        X-Title: ${OPENROUTER_APP_NAME:-biomd-process}
+        HTTP-Referer: https://www.abc-guitars.com
+        X-Title: biomd-process
       requestsPerMinute: 120
 
   models:
@@ -157,12 +267,38 @@ llm:
 
     - id: or-cheap
       endpoint: openrouter
-      model: openai/gpt-4o-mini
+      model: deepseek/deepseek-v4-flash
       contextWindow: 128000
       maxOutputTokens: 16384
       capabilities: [json_schema, json_object, tools, prompt_cache]
-      pricing: { inputPer1M: 0.15, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
+      pricing: { inputPer1M: 0.07, outputPer1M: 0.17, cachedInputPer1M: 0.075 }
+      # This model reasons unless told not to, and reasoning tokens bill at the
+      # output rate — they were 78% of the output on a measured run here.
+      # `dialect` says how to phrase it; `enabled: false` is the instruction.
+      # Drop the whole block (or set dialect: none) to leave the model's default
+      # alone; set enabled: true when a task genuinely needs the deliberation.
+      reasoning: { enabled: false, dialect: reasoning }
       tags: [remote, cheap]
+
+    # A model that actually searches. Three ways to get one on OpenRouter, in
+    # descending order of how little has to be true for it to work:
+    #   1. a hosted search model:   model: perplexity/sonar
+    #   2. the `:online` suffix:    model: openai/gpt-4o-mini:online
+    #   3. the web plugin:          params.extra.plugins (below)
+    # The `web_search` capability is what `tasks.websearch` routes on; declaring
+    # it on a model that cannot search is how you get confident fiction.
+    - id: or-search
+      endpoint: openrouter
+      model: perplexity/sonar
+      contextWindow: 127000
+      maxOutputTokens: 4096
+      capabilities: [json_object, web_search]
+      pricing: { inputPer1M: 1, outputPer1M: 1 }
+      params:
+        temperature: 0
+        # For option 3, keep the model as it is and add:
+        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      tags: [remote, search]
 
     - id: or-quality
       endpoint: openrouter
@@ -179,11 +315,13 @@ llm:
     # cost-optimized | context-optimized | sequential | round-robin
     strategy: cost-optimized
     pools:
-      default: [local-small, or-cheap, or-quality]
+      default: [or-cheap]
       # Extraction is mechanical: start cheap, escalate only on failure.
-      extract: [local-small, or-cheap, or-quality]
+      extract: [or-cheap]
       # Translation is quality-sensitive: prefer the strong model first.
-      translate: [or-quality, or-cheap]
+      translate: [or-cheap]
+      # Only models that can search belong here; see tasks.websearch.
+      websearch: [or-search]
     options: {}
 
   defaults:
@@ -252,6 +390,9 @@ prompts:
     extract:
       system: extraction/system.md
       user: extraction/user.md
+    websearch:
+      system: websearch/system.md
+      user: websearch/user.md
     # Used by tasks.translate.mode = document
     translate:
       system: translation/system.md
@@ -268,7 +409,7 @@ prompts:
 
 # --------------------------------------------------------------------------
 run:
-  concurrency: 4
+  concurrency: 1
   stateDir: .biomd/runs
   memoryDir: .biomd/memory # only used by useTranslationMemory: persistent
   resume: auto # auto | off | <runId>

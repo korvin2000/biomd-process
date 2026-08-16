@@ -73,7 +73,7 @@ export class ExtractionPipeline implements DocumentPipeline {
     return [
       {
         label: `${item.slug} → metadata (${item.language})${plan === 'reuse' ? ' [reused]' : ''}`,
-        contract: this.contractOf(config, plan, existing?.hash),
+        contract: this.contractOf(config, plan, existing?.hash, context.config.catalogue.datePrecision),
         promptVersion: plan === 'reuse' ? 'none' : await context.prompts.versionOf(PIPELINE_ID),
         // A reused dossier costs nothing, and a cost preview that says otherwise
         // is a cost preview nobody trusts.
@@ -142,7 +142,7 @@ export class ExtractionPipeline implements DocumentPipeline {
         partLabel: segment.label,
       }),
       section: (segment) => ({ title: 'Article', body: segment.text, volatile: true, fence: 'markdown' }),
-      parse: (text) => this.parse(text, fields),
+      parse: (text) => this.parse(text, fields, options),
       merge: (parts) => mergeFlat(parts, fields),
       accept: (record) => this.accept(record, config, satisfied),
     });
@@ -213,11 +213,11 @@ export class ExtractionPipeline implements DocumentPipeline {
    * Models wrap JSON in prose, answer with a nested object, or fall back to
    * plain lines. All three are read locally; a re-ask costs a whole round trip.
    */
-  private parse(text: string, fields: readonly FlatField[]): Parsed<FlatRecord> {
+  private parse(text: string, fields: readonly FlatField[], options: DossierOptions): Parsed<FlatRecord> {
     const parsed = parseFlatAnswer(text, fields);
     if (!parsed.ok) return { ok: false, reason: parsed.reason ?? 'unreadable answer' };
 
-    const normalized = normalizeFlat(parsed.record, fields);
+    const normalized = normalizeFlat(parsed.record, fields, { datePrecision: options.datePrecision });
     return { ok: true, value: normalized.record, notes: normalized.notes };
   }
 
@@ -278,6 +278,7 @@ export class ExtractionPipeline implements DocumentPipeline {
     return {
       supportedLanguages: context.config.catalogue.supportedLanguages,
       allowUnknownTypes: context.config.catalogue.allowUnknownTypes,
+      datePrecision: context.config.catalogue.datePrecision,
     };
   }
 
@@ -287,10 +288,16 @@ export class ExtractionPipeline implements DocumentPipeline {
   }
 
   /** Only the parts of the config that change what a correct output looks like. */
-  private contractOf(config: ExtractTaskConfig, plan: Plan, existingHash: string | undefined): unknown {
+  private contractOf(
+    config: ExtractTaskConfig,
+    plan: Plan,
+    existingHash: string | undefined,
+    datePrecision: string,
+  ): unknown {
     return {
       plan,
       existingHash: existingHash ?? 'none',
+      datePrecision,
       fields: fieldsFor({ include: config.fields, catalogHints: config.emitCatalogHints }).map((field) => field.key),
       requiredFields: [...config.requiredFields].sort(),
       harvest: config.harvest,

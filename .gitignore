@@ -144,3 +144,5 @@ vite.config.ts.timestamp-*
 
 # biomd-process run state (journals, checkpoints, logs)
 .biomd/
+input/
+biomd.config.yaml.lastworking

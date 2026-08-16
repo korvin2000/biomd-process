@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { CatalogIndex, mergeNameIndex, type CatalogOptions, type RowUpdate } from '../src/domain/catalog.js';
 import type { EntryRow } from '../src/domain/types.js';
 import { displayNamesOf, latinTitleOf, type DossierNames } from '../src/pipelines/catalog/names.js';
-import { foldToAscii, isLatinScript, romanizeCyrillic } from '../src/pipelines/catalog/romanize.js';
+import { foldToAscii, isLatinScript, romanizeCyrillic } from '../src/domain/romanize.js';
 
 const OPTIONS: CatalogOptions = {
   supportedLanguages: ['ru', 'en', 'de'],

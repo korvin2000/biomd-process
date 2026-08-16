@@ -66,6 +66,7 @@ one you want; the version hash keeps the runs distinguishable in the journal.
 | Task | Variables |
 |---|---|
 | `extract` | `fields[]` (`{key, hint}` — the field card), `language`, `requiredFields[]`, `partial`, `partLabel`, `notes` |
+| `websearch` | `fields[]` (`{key, hint, refine?, current?}` — only what is missing), `language`, `checkLiveness`, `age`, `requireSource` |
 | `translate` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `partial`, `partLabel` |
 | `translateSegments` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `count` |
 | `localize` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `count` |

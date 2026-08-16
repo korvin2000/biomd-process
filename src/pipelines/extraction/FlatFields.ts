@@ -1,9 +1,16 @@
 import { resolveCountry } from '../../domain/countries.js';
 import type { CatalogHints, Dossier, MediaItem } from '../../domain/types.js';
 import { orderDossier, sanitizeDossier, type DossierOptions } from '../../domain/dossier.js';
-import { mergeCsvLists, normalizeCsvList, normalizeDate, normalizeRanking, normalizeUrl } from '../../domain/values.js';
+import {
+  mergeCsvLists,
+  normalizeCsvList,
+  normalizeDate,
+  normalizeRanking,
+  normalizeUrl,
+  type DatePrecision,
+} from '../../domain/values.js';
 import { resolveEntryType, resolveGender } from '../../domain/vocabulary.js';
-import { toAscii } from '../catalog/romanize.js';
+import { toAscii } from '../../domain/romanize.js';
 
 /**
  * The extraction wire format: **one flat table of short keys**.
@@ -62,7 +69,13 @@ export const DEFAULT_FIELDS: readonly FlatField[] = [
   { key: 'birthname', kind: 'text', target: 'metadata', member: 'birthname', hint: 'full name at birth, only if it differs' },
   { key: 'birthplace', kind: 'text', target: 'metadata', member: 'birthplace', hint: 'place of birth, e.g. "Linares, Spain"' },
   { key: 'deathplace', kind: 'text', target: 'metadata', member: 'deathplace', hint: 'place of death' },
-  { key: 'born', kind: 'date', target: 'dates', member: 'born', hint: 'date of birth, DD.MM.YYYY — omit unless the exact day is stated' },
+  {
+    key: 'born',
+    kind: 'date',
+    target: 'dates',
+    member: 'born',
+    hint: 'date of birth, DD.MM.YYYY — or MM.YYYY / YYYY when only that much is stated',
+  },
   { key: 'died', kind: 'date', target: 'dates', member: 'died', hint: 'date of death, same rule' },
   { key: 'activeFrom', kind: 'date', target: 'dates', member: 'activeFrom', hint: 'start of the documented career, same rule' },
   { key: 'activeTo', kind: 'date', target: 'dates', member: 'activeTo', hint: 'end of the documented career, same rule' },
@@ -281,7 +294,11 @@ export interface NormalizeFlatResult {
  * implementation did: the chunk merge unions list fields, and a union only
  * agrees with itself when every side is punctuated identically first.
  */
-export function normalizeFlat(record: FlatRecord, fields: readonly FlatField[]): NormalizeFlatResult {
+export function normalizeFlat(
+  record: FlatRecord,
+  fields: readonly FlatField[],
+  options: { datePrecision?: DatePrecision } = {},
+): NormalizeFlatResult {
   const notes: string[] = [];
   const result: FlatRecord = {};
 
@@ -289,21 +306,28 @@ export function normalizeFlat(record: FlatRecord, fields: readonly FlatField[]):
     const raw = record[field.key];
     if (raw === undefined) continue;
 
-    const value = normalizeValue(raw, field, notes);
+    const value = normalizeValue(raw, field, options.datePrecision ?? 'day', notes);
     if (value) result[field.key] = value;
   }
   return { record: result, notes };
 }
 
-function normalizeValue(raw: string, field: FlatField, notes: string[]): string | undefined {
+function normalizeValue(
+  raw: string,
+  field: FlatField,
+  datePrecision: DatePrecision,
+  notes: string[],
+): string | undefined {
   switch (field.kind) {
     case 'list':
       return normalizeCsvList(raw) || undefined;
 
     case 'date': {
-      const date = normalizeDate(raw);
+      const date = normalizeDate(raw, datePrecision);
       if (!date) {
-        notes.push(`Dropped ${field.key} "${raw}": a date not known to the day has no representation (VD-DATE).`);
+        notes.push(
+          `Dropped ${field.key} "${raw}": nothing at least as precise as a ${datePrecision} could be read from it.`,
+        );
         return undefined;
       }
       if (date !== raw) notes.push(`Rewrote ${field.key} "${raw}" as "${date}".`);

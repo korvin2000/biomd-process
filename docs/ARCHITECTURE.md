@@ -156,7 +156,8 @@ Dependencies point **inward**. No module imports from a layer above it.
         │ ┌────▼────┐    ┌──────▼──────┐  ┌──────▼─────┐ ┌──────▼──────┐
         │ │   llm   │    │  documents  │  │  prompts   │ │    state    │
         │ │ gateway │    │  context    │  │ templates  │ │ journal     │
-        │ └────┬────┘    └─────────────┘  └────────────┘ └─────────────┘
+        │ └────┬────┘    │   images    │  └────────────┘ └─────────────┘
+        │      │         └─────────────┘
         │ ┌────▼─────────────────┐
         │ │ routing │ reliability│
         │ └──────────────────────┘
@@ -172,6 +173,7 @@ Dependencies point **inward**. No module imports from a layer above it.
 | `llm` | OpenAI-compatible transport, usage, cost, token estimate | tasks, documents |
 | `prompts` | template files → messages, cache-friendly ordering | LLM transport |
 | `documents` | document model, segmentation, context strategies | prompts, LLM |
+| `images` | the image-index format and portrait selection (identity, suitability, ranking) | config, pipelines, LLM |
 | `io` | discovery, path templates, atomic artifact writing, catalogue reading | pipelines |
 | `state` | run journal, checkpoints, fingerprints, resume | pipelines |
 | `domain` | the catalogue format: value domains, vocabularies, dossier and index documents, invariants | scheduling, LLMs, the filesystem |
@@ -211,6 +213,21 @@ billed for a call that cannot succeed.
 
 A dependency that matches nothing is dropped, not failed: turning `extract` off
 must not make `localize` unschedulable, because a dossier may already exist.
+
+With every task enabled the waves are:
+
+```
+1  extract                     writes the dossier + catalogue hints
+2  websearch, portrait         websearch completes the dossier in place;
+   translate                   portrait reads the name out of it
+3  localize                    reads the finished dossier
+4  catalog                     indexes what actually landed on disk
+```
+
+`websearch` is the one pipeline that rewrites another's output rather than
+adding a file of its own — the dossier is the dossier, whichever source filled a
+given field — so everything downstream of it declares the dependency and
+`localize` folds its prompt version into the fingerprint.
 
 Two identities per task:
 

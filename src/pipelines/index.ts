@@ -27,7 +27,7 @@ export type { MemoryStats } from './localization/TranslationMemory.js';
 export { CatalogPipeline } from './catalog/CatalogPipeline.js';
 export { displayNamesOf, latinTitleOf } from './catalog/names.js';
 export type { DossierNames } from './catalog/names.js';
-export { foldToAscii, romanizeCyrillic, isLatinScript, toAscii } from './catalog/romanize.js';
+export { foldToAscii, romanizeCyrillic, isLatinScript, toAscii } from '../domain/romanize.js';
 
 export { runWithEscalation } from './shared/escalation.js';
 export type { EscalationSpec, EscalationResult, Parsed } from './shared/escalation.js';

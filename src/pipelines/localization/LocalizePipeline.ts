@@ -62,6 +62,11 @@ export class LocalizePipeline implements DocumentPipeline {
     const authored = await findSourceDossier(item, context.config);
     const sourceHash = authored?.hash ?? 'none';
     const extractVersion = extractEnabled ? await context.prompts.versionOf('extract') : 'off';
+    // The dossier this localizes is whatever the last pipeline in the chain
+    // left; a web search that adds a birthplace changes what there is to
+    // translate, so it belongs in the fingerprint exactly like extraction does.
+    const websearchEnabled = context.config.tasks.websearch.enabled;
+    const websearchVersion = websearchEnabled ? await context.prompts.versionOf('websearch') : 'off';
 
     return this.targetLanguages(item, context.config).map((targetLang) => ({
       variant: targetLang,
@@ -72,12 +77,16 @@ export class LocalizePipeline implements DocumentPipeline {
         listFields: [...config.listFields].sort(),
         sourceHash,
         extractVersion,
+        websearchVersion,
       },
       promptVersion,
       expectedOutputs: [{ channel: config.outputChannel, pathVars: this.pathVars(item, targetLang) }],
-      // Wait for this document's extraction, when there is one, so the dossier
-      // we localize is the one this run produced.
-      dependsOn: extractEnabled ? [{ pipeline: 'extract' }] : [],
+      // Wait for this document's extraction and its web completion, when there
+      // are any, so the dossier we localize is the finished one.
+      dependsOn: [
+        ...(extractEnabled ? [{ pipeline: 'extract' }] : []),
+        ...(websearchEnabled ? [{ pipeline: 'websearch' }] : []),
+      ],
     }));
   }
 
@@ -178,6 +187,7 @@ export class LocalizePipeline implements DocumentPipeline {
     return {
       supportedLanguages: context.config.catalogue.supportedLanguages,
       allowUnknownTypes: context.config.catalogue.allowUnknownTypes,
+      datePrecision: context.config.catalogue.datePrecision,
     };
   }
 

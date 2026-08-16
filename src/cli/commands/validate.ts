@@ -37,6 +37,7 @@ export function createValidateCommand(): Command {
       const findings = validateCatalogue(snapshot, {
         supportedLanguages: languages,
         checkFiles: options.files !== false,
+        datePrecision: loaded.config.catalogue.datePrecision,
       });
 
       if (options.json) {
