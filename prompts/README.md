@@ -15,9 +15,22 @@ prompts/
 
 ## Conventions
 
-**Rendering.** [Eta](https://eta.js.org) syntax: `<%= it.name %>` interpolates,
-`<%_ ... _%>` runs control flow without leaving blank lines. Whitespace is
-preserved verbatim — prompts are whitespace-sensitive.
+**Rendering.** [Eta](https://eta.js.org) syntax: `<%= it.name %>` interpolates and
+`<% ... %>` runs control flow. Whitespace is preserved verbatim (`autoTrim` is
+off) — prompts are whitespace-sensitive, and an engine that silently ate a
+newline would change the cache prefix behind the author's back. Two consequences
+worth knowing before editing one:
+
+- Put the opening tag immediately **before** the content it guards and the
+  closing tag immediately before what follows, so a skipped block leaves no blank
+  line:
+  `<% if (cond) { %>- a line\n<% } %>next`.
+  The `<%_ … _%>` slurping form does the opposite — it eats the content's own
+  newline and glues the lines together.
+- A script tag whose first character is `(` is a syntax error: the generated code
+  is `tR+="…"` on the line above, and automatic semicolon insertion does not fire
+  before an open parenthesis. Start with a keyword instead —
+  `<% var card = it.fields || []; card.forEach(… %>`.
 
 **System = stable, user = instructions, payload = appended.** The document body —
 or, in the batch modes, the `{hash: text}` table — is *never* a template variable.
@@ -52,7 +65,7 @@ one you want; the version hash keeps the runs distinguishable in the journal.
 
 | Task | Variables |
 |---|---|
-| `extract` | `schemaText`, `language`, `requiredFields[]`, `partial`, `partLabel`, `notes` |
+| `extract` | `fields[]` (`{key, hint}` — the field card), `language`, `requiredFields[]`, `partial`, `partLabel`, `notes` |
 | `translate` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `partial`, `partLabel` |
 | `translateSegments` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `count` |
 | `localize` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `count` |

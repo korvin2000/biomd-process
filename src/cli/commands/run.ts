@@ -5,6 +5,7 @@ import { planJob, runJob } from '../../app/runJob.js';
 import type { AppConfigInput, DeepPartial } from '../../config/index.js';
 import { loadConfig } from '../../config/loader.js';
 import { AppLogger } from '../../observability/Logger.js';
+import { PlanningError } from '../../shared/errors.js';
 import type { ProgressReporter } from '../../observability/ProgressReporter.js';
 import { ConsoleProgress } from '../ui/ConsoleProgress.js';
 import { PlainProgress } from '../ui/PlainProgress.js';
@@ -60,7 +61,18 @@ export function createRunCommand(): Command {
     .action(runAction);
 }
 
+/** Every pipeline `--only` may name. A typo would otherwise disable all of them. */
+const PIPELINE_IDS = ['extract', 'translate', 'localize', 'catalog'] as const;
+
 async function runAction(options: RunOptions & { resumeRun?: string }): Promise<void> {
+  const unknown = splitList(options.only)?.filter((id) => !PIPELINE_IDS.includes(id as never)) ?? [];
+  if (unknown.length > 0) {
+    throw new PlanningError(
+      `Unknown pipeline(s) in --only: ${unknown.join(', ')}. Known: ${PIPELINE_IDS.join(', ')}.`,
+      { details: { unknown, known: [...PIPELINE_IDS] } },
+    );
+  }
+
   const loaded = await loadConfig({ file: options.config, overrides: buildOverrides(options) });
   for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`);
 
@@ -105,18 +117,22 @@ async function runAction(options: RunOptions & { resumeRun?: string }): Promise<
  * so an absent flag never silently replaces a configured value with a default.
  */
 function buildOverrides(options: RunOptions & { resumeRun?: string }): DeepPartial<AppConfigInput> {
-  const pipelines = options.only?.split(',').map((value) => value.trim()).filter(Boolean);
-  const languages = options.lang?.split(',').map((value) => value.trim()).filter(Boolean);
+  const pipelines = splitList(options.only);
+  const languages = splitList(options.lang);
+
+  // `--only` must cover **every** pipeline. Listing a subset here would leave
+  // the ones it forgot enabled, so `--only extract` would quietly go on paying
+  // for localization — the opposite of what the flag is for.
+  const only = (id: string): boolean | undefined => (pipelines ? pipelines.includes(id) : undefined);
 
   return {
     input: { limit: toInt(options.limit) },
     output: { baseDir: options.out },
     tasks: {
-      extract: pipelines ? { enabled: pipelines.includes('extract') } : undefined,
-      translate: {
-        enabled: pipelines ? pipelines.includes('translate') : undefined,
-        targetLanguages: languages,
-      },
+      extract: { enabled: only('extract') },
+      translate: { enabled: only('translate'), targetLanguages: languages },
+      localize: { enabled: only('localize'), targetLanguages: languages },
+      catalog: { enabled: only('catalog') },
     },
     llm: { routing: { strategy: options.strategy } },
     cost: {
@@ -134,6 +150,10 @@ function buildOverrides(options: RunOptions & { resumeRun?: string }): DeepParti
       console: options.quiet ? 'off' : undefined,
     },
   };
+}
+
+function splitList(value: string | undefined): string[] | undefined {
+  return value?.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
 function toInt(value: string | undefined): number | undefined {

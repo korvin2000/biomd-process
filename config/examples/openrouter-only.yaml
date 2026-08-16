@@ -20,7 +20,7 @@ tasks:
   extract:
     enabled: true
     pool: cheap
-    requiredFields: [metadata.forename, metadata.surname]
+    requiredFields: [forename, surname]
   translate:
     enabled: true
     pool: quality

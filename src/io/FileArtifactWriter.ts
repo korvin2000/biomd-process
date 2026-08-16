@@ -48,7 +48,7 @@ export class FileArtifactWriter implements ArtifactWriter {
 
     if (this.dryRun) return { ...result, skipped: true };
 
-    if (this.config.onExisting !== 'overwrite' && (await pathExists(path))) {
+    if (!artifact.overwrite && this.config.onExisting !== 'overwrite' && (await pathExists(path))) {
       if (this.config.onExisting === 'skip') return { ...result, skipped: true };
       throw new IoError(`Output already exists: ${path} (output.onExisting = "fail")`, { details: { path } });
     }

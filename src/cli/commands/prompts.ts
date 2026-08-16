@@ -3,7 +3,7 @@ import pc from 'picocolors';
 
 import { createApp } from '../../app/container.js';
 import { loadConfig } from '../../config/loader.js';
-import { metadataJsonSchema } from '../../pipelines/extraction/MetadataContract.js';
+import { fieldsFor } from '../../pipelines/extraction/FlatFields.js';
 import { MessageBuilder } from '../../prompts/MessageBuilder.js';
 import { heading } from '../ui/report.js';
 
@@ -11,8 +11,8 @@ import { heading } from '../ui/report.js';
 const SAMPLE_VARIABLES: Record<string, Record<string, unknown>> = {
   extract: {
     language: 'ru',
-    requiredFields: ['metadata.forename', 'metadata.surname'],
-    schemaText: JSON.stringify(metadataJsonSchema, null, 2),
+    fields: fieldsFor({ catalogHints: true }).map((field) => ({ key: field.key, hint: field.hint })),
+    requiredFields: ['forename', 'surname'],
     partial: false,
     partLabel: 'full',
   },
@@ -23,6 +23,8 @@ const SAMPLE_VARIABLES: Record<string, Record<string, unknown>> = {
     partial: false,
     partLabel: 'full',
   },
+  translateSegments: { sourceLanguage: 'ru', targetLanguage: 'en', count: 12 },
+  localize: { sourceLanguage: 'ru', targetLanguage: 'en', count: 12 },
 };
 
 export function createPromptsCommand(): Command {

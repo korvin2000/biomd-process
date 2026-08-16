@@ -2,11 +2,7 @@ Localize the <%= it.count %> field value(s) supplied below.
 
 - Source language: **<%= it.sourceLanguage %>**
 - Target language: **<%= it.targetLanguage %>**
-<%_ if (it.glossary && Object.keys(it.glossary).length) { _%>
-- Use these renderings consistently:
-<%_ Object.entries(it.glossary).forEach(function (entry) { _%>
-  - `<%= entry[0] %>` → `<%= entry[1] %>`
-<%_ }); _%>
-<%_ } _%>
-
+<% if (it.glossary && Object.keys(it.glossary).length) { %>- Use these renderings consistently:
+<% Object.entries(it.glossary).forEach(function (entry) { %>  - `<%= entry[0] %>` → `<%= entry[1] %>`
+<% }); } %>
 Return one JSON object with the same keys and nothing else.

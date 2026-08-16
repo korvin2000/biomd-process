@@ -53,7 +53,7 @@ export class TranslationPipeline implements DocumentPipeline {
     const config = context.config.tasks.translate;
     const promptVersion = await context.prompts.versionOf(this.promptId(config));
 
-    return this.targetLanguages(item, config).map((targetLang) => ({
+    const seeds: TaskSeed[] = this.targetLanguages(item, config).map((targetLang) => ({
       variant: targetLang,
       label: `${item.slug} → ${targetLang}`,
       contract: {
@@ -65,6 +65,28 @@ export class TranslationPipeline implements DocumentPipeline {
       promptVersion,
       expectedOutputs: [{ channel: config.outputChannel, pathVars: this.pathVars(item, targetLang) }],
     }));
+
+    /**
+     * The original edition, copied rather than translated.
+     *
+     * `INV-8` requires a file for **every** code in a row's `lang`, including the
+     * first — the original. When the corpus and the catalogue root are different
+     * directories, nothing else would ever put the source article in the output
+     * tree, and the catalogue would declare an edition that 404s. Copying costs
+     * nothing and it is what makes `out/` a catalogue rather than a pile of
+     * derived files.
+     */
+    if (config.copySourceArticle) {
+      seeds.push({
+        variant: item.language,
+        label: `${item.slug} → ${item.language} (source, copied)`,
+        contract: { copy: true },
+        promptVersion: 'none',
+        usesLlm: false,
+        expectedOutputs: [{ channel: config.outputChannel, pathVars: this.pathVars(item, item.language) }],
+      });
+    }
+    return seeds;
   }
 
   async execute(task: PlannedTask, context: ExecutionContext): Promise<TaskResult> {
@@ -73,6 +95,22 @@ export class TranslationPipeline implements DocumentPipeline {
     const targetLang = task.variant;
     if (!targetLang) {
       throw new PipelineError('Translation task is missing its target language', { details: { taskId: task.taskId } });
+    }
+
+    if (targetLang === document.language) {
+      return {
+        artifacts: [
+          {
+            channel: config.outputChannel,
+            format: 'markdown',
+            body: document.content,
+            pathVars: this.pathVars(document, targetLang),
+          },
+        ],
+        usage: { ...EMPTY_USAGE },
+        costUsd: 0,
+        notes: ['Copied the source article verbatim: this is the original edition, not a translation.'],
+      };
     }
 
     const outcome =

@@ -1,3 +1,5 @@
+import { basename } from 'node:path';
+
 import type { AppConfig, CatalogTaskConfig } from '../../config/schema.js';
 import type {
   CorpusPipeline,
@@ -8,39 +10,35 @@ import type {
   TaskSeed,
   WorkItem,
 } from '../../core/types.js';
+import { CatalogIndex, mergeNameIndex, type CatalogOptions, type RowUpdate } from '../../domain/catalog.js';
+import type { CatalogHints, EntryRow } from '../../domain/types.js';
 import type { Artifact, ArtifactWriter } from '../../io/types.js';
 import { EMPTY_USAGE } from '../../llm/types.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
-import type { CatalogHints } from '../extraction/normalize.js';
-import { IdAllocator, type CatalogRow } from './IdAllocator.js';
 import { displayNamesOf, latinTitleOf, type DossierNames } from './names.js';
 
 const PIPELINE_ID = 'catalog';
 
 /**
- * Builds `index.json` and the `index-<lang>.json` name files.
+ * Builds `index.json` and the `index-<lang>.json` name files — by **updating**
+ * them, never by replacing them.
  *
  * A corpus-scope pipeline: the catalogue is an aggregate and cannot be computed
  * one document at a time. It runs in the final dependency wave, after every
- * article and dossier has landed, and reports **what is actually on disk** rather
- * than what was planned — a language whose translation failed simply does not
- * appear among that entry's editions.
+ * article and dossier has landed, and reports what is actually on disk rather
+ * than what was planned — a language whose translation failed does not appear
+ * among that entry's editions, because a declared edition with no file is a
+ * broken entry rather than a fallback.
  *
- * **No LLM calls, still.** The classification the format needs — `type`,
- * `gender`, `country`, a Latin `title` — is not derivable from a dossier, but it
- * *was* derivable from the article, which `extract` had open anyway. So it is
- * collected there and left on the `catalogHints` channel, and this pipeline only
- * chooses between sources. That keeps the aggregation deterministic and free,
- * and adds no second pass over the corpus.
+ * **Still LLM-free.** The classification the format needs (`type`, `gender`,
+ * `country`, a Latin `title`) is not derivable from a dossier but *was*
+ * derivable from the article, which `extract` had open anyway — so it arrives on
+ * the `catalogHints` channel and this pipeline only chooses between sources.
  *
- * Precedence for every classification field: **the existing index wins**, then
- * the extraction hint, then a configured default. An index row is the one thing
- * here a human may have edited by hand, so nothing derived is allowed to
- * overwrite it.
- *
- * `img` is preserved but never invented: media is a curation decision, and a
- * wrong portrait is worse than the gender-based default the format specifies.
+ * Precedence for every field: **the existing index wins**, then the extraction
+ * hint, then a configured default. An index row is the one thing here a human
+ * may have edited by hand, and its `id` is a join key that must never move.
  */
 export class CatalogPipeline implements CorpusPipeline {
   readonly id = PIPELINE_ID;
@@ -50,7 +48,6 @@ export class CatalogPipeline implements CorpusPipeline {
 
   async planCorpus(items: readonly WorkItem[], context: PlanContext): Promise<TaskSeed[]> {
     const config = context.config.tasks.catalog;
-    const channels = [{ channel: config.indexChannel, pathVars: {} }];
 
     return [
       {
@@ -59,11 +56,12 @@ export class CatalogPipeline implements CorpusPipeline {
           languages: this.editionLanguages(context.config).sort(),
           localizedNames: config.localizedNames,
           generateAliases: config.generateAliases,
-          defaultType: config.defaultType,
+          merge: config.merge,
+          catalogue: context.config.catalogue,
         },
-        // Promptless: the version only has to be stable.
         promptVersion: 'none',
-        expectedOutputs: channels,
+        usesLlm: false,
+        expectedOutputs: [{ channel: config.indexChannel, pathVars: {} }],
         // Everything the index describes must exist before it is indexed.
         dependsOn: [
           { pipeline: 'extract', scope: 'all' },
@@ -76,89 +74,128 @@ export class CatalogPipeline implements CorpusPipeline {
 
   async execute(task: PlannedTask, context: ExecutionContext): Promise<TaskResult> {
     const config = context.config.tasks.catalog;
-    const allocator = await this.loadAllocator(config, context);
-    const notes: string[] = [];
+    const options = this.catalogOptions(context.config);
+    const index = await this.loadIndex(config, options, context);
+    const notes = [...index.loadNotes];
 
-    const rows: CatalogRow[] = [];
-    const names = new Map<string, Map<string, string[]>>();
+    const derived = new Map<string, Map<string, string[]>>();
+    const checked = [...new Set([...this.editionLanguages(context.config)])];
 
     for (const item of task.items) {
-      const editions = await this.editionsOf(item, context);
-      if (editions.length === 0) {
-        notes.push(`${item.slug}: no edition found on disk; omitted from the index.`);
+      const editions = await this.editionsOf(item, context, notes);
+      if (editions.languages.length === 0) {
+        notes.push(`${item.slug}: no complete edition on disk; the index is left as it was.`);
         continue;
       }
 
-      const dossiers = await this.readDossiers(item, editions, context);
+      const dossiers = await this.readDossiers(item, editions.languages, context);
       const hints = await this.readHints(item, context);
-      const previous = allocator.previous(item.slug);
-      const row: CatalogRow = {
-        id: allocator.idFor(item.slug),
-        title: previous?.title ?? latinTitleOf(item.slug, dossiers, hints.title),
-        lang: editions.join(','),
-        type: previous?.type ?? hints.type ?? config.defaultType,
-        md: `/${item.slug}${context.config.input.slugSuffix}`,
-        ...(dossiers.size > 0 ? { json: `/${item.slug}.bio.json` } : {}),
-        ...pick('gender', previous?.gender ?? hints.gender),
-        ...pick('country', previous?.country ?? hints.country),
-        ...(previous?.img ? { img: previous.img } : {}),
-      };
-      rows.push(row);
 
-      if (!previous && (hints.gender || hints.country || hints.type)) {
-        notes.push(`${item.slug}: classified from the extraction hint (${describe(hints)}).`);
+      const update: RowUpdate = {
+        slug: item.slug,
+        md: `/${basename(item.relativePath)}`,
+        verifiedLanguages: editions.languages,
+        checkedLanguages: checked,
+        title: hints.title ?? latinTitleOf(item.slug, dossiers),
+        ...(editions.dossierPath ? { json: editions.dossierPath } : {}),
+        ...(hints.type ? { type: hints.type } : {}),
+        ...(hints.gender ? { gender: hints.gender } : {}),
+        ...(hints.country ? { country: hints.country } : {}),
+        ...(hints.img ? { img: hints.img } : {}),
+      };
+
+      const result = index.upsert(update);
+      notes.push(...result.notes);
+      if (result.created) {
+        notes.push(`${item.slug}: new row, id ${result.row.id}${describe(hints)}.`);
       }
-      if (config.localizedNames) this.collectNames(row, dossiers, names, config.generateAliases);
+
+      if (config.localizedNames) this.collectNames(result.row, dossiers, derived, config.generateAliases);
     }
 
     const artifacts: Artifact[] = [
-      { channel: config.indexChannel, format: 'json', body: rows as unknown as JsonValue, pathVars: {} },
+      {
+        channel: config.indexChannel,
+        format: 'json',
+        body: index.toArray() as unknown as JsonValue,
+        pathVars: {},
+        // This *is* the existing file plus this run's updates. Skipping it under
+        // `output.onExisting: skip` would protect nothing and discard the merge.
+        overwrite: config.merge,
+      },
     ];
 
     if (config.localizedNames) {
-      for (const [lang, entries] of [...names].sort(([a], [b]) => a.localeCompare(b))) {
-        artifacts.push({
-          channel: config.localizedIndexChannel,
-          format: 'json',
-          body: Object.fromEntries([...entries].sort(byNumericId)) as unknown as JsonValue,
-          pathVars: { lang },
-        });
-      }
+      artifacts.push(...(await this.nameArtifacts(config, index, derived, context, notes)));
     }
 
     return { artifacts, usage: { ...EMPTY_USAGE }, costUsd: 0, notes };
   }
 
   /**
-   * Ids must be stable forever and never reused, so an existing index is the
-   * authority. Re-deriving them from position would silently break every
-   * `index-<lang>.json` key that referenced the old number.
+   * Loads the index this run will update.
+   *
+   * `merge: false` starts from nothing, which deletes every row this run does
+   * not visit. It exists because someone will eventually want a clean rebuild;
+   * it is not a default anyone should choose casually.
    */
-  private async loadAllocator(config: CatalogTaskConfig, context: ExecutionContext): Promise<IdAllocator> {
-    if (!config.preserveIds) return new IdAllocator([]);
+  private async loadIndex(
+    config: CatalogTaskConfig,
+    options: CatalogOptions,
+    context: ExecutionContext,
+  ): Promise<CatalogIndex> {
+    if (!config.merge) return CatalogIndex.load([], options);
 
-    const file = context.writer.resolvePath({
-      channel: config.indexChannel,
-      format: 'json',
-      body: '',
-      pathVars: {},
-    });
-    if (!(await pathExists(file))) return new IdAllocator([]);
+    const file = this.indexPath(config, context.writer);
+    if (!(await pathExists(file))) return CatalogIndex.load([], options);
 
-    const existing = await readJsonFile<CatalogRow[]>(file).catch(() => []);
-    return new IdAllocator(Array.isArray(existing) ? existing : [], context.config.input.slugSuffix);
+    const existing = await readJsonFile<unknown>(file).catch(() => undefined);
+    return CatalogIndex.load(existing, options);
   }
 
-  /** Languages for which this entry actually has an article on disk. */
-  private async editionsOf(item: WorkItem, context: ExecutionContext): Promise<string[]> {
-    const found: string[] = [item.language];
+  /**
+   * The languages for which this entry has a **complete** edition.
+   *
+   * Complete means the article *and*, when the entry is a biography, the
+   * dossier: `INV-8` treats a declared edition with a missing file as a broken
+   * entry, and a reader has no instruction to substitute another language.
+   */
+  private async editionsOf(
+    item: WorkItem,
+    context: ExecutionContext,
+    notes: string[],
+  ): Promise<{ languages: string[]; dossierPath?: string }> {
+    const { config, writer } = context;
+    const sourceDossier = this.pathOf(writer, config.tasks.extract.outputChannel, item, item.language);
+    const isBiography = await pathExists(sourceDossier);
+    const dossierPath = isBiography ? `/${basename(sourceDossier)}` : undefined;
 
-    for (const lang of this.editionLanguages(context.config)) {
+    const languages = [item.language];
+    const articleName = basename(item.relativePath);
+
+    for (const lang of this.editionLanguages(config)) {
       if (lang === item.language) continue;
-      const path = this.pathOf(context.writer, context.config.tasks.translate.outputChannel, item, lang);
-      if (await pathExists(path)) found.push(lang);
+
+      const article = this.pathOf(writer, config.tasks.translate.outputChannel, item, lang);
+      if (!(await pathExists(article))) continue;
+      if (basename(article) !== articleName) {
+        notes.push(
+          `${item.slug}: the ${lang} article is named ${basename(article)} but the source is ${articleName}; ` +
+            'one `md` value cannot describe both, so the edition is not declared.',
+        );
+        continue;
+      }
+      if (isBiography) {
+        const dossier = this.pathOf(writer, config.tasks.localize.outputChannel, item, lang);
+        if (!(await pathExists(dossier))) {
+          notes.push(`${item.slug}: the ${lang} article exists but its dossier does not; edition not declared (INV-8).`);
+          continue;
+        }
+      }
+      languages.push(lang);
     }
-    return found;
+
+    return dossierPath ? { languages, dossierPath } : { languages };
   }
 
   private async readDossiers(
@@ -169,8 +206,13 @@ export class CatalogPipeline implements CorpusPipeline {
     const dossiers = new Map<string, DossierNames>();
 
     for (const lang of editions) {
-      const path = this.pathOf(context.writer, context.config.tasks.extract.outputChannel, item, lang);
+      const channel =
+        lang === item.language
+          ? context.config.tasks.extract.outputChannel
+          : context.config.tasks.localize.outputChannel;
+      const path = this.pathOf(context.writer, channel, item, lang);
       if (!(await pathExists(path))) continue;
+
       const dossier = await readJsonFile<DossierNames>(path).catch(() => undefined);
       if (dossier) dossiers.set(lang, dossier);
     }
@@ -178,12 +220,12 @@ export class CatalogPipeline implements CorpusPipeline {
   }
 
   /**
-   * The classification `extract` noticed while it had the article open.
+   * The classification `extract` noticed while it had the article open, or
+   * migrated out of an existing version 1 dossier.
    *
    * Read from the source-language edition: nationality and craft are properties
    * of the person, so any edition would do, and the source one is the edition
-   * guaranteed to exist. A missing file is normal — extraction may be off, or
-   * the article may simply not have said.
+   * guaranteed to exist. A missing file is normal.
    */
   private async readHints(item: WorkItem, context: ExecutionContext): Promise<CatalogHints> {
     const file = this.pathOf(context.writer, context.config.tasks.catalog.hintsChannel, item, item.language);
@@ -192,22 +234,77 @@ export class CatalogPipeline implements CorpusPipeline {
   }
 
   private collectNames(
-    row: CatalogRow,
+    row: EntryRow,
     dossiers: ReadonlyMap<string, DossierNames>,
-    names: Map<string, Map<string, string[]>>,
+    derived: Map<string, Map<string, string[]>>,
     aliases: boolean,
   ): void {
     for (const [lang, entries] of displayNamesOf(row, dossiers, { aliases })) {
-      const bucket = names.get(lang) ?? new Map<string, string[]>();
+      const bucket = derived.get(lang) ?? new Map<string, string[]>();
       bucket.set(row.id, entries);
-      names.set(lang, bucket);
+      derived.set(lang, bucket);
     }
+  }
+
+  /**
+   * One artifact per language whose name index this run changes.
+   *
+   * A file that would come back byte-identical is not rewritten: these are
+   * hand-editable documents, and an untouched file is the clearest possible
+   * signal that nothing about it needed touching.
+   */
+  private async nameArtifacts(
+    config: CatalogTaskConfig,
+    index: CatalogIndex,
+    derived: ReadonlyMap<string, Map<string, string[]>>,
+    context: ExecutionContext,
+    notes: string[],
+  ): Promise<Artifact[]> {
+    const artifacts: Artifact[] = [];
+    const titles = new Map([...index.toArray()].map((row) => [row.id, row.title]));
+    const knownIds = index.ids();
+
+    for (const [lang, entries] of [...derived].sort(([a], [b]) => a.localeCompare(b))) {
+      const path = context.writer.resolvePath({
+        channel: config.localizedIndexChannel,
+        format: 'json',
+        body: '',
+        pathVars: { lang },
+      });
+      const existing = (await pathExists(path)) ? await readJsonFile<unknown>(path).catch(() => undefined) : undefined;
+
+      const merged = mergeNameIndex(existing, entries, { titles, knownIds });
+      notes.push(...merged.notes.map((note) => `index-${lang}.json: ${note}`));
+      if (merged.unchanged && existing !== undefined) continue;
+
+      artifacts.push({
+        channel: config.localizedIndexChannel,
+        format: 'json',
+        body: merged.index as unknown as JsonValue,
+        pathVars: { lang },
+        overwrite: true,
+      });
+    }
+    return artifacts;
+  }
+
+  private catalogOptions(config: AppConfig): CatalogOptions {
+    return {
+      supportedLanguages: config.catalogue.supportedLanguages,
+      defaultType: config.catalogue.defaultType,
+      defaultPageType: config.catalogue.defaultPageType,
+      allowUnknownTypes: config.catalogue.allowUnknownTypes,
+    };
   }
 
   private editionLanguages(config: AppConfig): string[] {
     const translate = config.tasks.translate.targetLanguages;
     const localize = config.tasks.localize.targetLanguages;
     return [...new Set([...translate, ...localize])];
+  }
+
+  private indexPath(config: CatalogTaskConfig, writer: ArtifactWriter): string {
+    return writer.resolvePath({ channel: config.indexChannel, format: 'json', body: '', pathVars: {} });
   }
 
   private pathOf(writer: ArtifactWriter, channel: string, item: WorkItem, lang: string): string {
@@ -220,18 +317,10 @@ export class CatalogPipeline implements CorpusPipeline {
   }
 }
 
-function byNumericId([a]: [string, string[]], [b]: [string, string[]]): number {
-  return (Number(a) || 0) - (Number(b) || 0);
-}
-
-/** Omits the key entirely when there is no value — the format has no empty strings. */
-function pick(key: string, value: string | undefined): Record<string, string> {
-  return value ? { [key]: value } : {};
-}
-
 function describe(hints: CatalogHints): string {
-  return Object.entries(hints)
+  const detail = Object.entries(hints)
     .filter(([, value]) => Boolean(value))
     .map(([key, value]) => `${key}=${String(value)}`)
     .join(', ');
+  return detail ? ` (${detail})` : '';
 }

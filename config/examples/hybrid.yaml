@@ -18,11 +18,16 @@ input:
   baseDir: examples
   include: ['*/**.bio.md']
 
+catalogue:
+  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko]
+  defaultType: guitarist
+  defaultPageType: hidden
+
 tasks:
   extract:
     enabled: true
     pool: extract
-    requiredFields: [metadata.forename, metadata.surname]
+    requiredFields: [forename, surname]
   translate:
     enabled: true
     pool: translate
@@ -33,7 +38,6 @@ tasks:
     pool: translate
   catalog:
     enabled: true
-    defaultType: guitarist
 
 llm:
   endpoints:

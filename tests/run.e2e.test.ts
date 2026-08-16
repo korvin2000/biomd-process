@@ -2,15 +2,24 @@ import { readFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { planJob, runJob } from '../src/app/runJob.js';
+import { validateCatalogue } from '../src/domain/validate.js';
+import { readCatalogue } from '../src/io/CatalogueReader.js';
 import { LlmCallError } from '../src/reliability/errors.js';
 import type { JournalRecord } from '../src/state/types.js';
-import { FakeClient, Workspace, echoTable, respond } from './helpers/workspace.js';
+import { DEFAULT_FACTS, FakeClient, Workspace, echoTable, isStringBatch, respond } from './helpers/workspace.js';
 
 const ARTICLE = `# Пако де Лусия
 
 ::: lead
 
 Испанский гитарист и композитор.
+
+:::
+
+::: image
+src: photo/p/paco.jpg
+position: right
+caption: Пако де Лусия
 
 :::
 
@@ -54,7 +63,8 @@ describe('end-to-end run', () => {
     const outcome = await runJob(app);
 
     expect(outcome.summary.status).toBe('completed');
-    expect(outcome.plan.tasks).toHaveLength(3); // 1 extraction + 2 languages
+    // 1 extraction + 2 translations + the source article, copied verbatim.
+    expect(outcome.plan.tasks).toHaveLength(4);
     expect(outcome.summary.failures).toEqual([]);
 
     const metadata = JSON.parse(await readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8'));
@@ -76,7 +86,8 @@ describe('end-to-end run', () => {
     expect(types).toContain('plan.created');
     expect(types).toContain('run.finished');
     expect(journal.filter((record) => record.type === 'llm.attempt')).toHaveLength(3);
-    expect(journal.filter((record) => record.type === 'artifact.written')).toHaveLength(3);
+    // 1 dossier + 1 catalogue-hint file + 2 translated articles + 1 copied source.
+    expect(journal.filter((record) => record.type === 'artifact.written')).toHaveLength(5);
     expect(journal.every((record) => record.seq > 0 && record.runId === outcome.runId)).toBe(true);
   });
 
@@ -107,7 +118,7 @@ describe('end-to-end run', () => {
     const plan = await planJob(second);
 
     expect(plan.tasks).toHaveLength(0);
-    expect(plan.skipped).toHaveLength(3);
+    expect(plan.skipped).toHaveLength(4);
     expect(plan.skipped.every((task) => task.reason === 'resume')).toBe(true);
   });
 
@@ -121,14 +132,14 @@ describe('end-to-end run', () => {
     const plan = await planJob(second);
 
     expect(plan.tasks.map((task) => task.pipeline)).toEqual(['extract']);
-    expect(plan.skipped).toHaveLength(2);
+    expect(plan.skipped).toHaveLength(3);
   });
 
   it('writes nothing in dry-run mode', async () => {
     const app = workspace.app({ tasks: TASKS, run: { dryRun: true } }, FakeClient.happyPath());
     const plan = await planJob(app);
 
-    expect(plan.tasks).toHaveLength(3);
+    expect(plan.tasks).toHaveLength(4);
     await expect(readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8')).rejects.toThrow();
   });
 });
@@ -169,24 +180,12 @@ describe('language editions and catalogue', () => {
   });
 
   it('keeps language-invariant dossier fields identical across editions', async () => {
-    const metadata = {
-      metadata: {
-        forename: 'Пако',
-        surname: 'де Лусия',
-        dates: { born: '21.12.1947' },
-        ranking: 98,
-        url: 'https://fundacionpacodelucia.com/legado/',
-      },
-      media: { photos: [{ label: 'Портрет', target: '/photos/paco.jpg' }], music: [] },
-      documents: [],
-    };
     // Uppercase every translated value, so anything that came back unchanged is
-    // provably a field that was never sent.
+    // provably a field that was never sent. The media is not in this answer at
+    // all: it is harvested from the article's own `::: image` container.
     const client = new FakeClient((call) => {
-      if (call.request.responseFormat?.type === 'json_schema') return respond(JSON.stringify(metadata));
-      if (call.request.responseFormat?.type === 'json_object') {
-        return respond(echoTable(call.request, (text) => text.toUpperCase()));
-      }
+      if (isStringBatch(call.request)) return respond(echoTable(call.request, (text) => text.toUpperCase()));
+      if (call.request.responseFormat?.type === 'json_object') return respond(JSON.stringify(DEFAULT_FACTS));
       return respond('');
     });
 
@@ -197,10 +196,10 @@ describe('language editions and catalogue', () => {
     const edition = JSON.parse(await readFile(workspace.path('out/en/paco-de-lucia.bio.json'), 'utf8'));
 
     expect(edition.metadata.forename).toBe('ПАКО');
-    expect(edition.media.photos[0].label).toBe('ПОРТРЕТ');
+    expect(edition.media.photos[0].label).toBe('ПАКО ДЕ ЛУСИЯ');
     expect(edition.metadata.dates).toEqual(source.metadata.dates);
-    expect(edition.metadata.ranking).toBe(source.metadata.ranking);
     expect(edition.metadata.url).toBe(source.metadata.url);
+    expect(source.media.photos[0].target).toBe('photo/p/paco.jpg');
     expect(edition.media.photos[0].target).toBe(source.media.photos[0].target);
   });
 
@@ -221,6 +220,29 @@ describe('language editions and catalogue', () => {
     expect(names['1'][0]).toBe('Пако де Лусия');
   });
 
+  /**
+   * The strongest statement this suite can make: a full run produces a
+   * catalogue that satisfies the format's own invariant list. Everything else
+   * here checks one rule; this checks that the rules hold together.
+   */
+  it('produces a catalogue that passes every invariant', async () => {
+    await workspace.writeFile('corpus/ru/andres-segovia.bio.md', '# Андрес Сеговия\n\nИспанский гитарист.\n');
+    await runJob(workspace.app({ tasks: FULL }, FakeClient.happyPath()));
+
+    const snapshot = await readCatalogue(workspace.path('out'), { supportedLanguages: ['ru', 'en'] });
+    const findings = validateCatalogue(snapshot, { supportedLanguages: ['ru', 'en'] });
+
+    expect(findings.filter((finding) => finding.severity === 'error')).toEqual([]);
+  });
+
+  it('copies the source article, so the original edition is not a broken link', async () => {
+    await runJob(workspace.app({ tasks: FULL }, FakeClient.happyPath()));
+
+    await expect(readFile(workspace.path('out/ru/paco-de-lucia.bio.md'), 'utf8')).resolves.toContain('Пако де Лусия');
+    const index = JSON.parse(await readFile(workspace.path('out/index.json'), 'utf8'));
+    expect(index[0].lang).toBe('ru,en');
+  });
+
   it('keeps catalogue ids stable across runs', async () => {
     await runJob(workspace.app({ tasks: FULL }, FakeClient.happyPath()));
     const first = JSON.parse(await readFile(workspace.path('out/index.json'), 'utf8'));
@@ -236,9 +258,9 @@ describe('language editions and catalogue', () => {
 
   it('skips localization when its extraction failed, instead of paying for it', async () => {
     const client = new FakeClient((call) =>
-      call.request.responseFormat?.type === 'json_schema'
-        ? new LlmCallError('server', 'extraction is down')
-        : respond(echoTable(call.request)),
+      isStringBatch(call.request)
+        ? respond(echoTable(call.request))
+        : new LlmCallError('server', 'extraction is down'),
     );
     const app = workspace.app({ tasks: { ...FULL, translate: { enabled: false }, localize: { enabled: true, targetLanguages: ['en'] }, catalog: { enabled: false } } }, client);
 
@@ -252,11 +274,182 @@ describe('language editions and catalogue', () => {
   });
 });
 
+describe('an entry that already has a dossier', () => {
+  const V1_DOSSIER = JSON.stringify({
+    title: 'Paco de Lucia',
+    type: 'Guitarist',
+    country: 'Spain',
+    img: 'photos/paco.jpg',
+    bio: 'prose that belongs in the article',
+    metadata: {
+      forename: 'Пако',
+      surname: 'де Лусия',
+      dates: { born: '1947-12-21' },
+      genres: ['фламенко', 'джаз-фьюжн'],
+      ranking: 98,
+    },
+  });
+
+  it('does not call a model at all, and says so in the plan', async () => {
+    await workspace.writeFile('corpus/ru/paco-de-lucia.bio.json', V1_DOSSIER);
+    const client = FakeClient.happyPath();
+    const app = workspace.app({ tasks: { extract: { enabled: true } } }, client);
+
+    const outcome = await runJob(app);
+
+    expect(outcome.summary.status).toBe('completed');
+    expect(client.calls).toHaveLength(0);
+    expect(outcome.plan.tasks[0]?.usesLlm).toBe(false);
+  });
+
+  it('migrates it to version 2 on the way through', async () => {
+    await workspace.writeFile('corpus/ru/paco-de-lucia.bio.json', V1_DOSSIER);
+    await runJob(workspace.app({ tasks: { extract: { enabled: true } } }, FakeClient.happyPath()));
+
+    const dossier = JSON.parse(await readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8'));
+    for (const member of ['title', 'type', 'country', 'img', 'bio']) {
+      expect(dossier).not.toHaveProperty(member);
+      expect(dossier.metadata).not.toHaveProperty(member);
+    }
+    expect(dossier.metadata.dates.born).toBe('21.12.1947');
+    expect(dossier.metadata.genres).toBe('фламенко,джаз-фьюжн');
+
+    // The identity fields are not thrown away — they are where index.json gets them.
+    const hints = JSON.parse(await readFile(workspace.path('out/.hints/paco-de-lucia.json'), 'utf8'));
+    expect(hints).toMatchObject({ title: 'Paco de Lucia', type: 'guitarist', country: 'es', img: 'photos/paco.jpg' });
+  });
+
+  it('asks only for the fields it is missing, in `complete` mode', async () => {
+    await workspace.writeFile(
+      'corpus/ru/paco-de-lucia.bio.json',
+      JSON.stringify({ metadata: { forename: 'Пако', surname: 'де Лусия' } }),
+    );
+    const client = FakeClient.happyPath({ born: '21.12.1947', country: 'es' });
+    const app = workspace.app(
+      { tasks: { extract: { enabled: true, onExistingDossier: 'complete' } } },
+      client,
+    );
+
+    await runJob(app);
+
+    const asked = client.calls[0]?.request.messages[0]?.content ?? '';
+    expect(asked).not.toContain('- forename:');
+    expect(asked).toContain('- born:');
+
+    const dossier = JSON.parse(await readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8'));
+    expect(dossier.metadata.forename).toBe('Пако');
+    expect(dossier.metadata.dates.born).toBe('21.12.1947');
+  });
+
+  it('never overwrites a value the authored file already had', async () => {
+    await workspace.writeFile(
+      'corpus/ru/paco-de-lucia.bio.json',
+      JSON.stringify({ metadata: { forename: 'Пако', surname: 'де Лусия', birthplace: 'Альхесирас, Испания' } }),
+    );
+    const client = FakeClient.happyPath({ forename: 'WRONG', birthplace: 'WRONG', instruments: 'фламенко-гитара' });
+    const app = workspace.app(
+      { tasks: { extract: { enabled: true, onExistingDossier: 'rebuild' } } },
+      client,
+    );
+    await runJob(app);
+    // `rebuild` is the one mode that is allowed to replace it.
+    expect(
+      JSON.parse(await readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8')).metadata.forename,
+    ).toBe('WRONG');
+
+    await workspace.writeFile('corpus/ru/paco-de-lucia.bio.json', JSON.stringify({
+      metadata: { forename: 'Пако', surname: 'де Лусия', birthplace: 'Альхесирас, Испания' },
+    }));
+    const completing = workspace.app(
+      { tasks: { extract: { enabled: true, onExistingDossier: 'complete' } }, output: { onExisting: 'overwrite' } },
+      FakeClient.happyPath({ forename: 'WRONG', birthplace: 'WRONG', instruments: 'фламенко-гитара' }),
+    );
+    await runJob(completing);
+
+    const dossier = JSON.parse(await readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8'));
+    expect(dossier.metadata.forename).toBe('Пако');
+    expect(dossier.metadata.birthplace).toBe('Альхесирас, Испания');
+    expect(dossier.metadata.instruments).toBe('фламенко-гитара');
+  });
+});
+
+describe('the catalogue is updated, not rebuilt', () => {
+  const CATALOG_ONLY = { extract: { enabled: true }, catalog: { enabled: true } };
+
+  it('writes the merge even under output.onExisting: skip, which would discard it', async () => {
+    await workspace.writeFile('out/index.json', JSON.stringify([]));
+    await runJob(workspace.app({ tasks: CATALOG_ONLY, output: { onExisting: 'skip' } }, FakeClient.happyPath()));
+
+    const index = JSON.parse(await readFile(workspace.path('out/index.json'), 'utf8'));
+    expect(index).toHaveLength(1);
+  });
+
+  it('keeps a row this run never visited, and its id', async () => {
+    await workspace.writeFile(
+      'out/index.json',
+      JSON.stringify([
+        { id: '7', title: 'Andres Segovia', lang: 'ru', type: 'guitarist', md: '/andres-segovia.bio.md' },
+      ]),
+    );
+
+    await runJob(workspace.app({ tasks: CATALOG_ONLY, output: { onExisting: 'overwrite' } }, FakeClient.happyPath()));
+    const index = JSON.parse(await readFile(workspace.path('out/index.json'), 'utf8'));
+
+    expect(index.map((row: { id: string }) => row.id)).toEqual(['7', '8']);
+    expect(index[0]).toMatchObject({ title: 'Andres Segovia' });
+  });
+
+  it('never overwrites a classification an editor set by hand', async () => {
+    await workspace.writeFile(
+      'out/index.json',
+      JSON.stringify([
+        {
+          id: '2',
+          title: 'Curated Title',
+          lang: 'ru',
+          type: 'composer',
+          country: 'fr',
+          md: '/paco-de-lucia.bio.md',
+          img: 'photos/curated.jpg',
+          curator: 'sergey',
+        },
+      ]),
+    );
+
+    await runJob(workspace.app({ tasks: CATALOG_ONLY, output: { onExisting: 'overwrite' } }, FakeClient.happyPath()));
+    const index = JSON.parse(await readFile(workspace.path('out/index.json'), 'utf8'));
+
+    expect(index).toHaveLength(1);
+    expect(index[0]).toMatchObject({
+      id: '2',
+      title: 'Curated Title',
+      type: 'composer',
+      country: 'fr',
+      img: 'photos/curated.jpg',
+      curator: 'sergey',
+    });
+  });
+
+  it('keeps a hand-authored display name and merges the derived aliases in', async () => {
+    await workspace.writeFile(
+      'out/index-ru.json',
+      JSON.stringify({ '1': ['Пако де Лусия (исправлено)'], '99': ['Другая запись'] }),
+    );
+
+    await runJob(workspace.app({ tasks: CATALOG_ONLY, output: { onExisting: 'overwrite' } }, FakeClient.happyPath()));
+    const names = JSON.parse(await readFile(workspace.path('out/index-ru.json'), 'utf8'));
+
+    expect(names['1'][0]).toBe('Пако де Лусия (исправлено)');
+    expect(names['1']).toContain('де Лусия');
+    expect(names['99']).toEqual(['Другая запись']);
+  });
+});
+
 describe('failure handling', () => {
   it('falls back to the next model when the first one keeps failing', async () => {
     const client = new FakeClient((call) => {
       if (call.target === 'primary') return new LlmCallError('server', 'upstream exploded');
-      return respond(JSON.stringify({ metadata: { forename: 'Пако' } }));
+      return respond(JSON.stringify({ forename: 'Пако' }));
     });
     const app = workspace.app({ tasks: { extract: TASKS.extract } }, client);
 
@@ -286,7 +479,7 @@ describe('failure handling', () => {
     let calls = 0;
     const client = new FakeClient(() => {
       calls += 1;
-      return respond(calls === 1 ? JSON.stringify({ metadata: {} }) : JSON.stringify({ metadata: { forename: 'Пако' } }));
+      return respond(calls === 1 ? JSON.stringify({ surname: 'де Лусия' }) : JSON.stringify({ forename: 'Пако' }));
     });
     const app = workspace.app({ tasks: { extract: TASKS.extract } }, client);
 

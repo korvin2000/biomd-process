@@ -30,10 +30,16 @@ export function printPlan(app: App, plan: JobPlan): void {
   );
 
   const byPipeline = groupBy(plan.tasks, (task) => task.pipeline);
-  const rows = [...byPipeline.entries()].map(([pipeline, tasks]) => {
+  const rows = [...byPipeline.entries()].map(([pipeline, all]) => {
     const dash = pc.dim('—');
-    if (!usesLlm(app, pipeline)) {
-      return { pipeline, tasks: String(tasks.length), tokens: dash, chain: pc.dim('(no model calls)'), cost: dash };
+    // A task may opt out individually — a dossier this run reuses rather than
+    // extracts calls nothing, and counting it would inflate the estimate.
+    const tasks = usesLlm(app, pipeline) ? all.filter((task) => task.usesLlm !== false) : [];
+    const free = all.length - tasks.length;
+    const label = free > 0 ? `${all.length}${pc.dim(` (${free} free)`)}` : String(all.length);
+
+    if (tasks.length === 0) {
+      return { pipeline, tasks: label, tokens: dash, chain: pc.dim('(no model calls)'), cost: dash };
     }
 
     const chain = app.gateway.plan({
@@ -62,7 +68,7 @@ export function printPlan(app: App, plan: JobPlan): void {
 
     return {
       pipeline,
-      tasks: String(tasks.length),
+      tasks: label,
       tokens: formatTokens(inputTokens),
       chain: chain.map((entry) => entry.modelId).join(' → ') || pc.red('(no targets)'),
       cost: formatCost(cost),

@@ -10,6 +10,7 @@ import { createModelsCommand } from './commands/models.js';
 import { createPromptsCommand } from './commands/prompts.js';
 import { createReportCommand } from './commands/report.js';
 import { createRunCommand } from './commands/run.js';
+import { createValidateCommand } from './commands/validate.js';
 
 const program = new Command()
   .name(APP_NAME)
@@ -20,7 +21,8 @@ const program = new Command()
   .addCommand(createConfigCommand())
   .addCommand(createModelsCommand())
   .addCommand(createPromptsCommand())
-  .addCommand(createReportCommand());
+  .addCommand(createReportCommand())
+  .addCommand(createValidateCommand());
 
 try {
   await program.parseAsync(process.argv);

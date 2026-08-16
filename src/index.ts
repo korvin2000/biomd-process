@@ -13,6 +13,7 @@ export * from './routing/index.js';
 export * from './reliability/index.js';
 export * from './prompts/index.js';
 export * from './documents/index.js';
+export * from './domain/index.js';
 export * from './io/index.js';
 export * from './state/index.js';
 export * from './observability/index.js';

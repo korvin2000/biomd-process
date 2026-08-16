@@ -1,7 +1,12 @@
 # biomd-process — Architecture
 
-**Status:** v0.1 skeleton · **Scope:** generic LLM batch-processing platform, with
-`bio.md` handling attached as replaceable adapters.
+**Status:** v0.2 · **Scope:** generic LLM batch-processing platform, with the
+catalogue data format implemented once, in `src/domain`, behind that platform.
+
+The normative specification of the format this tool produces is
+[`external/`](../external/README.md) — nine documents, written for implementers
+of producers and consumers, owned by the reader application rather than by this
+repository. Where this document and `external/` disagree, `external/` is right.
 
 ## 1. What this is (and is not)
 
@@ -23,39 +28,111 @@ i.e. each language directory holds a complete, self-consistent edition.
 `catalog` calls no model at all (`usesLlm = false`); it reads what the others
 wrote. It is off by default.
 
-The v0.1 goal is the **platform**, not the domain. Everything that depends on the
-exact shape of a `bio.md` or of `MetaData.json` sits behind a narrow contract, and
-the point of that separation is that filling one in must not require touching
-orchestration, routing, retry, state or CLI code. That property is the actual
-deliverable, and it held: the domain rules below were added afterwards, entirely
-within their contracts.
+The v0.1 goal was the **platform**, not the domain: everything depending on the
+exact shape of a `bio.md` or a dossier sat behind a narrow contract, so that
+filling one in would not require touching orchestration, routing, retry, state or
+CLI code. That property held, and v0.2 is what filling it in looked like — every
+domain rule landed inside `src/domain` and the four pipelines, with no change to
+`core`, `routing`, `reliability` or `state`.
 
-| Rule | Where it lives now |
+### 1a. The domain layer
+
+`src/domain` is the **only** place that knows what a catalogue is. Nothing above
+it re-derives a rule, and a specification change has exactly one landing site.
+
+| Module | Owns |
 |---|---|
-| `DD.MM.YYYY` dates, list punctuation, uppercase document types, `ranking` range | `src/pipelines/extraction/normalize.ts` |
-| The v2 rule that `id`/`title`/`gender`/`type`/`country`/`bio`/`dataStatus` are index facts, not dossier fields | `normalize.ts` — lifted out and routed to the catalogue |
-| Chunk merge: union list fields, first-wins scalars | `src/pipelines/extraction/merge.ts` |
-| Markdown structure tolerance (`strict` \| `lenient` \| `off`) | `src/documents/markdown/skeleton.ts`, `StructureGuard` |
-| ASCII `title`, romanization, search aliases | `src/pipelines/catalog/{names,romanize}.ts` |
-| Catalogue classification (`type`, `gender`, `country`) | noticed by `extract`, consumed by `catalog` — see §6a |
+| `types.ts` | `EntryRow`, `NameIndex`, `Dossier` — `external/08` §8.4, transcribed |
+| `values.ts` | The `VD-*` value domains: dates, comma lists, ranking, URL, target, slug, id, content/asset paths |
+| `countries.ts` | ISO 3166-1 alpha-2, plus alpha-3, localized names and demonyms resolving into it |
+| `vocabulary.ts` | `type`, `gender`, `documents[].type`, `lang` — multilingual synonyms → canonical token |
+| `dossier.ts` | Sanitize (with the version 1 → 2 migration), merge-without-overwriting, house member order |
+| `catalog.ts` | `CatalogIndex` (load, upsert, allocate ids) and `mergeNameIndex` |
+| `validate.ts` | `INV-1 … INV-28` as a pure function over a snapshot of the published files |
 
-What is still open is listed as `TODO(domain)` in the code; grep for it.
+Two properties are worth stating because everything else follows from them:
 
-### §6a — how `catalog` classifies without calling a model
+**Every normalizer is narrow on output and wide on input.** It emits exactly the
+canonical authored form the specification names, and accepts every plausible
+spelling of it. The alternative to accepting `1893-02-21` is spending a retry on
+a model that will very likely answer `1893-02-21` again.
 
-`Catalog-Index.md` §1 assigns `type`, `gender`, `country` and the Latin `title`
-to `index.json`, and `MetaData.md` forbids them in a dossier. Neither is
-derivable from a dossier — but all four are derivable from the **article**, which
-`extract` has open anyway.
+**A value that cannot be read is dropped, never guessed.** `external/07` §7.2
+rule 5 is "do not invent facts", and every dossier field is optional: an absent
+row is correct, a wrong one is a claim about a person.
 
-So `extract` asks for them in a `catalog` key, `normalize.ts` lifts them out of
-the dossier before it is written, and they land on the `catalogHints` channel.
-`catalog` reads them and stays LLM-free, with a strict precedence: **an existing
-index row wins**, then the hint, then the configured default. An index row is the
-one artefact here a human may have edited, so nothing derived overwrites it.
+### 1b. What the model is asked, and what it is not
 
-The alternative — a second classification pass over the corpus — would have cost
-a full extra round trip per entry to learn what the first pass already knew.
+The extraction contract used to be the dossier's JSON Schema — ~1200 tokens in
+the system prompt, and the same schema again in `response_format`, on every call
+for every document. It bought a model that reproduced a structure.
+
+None of that structure is information the model has. It is information *we* have.
+So the model is now asked for a **flat table of short keys** (`FlatFields.ts`),
+and the document is assembled here:
+
+| | before | after |
+|---|---|---|
+| schema in the system prompt | ~1923 tok | ~660 tok (the field card) |
+| schema in `response_format` | ~1195 tok | `json_object`, ~7 tok |
+| shape errors possible | nesting, arrays-vs-lists, forbidden members, date format, enum spelling | none — the shape is not the model's to get wrong |
+
+**≈ 2450 input tokens saved per extraction call**, before anything else.
+
+Three further things are never asked for at all:
+
+- **The gallery.** `media.photos` and `media.music` are a caption and a path, and
+  the article already contains both — in its `::: image` containers and its
+  tablature tables. `src/documents/markdown/media.ts` parses them. A harvested
+  `target` is the path the article contains rather than one a model retyped.
+- **`ranking`.** A project-defined editorial score is not a fact an article
+  contains. It stays available through `tasks.extract.fields`.
+- **Anything about an entry that already has a dossier.** See §1c.
+
+### 1c. `onExistingDossier` — the cheapest call is the one not made
+
+An existing `<slug>.bio.json` beside the article is authored data. It may have
+been curated, corrected, or written by hand for exactly the fields a model gets
+wrong, and regenerating it is both expensive and a regression.
+
+| Mode | Behaviour | Cost |
+|---|---|---|
+| `reuse` (default) | Normalize, migrate to version 2, re-emit | **zero tokens** |
+| `complete` | Ask only for the fields it lacks; merge without overwriting | one short question |
+| `rebuild` | Ignore it and extract from scratch | full |
+
+Only the **source-side** file counts. Extraction's own output is deliberately not
+an input to extraction's plan: a run that saw the file it wrote last time would
+change the task's fingerprint and re-plan forever. Whether the output is already
+current is what `--resume` and `run.skipExistingOutputs` answer.
+
+### 1d. How `catalog` classifies without calling a model
+
+`external/01` §1.1 assigns `type`, `gender`, `country`, `img` and the Latin
+`title` to `index.json`, and `external/05` §5.3 forbids them in a dossier.
+Neither is derivable from a dossier — but all of them are derivable from the
+**article**, which `extract` has open anyway, or from the version 1 document
+being migrated.
+
+So they travel on the `catalogHints` channel, and `catalog` stays LLM-free with a
+strict precedence: **an existing index row wins**, then the hint, then the
+configured default. An index row is the one artefact here a human may have
+edited, and its `id` is a join key that must never move.
+
+### 1e. The catalogue is updated, never rebuilt
+
+Regenerating `index.json` from whatever the current run processed is the single
+most destructive thing a producer can do to this format: a run over a subset
+would delete every row it did not visit, and with them every `id` that
+`index-<lang>.json` joins on — silently, because a broken join just falls back to
+the Latin `title`. `CatalogIndex.load` therefore reads the existing file and
+`upsert` edits it in place, preserving row order, unknown members and every row
+the run never saw. `mergeNameIndex` does the same for the name files, keeping a
+hand-authored `[0]` and appending only aliases that are new.
+
+`biomd validate` closes the loop: `INV-1 … INV-28` over the published files, no
+model, no network. Almost every way this format breaks is silent at runtime, so
+correctness has to be *checked*, not merely intended.
 
 ## 2. Layering
 
@@ -95,8 +172,9 @@ Dependencies point **inward**. No module imports from a layer above it.
 | `llm` | OpenAI-compatible transport, usage, cost, token estimate | tasks, documents |
 | `prompts` | template files → messages, cache-friendly ordering | LLM transport |
 | `documents` | document model, segmentation, context strategies | prompts, LLM |
-| `io` | discovery, path templates, atomic artifact writing | pipelines |
+| `io` | discovery, path templates, atomic artifact writing, catalogue reading | pipelines |
 | `state` | run journal, checkpoints, fingerprints, resume | pipelines |
+| `domain` | the catalogue format: value domains, vocabularies, dossier and index documents, invariants | scheduling, LLMs, the filesystem |
 | `pipelines` | task semantics (extract / translate) | concurrency, CLI |
 | `core` | planning, scheduling, budget, event bus | concrete pipelines |
 | `app` | wiring everything from a validated config | — |

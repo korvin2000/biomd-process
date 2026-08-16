@@ -21,6 +21,15 @@ export interface Artifact {
   body: string | JsonValue;
   /** Substituted into the channel's path template. */
   pathVars: PathVars;
+  /**
+   * Write even under `output.onExisting: skip` or `fail`.
+   *
+   * For an artifact that is itself the **result of merging** the existing file:
+   * the catalogue index and the name indices are read, updated and written back,
+   * so refusing the write does not protect anything — it discards the update and
+   * leaves the catalogue describing a corpus that has moved on.
+   */
+  overwrite?: boolean;
 }
 
 export interface WrittenArtifact {

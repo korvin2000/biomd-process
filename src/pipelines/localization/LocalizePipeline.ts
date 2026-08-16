@@ -1,5 +1,3 @@
-import { dirname, join } from 'node:path';
-
 import type { AppConfig, LocalizeTaskConfig } from '../../config/schema.js';
 import {
   soleItem,
@@ -11,11 +9,18 @@ import {
   type TaskSeed,
   type WorkItem,
 } from '../../core/types.js';
+import { sanitizeDossier, type DossierOptions } from '../../domain/dossier.js';
+import type { Dossier } from '../../domain/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
-import { pathExists, readJsonFile, readTextFile } from '../../shared/fs.js';
-import { shortHash } from '../../shared/hash.js';
+import { readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
+import {
+  findDossierToLocalize,
+  findSourceDossier,
+  outputDossierPath,
+  sourceDossierPath,
+} from '../shared/dossierSource.js';
 import { translateUnits } from '../shared/stringBatch.js';
 import { applyUnits, collectUnits, missingKeys, type LocalizationOptions } from './StringTable.js';
 import { TranslationMemory } from './TranslationMemory.js';
@@ -49,11 +54,13 @@ export class LocalizePipeline implements DocumentPipeline {
     const promptVersion = await context.prompts.versionOf(PIPELINE_ID);
     const extractEnabled = context.config.tasks.extract.enabled;
 
-    // The dossier this task localizes is either already on disk or about to be
-    // written by `extract`. Fold whichever is knowable into the fingerprint so a
-    // hand-edited dossier, or a changed extraction prompt, redoes the editions.
-    const sourcePath = await this.resolveSource(item, context.config, context.writer).catch(() => undefined);
-    const sourceHash = sourcePath ? shortHash(await this.hashOf(sourcePath), 12) : 'pending';
+    // A hand-edited dossier beside the article must redo the editions, so its
+    // hash goes into the fingerprint. This run's *own* extraction output must
+    // not: folding in a file this run writes would change the fingerprint after
+    // every run and make resume permanently useless. What the article said is
+    // already covered — the planner folds the work item's content hash in.
+    const authored = await findSourceDossier(item, context.config);
+    const sourceHash = authored?.hash ?? 'none';
     const extractVersion = extractEnabled ? await context.prompts.versionOf('extract') : 'off';
 
     return this.targetLanguages(item, context.config).map((targetLang) => ({
@@ -82,12 +89,14 @@ export class LocalizePipeline implements DocumentPipeline {
       throw new PipelineError('Localization task is missing its target language', { details: { taskId: task.taskId } });
     }
 
-    const source = await this.loadSource(item, context);
+    const loaded = await this.loadSource(item, context);
+    const source = loaded.dossier as unknown as JsonValue;
     const options: LocalizationOptions = { localizable: config.localizableFields, listFields: config.listFields };
     const units = collectUnits(source, options);
 
     if (units.length === 0) {
       return this.result(config, item, targetLang, source, { ...EMPTY_USAGE }, 0, [
+        ...loaded.notes,
         'No translatable strings in the dossier; the edition is a verbatim copy.',
       ]);
     }
@@ -117,50 +126,59 @@ export class LocalizePipeline implements DocumentPipeline {
     });
 
     const localized = applyUnits(source, options, batch.translations);
-    const notes = [...batch.notes];
+    const notes = [...loaded.notes, ...batch.notes];
     const unresolved = missingKeys(units, batch.translations);
     if (unresolved.length > 0) {
       notes.push(`${unresolved.length} string(s) kept their source text: no translation was returned.`);
     }
 
-    return this.result(config, item, targetLang, localized, batch.usage, batch.costUsd, notes);
+    // One pass through the sanitizer so the edition is punctuated, ordered and
+    // shaped exactly like its source — the comparison `INV-17` is checked by.
+    const clean = sanitizeDossier(localized, this.dossierOptions(context));
+    return this.result(
+      config,
+      item,
+      targetLang,
+      clean.dossier as unknown as JsonValue,
+      batch.usage,
+      batch.costUsd,
+      [...notes, ...clean.notes],
+    );
   }
 
   /**
    * The dossier to localize: the extraction output for the source language, or —
    * when extraction is off — the dossier sitting beside the article, which is how
    * an existing corpus is laid out.
+   *
+   * Either way it goes through the sanitizer first. A hand-authored file may be a
+   * version 1 document, and localizing one would copy its withdrawn identity
+   * members into every edition instead of migrating them once.
    */
-  private async loadSource(item: WorkItem, context: ExecutionContext): Promise<JsonValue> {
-    const file = await this.resolveSource(item, context.config, context.writer);
-    return readJsonFile<JsonValue>(file);
-  }
-
-  private async resolveSource(
+  private async loadSource(
     item: WorkItem,
-    config: ExecutionContext['config'],
-    writer: ExecutionContext['writer'],
-  ): Promise<string> {
-    const produced = writer.resolvePath({
-      channel: config.tasks.localize.outputChannel,
-      format: 'json',
-      body: '',
-      pathVars: this.pathVars(item, item.language),
-    });
-    if (await pathExists(produced)) return produced;
+    context: ExecutionContext,
+  ): Promise<{ dossier: Dossier; notes: string[] }> {
+    const existing = await findDossierToLocalize(item, context.config, context.writer);
+    if (!existing) {
+      const produced = outputDossierPath(item, context.config, context.writer);
+      const sibling = sourceDossierPath(item, context.config);
+      throw new PipelineError(
+        `No source dossier for "${item.id}". Looked for ${produced} and ${sibling}. ` +
+          'Enable tasks.extract, or place a dossier next to the article.',
+        { details: { item: item.id, produced, sibling } },
+      );
+    }
 
-    const sibling = join(dirname(item.absolutePath), `${item.slug}${config.input.slugSuffix.replace(/\.md$/, '.json')}`);
-    if (await pathExists(sibling)) return sibling;
-
-    throw new PipelineError(
-      `No source dossier for "${item.id}". Looked for ${produced} and ${sibling}. ` +
-        'Enable tasks.extract, or place a dossier next to the article.',
-      { details: { item: item.id, produced, sibling } },
-    );
+    const sanitized = sanitizeDossier(existing.value, this.dossierOptions(context));
+    return { dossier: sanitized.dossier, notes: sanitized.notes };
   }
 
-  private async hashOf(file: string): Promise<string> {
-    return readTextFile(file).catch(() => '');
+  private dossierOptions(context: ExecutionContext): DossierOptions {
+    return {
+      supportedLanguages: context.config.catalogue.supportedLanguages,
+      allowUnknownTypes: context.config.catalogue.allowUnknownTypes,
+    };
   }
 
   private result(

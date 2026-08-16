@@ -1,5 +1,11 @@
 # Catalogue Index Format
 
+> **SUPERSEDED.** This document has been replaced by [`external/`](../external/README.md),
+> the reader application's current normative specification (format version 2, nine
+> documents). It is kept only so that the reasoning behind older decisions stays
+> readable. **Do not implement against it** — where the two disagree, `external/`
+> is right, and `src/domain` follows `external/`.
+
 `pages/index.json` · `pages/index-<lang>.json`
 
 **Version:** 2.0 · **Status:** normative · **Date:** 2026-07-31

@@ -103,4 +103,16 @@ describe('run command argument handling', () => {
       /too many arguments/i,
     );
   });
+
+  /**
+   * `--only` used to disable `extract` and `translate` and silently leave
+   * `localize` and `catalog` enabled — so `--only extract` went on paying for
+   * localization, which is the opposite of what the flag is for.
+   */
+  it('refuses a pipeline name it does not know, instead of disabling everything', async () => {
+    const command = createRunCommand().exitOverride();
+    await expect(command.parseAsync(['--only', 'extrct', '--dry-run'], { from: 'user' })).rejects.toThrow(
+      /Unknown pipeline\(s\) in --only: extrct/,
+    );
+  });
 });

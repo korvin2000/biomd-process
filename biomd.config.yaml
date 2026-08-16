@@ -45,6 +45,23 @@ output:
   jsonIndent: 2
 
 # --------------------------------------------------------------------------
+# The published format itself — see external/ for the normative specification.
+# These are deployment properties, not task settings: extract, localize, catalog
+# and `biomd validate` all have to agree about them.
+# --------------------------------------------------------------------------
+catalogue:
+  # The closed set of content languages (VD-LANG). Chinese is `zh`, never `ch`.
+  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko]
+  # `type` for a biography nothing else classified.
+  defaultType: guitarist
+  # `type` for an article-only entry (About, News): `hidden` keeps it out of the
+  # grid, search and the facets while leaving it routable.
+  defaultPageType: hidden
+  # The vocabulary is open in the format; false is safer for machine-produced
+  # values, where an unknown craft is usually an invented synonym.
+  allowUnknownTypes: false
+
+# --------------------------------------------------------------------------
 # What to do with them. Enable any combination.
 #
 # With all four on, ru/x.bio.md produces:
@@ -59,16 +76,27 @@ tasks:
     pool: extract
     outputChannel: metadata
     # A response missing all of these is rejected and retried / escalated.
-    requiredFields:
-      - metadata.forename
-      - metadata.surname
-    # A date that cannot be read as DD.MM.YYYY (or a partial form of it):
-    # drop it and note the loss, or reject the answer and spend a retry on it.
-    onInvalidDate: drop
+    requiredFields: [forename, surname]
+    # An existing <slug>.bio.json — beside the article, or from a previous run —
+    # is authored data:
+    #   reuse    (default) never call a model; normalize, migrate to v2, re-emit
+    #   complete ask only for the fields it lacks, and never overwrite one it has
+    #   rebuild  ignore it and extract from scratch
+    onExistingDossier: reuse
+    # The gallery is parsed out of the article's own ::: image containers and
+    # tablature tables. Costs nothing, and the target is the path the article
+    # contains rather than one a model retyped.
+    harvest:
+      photos: true
+      music: true
+      maxItems: 60
     # `type`/`gender`/`country`/Latin `title` belong to index.json, not to a
     # dossier — but the article is open anyway, so a model that notices them
     # writes them to the catalogHints channel for `catalog` to pick up.
     emitCatalogHints: true
+    # Empty = the built-in field card. Naming fewer keys is the most direct cost
+    # lever there is: the card *is* the prompt.
+    fields: []
 
   translate:
     enabled: true
@@ -76,6 +104,11 @@ tasks:
     outputChannel: translation
     targetLanguages: [en]
     skipSourceLanguage: true
+    # Copy the source article into the output tree as its original edition.
+    # INV-8 wants a file for every code in a row's `lang`, the first one
+    # included — and when input.baseDir and output.baseDir differ, nothing else
+    # puts it there. Costs nothing. Turn off when the corpus *is* the root.
+    copySourceArticle: true
     # strict | lenient | off. strict is right for `segments` mode, where the
     # skeleton is never sent and so cannot legitimately change.
     verifyStructure: strict
@@ -117,10 +150,10 @@ tasks:
     # Search-only aliases after the display name: the bare surname, the inverted
     # order, and a romanization for a non-Latin edition.
     generateAliases: true
-    preserveIds: true
-    # Only for an entry nothing else classified: an existing index row wins,
-    # then the extraction hint, then this.
-    defaultType: guitarist
+    # Update the existing index.json rather than replacing it. Turning this off
+    # deletes every row this run did not visit — and with them their ids, which
+    # index-<lang>.json joins on and which must be stable forever.
+    merge: true
 
 # --------------------------------------------------------------------------
 # LLM endpoints (any OpenAI-compatible URL) and the models they serve

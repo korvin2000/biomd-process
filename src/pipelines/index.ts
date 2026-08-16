@@ -1,12 +1,18 @@
 export { ExtractionPipeline } from './extraction/ExtractionPipeline.js';
 export {
-  metadataSchema,
-  metadataJsonSchema,
-  emptyMetadata,
-  METADATA_SCHEMA_NAME,
-} from './extraction/MetadataContract.js';
-export type { MetadataDocument } from './extraction/MetadataContract.js';
-export { mergeMetadata, hasField } from './extraction/merge.js';
+  DEFAULT_FIELDS,
+  CATALOG_FIELDS,
+  OPTIONAL_FIELDS,
+  fieldsFor,
+  parseFlatAnswer,
+  normalizeFlat,
+  mergeFlat,
+  buildDossier,
+  toCardKey,
+} from './extraction/FlatFields.js';
+export type { FlatField, FlatRecord } from './extraction/FlatFields.js';
+export { findSourceDossier, findDossierToLocalize, sourceDossierPath, outputDossierPath } from './shared/dossierSource.js';
+export type { ExistingDossier } from './shared/dossierSource.js';
 
 export { TranslationPipeline } from './translation/TranslationPipeline.js';
 export { StructureGuard } from './translation/StructureGuard.js';
@@ -19,10 +25,9 @@ export { TranslationMemory } from './localization/TranslationMemory.js';
 export type { MemoryStats } from './localization/TranslationMemory.js';
 
 export { CatalogPipeline } from './catalog/CatalogPipeline.js';
-export { IdAllocator } from './catalog/IdAllocator.js';
-export type { CatalogRow } from './catalog/IdAllocator.js';
 export { displayNamesOf, latinTitleOf } from './catalog/names.js';
 export type { DossierNames } from './catalog/names.js';
+export { foldToAscii, romanizeCyrillic, isLatinScript, toAscii } from './catalog/romanize.js';
 
 export { runWithEscalation } from './shared/escalation.js';
 export type { EscalationSpec, EscalationResult, Parsed } from './shared/escalation.js';

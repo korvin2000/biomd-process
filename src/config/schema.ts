@@ -366,25 +366,49 @@ export const extractTaskSchema = taskBase
     outputChannel: z.string().default('metadata'),
     /** Fail the task when the model returns none of these fields. */
     requiredFields: z.array(z.string()).default([]),
-    /** Comma-separated list fields: punctuation normalized, chunks unioned. */
-    listFields: z.array(z.string()).default(DEFAULT_LIST_FIELDS),
     /**
-     * A date that cannot be read as `DD.MM.YYYY` (or a partial form of it).
-     * `drop` keeps the rest of the dossier and notes the loss — every field is
-     * optional, so a missing date degrades gracefully. `reject` turns it into a
-     * validation failure and spends a retry, then a stronger model, on it.
+     * The field card sent to the model, by key. Empty means the built-in card
+     * (`DEFAULT_FIELDS` in `src/pipelines/extraction/FlatFields.ts`). Naming
+     * fewer fields is the most direct cost lever there is: the card *is* the
+     * prompt, and the answer is one line per key.
+     *
+     * `ranking` is available but deliberately absent from the default: it is a
+     * project-defined editorial score, so a model answering it is guessing.
      */
-    onInvalidDate: z.enum(['drop', 'reject']).default('drop'),
+    fields: z.array(z.string()).default([]),
+    /**
+     * What to do when `<slug>.bio.json` already exists — beside the article, or
+     * from a previous run.
+     *
+     * - `reuse` (default) — do not call a model at all. The file is normalized,
+     *   migrated to version 2 and re-emitted. Zero tokens.
+     * - `complete` — ask only for the fields it is missing, and merge without
+     *   ever overwriting a value it already has.
+     * - `rebuild` — ignore it and extract from scratch.
+     */
+    onExistingDossier: z.enum(['reuse', 'complete', 'rebuild']).default('reuse'),
+    /**
+     * The gallery is parsed out of the article's own `::: image` containers and
+     * tablature tables instead of being asked for. It costs nothing, and a
+     * harvested `target` is the path the article actually contains rather than
+     * one a model retyped.
+     */
+    harvest: z
+      .object({
+        photos: z.boolean().default(true),
+        music: z.boolean().default(true),
+        /** Ceiling per list — a discography table can hold a hundred rows. */
+        maxItems: z.number().int().positive().default(60),
+      })
+      .default({}),
     /**
      * Write the classification a model noticed but a dossier may not keep
      * (`type`, `gender`, `country`, Latin `title`) to the `catalogHints`
-     * channel, where `catalog` picks it up. Costs nothing: the article was read
-     * for the dossier anyway.
+     * channel, where `catalog` picks it up. Costs four short lines: the article
+     * was read for the dossier anyway.
      */
     emitCatalogHints: z.boolean().default(true),
     hintsChannel: z.string().default('catalogHints'),
-    /** TODO(domain): point at a JSON Schema file to override the built-in contract. */
-    schemaFile: z.string().optional(),
   })
   .default({});
 
@@ -394,6 +418,16 @@ export const translateTaskSchema = taskBase
     targetLanguages: z.array(languageCode).default([]),
     /** Never translate a document into the language it is already in. */
     skipSourceLanguage: z.boolean().default(true),
+    /**
+     * Copy the source article into the output tree as its original edition.
+     *
+     * `INV-8` requires a file for every code in a row's `lang`, the first one
+     * included. When `input.baseDir` and `output.baseDir` are different
+     * directories, nothing else puts the original there and the catalogue
+     * declares an edition that cannot load. Costs nothing — no model is called.
+     * Turn it off when the corpus already *is* the catalogue root.
+     */
+    copySourceArticle: z.boolean().default(true),
     /**
      * Reject a translation whose Markdown skeleton diverges from the source.
      * `strict` compares token for token — right for `segments` mode, where the
@@ -461,19 +495,20 @@ export const catalogTaskSchema = z
     localizedIndexChannel: z.string().default('catalogLocalizedIndex'),
     /** Emit `index-<lang>.json` display-name files alongside `index.json`. */
     localizedNames: z.boolean().default(true),
-    /** Keep ids from an existing index at the output path; ids must never be reused. */
-    preserveIds: z.boolean().default(true),
+    /**
+     * Read the existing `index.json` and update it, rather than replacing it.
+     *
+     * Turning this off is destructive by design and almost never right: a run
+     * over a subset of the corpus would delete every row it did not visit, and
+     * with them every id that `index-<lang>.json` joins on.
+     */
+    merge: z.boolean().default(true),
     /** Where `extract` left the classification it noticed while reading the article. */
     hintsChannel: z.string().default('catalogHints'),
     /**
-     * `type` for an entry nothing else classified. The catalogue's own value
-     * always wins, then the extraction hint, then this.
-     */
-    defaultType: z.string().default('musician'),
-    /**
      * Search aliases beyond the display name — the bare surname, the inverted
-     * order, and a romanization for non-Latin scripts. `Catalog-Index.md` §10 is
-     * explicit that aliases are what makes cross-script search work.
+     * order, and a romanization for non-Latin scripts. Aliases are what makes
+     * cross-script search work without transliteration.
      */
     generateAliases: z.boolean().default(true),
   })
@@ -485,6 +520,46 @@ export const tasksSchema = z
     translate: translateTaskSchema,
     localize: localizeTaskSchema,
     catalog: catalogTaskSchema,
+  })
+  .default({});
+
+// ---------------------------------------------------------------------------
+// The published format
+// ---------------------------------------------------------------------------
+
+/**
+ * Deployment properties of the catalogue this tool produces.
+ *
+ * These are not task settings: they describe the *format's* environment — which
+ * content languages exist, what an unclassified entry is called — and four
+ * different pipelines plus the validator have to agree about them. See
+ * `external/` for the normative specification.
+ */
+export const catalogueSchema = z
+  .object({
+    /**
+     * The closed set of content languages (`VD-LANG`). A code outside it is
+     * dropped rather than treated as an error, exactly as a reader does.
+     */
+    supportedLanguages: z
+      .array(z.string().regex(/^[a-z]{2}$/, 'must be a lowercase ISO 639-1 code'))
+      .min(1)
+      .default(['en', 'es', 'ja', 'de', 'fr', 'it', 'pt', 'ru', 'zh', 'ko']),
+    /** `type` for a biography nothing else classified. */
+    defaultType: z.string().default('musician'),
+    /**
+     * `type` for an article-only entry nothing else classified. `hidden` keeps
+     * technical pages ("About", "News") out of the grid, search and the facets
+     * while leaving them routable — which is what that reserved value is for.
+     */
+    defaultPageType: z.string().default('hidden'),
+    /**
+     * Keep a craft outside the established vocabulary. The format's vocabulary
+     * is open, so `true` is conforming; `false` is safer for machine-produced
+     * values, where an unknown token is far more often an invented synonym than
+     * a genuinely new craft.
+     */
+    allowUnknownTypes: z.boolean().default(false),
   })
   .default({});
 
@@ -552,6 +627,7 @@ export const appConfigSchema = z
       .default({}),
     input: inputSchema.default({}),
     output: outputSchema.default({}),
+    catalogue: catalogueSchema,
     tasks: tasksSchema,
     llm: llmSchema,
     reliability: reliabilitySchema,
@@ -575,6 +651,7 @@ export type ContextConfig = z.infer<typeof contextSchema>;
 export type InputConfig = z.infer<typeof inputSchema>;
 export type OutputConfig = z.infer<typeof outputSchema>;
 export type TasksConfig = z.infer<typeof tasksSchema>;
+export type CatalogueConfig = z.infer<typeof catalogueSchema>;
 export type ExtractTaskConfig = z.infer<typeof extractTaskSchema>;
 export type TranslateTaskConfig = z.infer<typeof translateTaskSchema>;
 export type LocalizeTaskConfig = z.infer<typeof localizeTaskSchema>;

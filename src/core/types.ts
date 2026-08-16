@@ -61,6 +61,13 @@ export interface TaskSeed {
   expectedOutputs: Array<{ channel: string; pathVars: PathVars }>;
   /** Tasks that must finish first. Unresolvable entries are dropped, not failed. */
   dependsOn?: TaskDependency[];
+  /**
+   * False for a task that will call no model — an aggregation, or a dossier
+   * this run is reusing rather than extracting. Keeps it out of the cost
+   * preview, which is only worth reading if it is accurate. Defaults to the
+   * pipeline's own `usesLlm`.
+   */
+  usesLlm?: boolean;
 }
 
 export interface PlannedTask {
@@ -75,6 +82,8 @@ export interface PlannedTask {
   workItemId: string;
   /** Task ids that must complete before this one may start. */
   dependencies: readonly string[];
+  /** False when this task will call no model. See {@link TaskSeed.usesLlm}. */
+  usesLlm?: boolean;
 }
 
 /**

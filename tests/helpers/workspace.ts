@@ -31,7 +31,10 @@ export class Workspace {
 
   /** The template pairs every built-in pipeline expects. */
   async writeDefaultPrompts(): Promise<void> {
-    await this.writeFile('prompts/extraction/system.md', 'Extract metadata. Schema:\n<%= it.schemaText %>');
+    await this.writeFile(
+      'prompts/extraction/system.md',
+      'Extract these facts:\n<% var card = it.fields || []; card.forEach(function (f) { %>- <%= f.key %>: <%= f.hint %>\n<% }); %>',
+    );
     await this.writeFile('prompts/extraction/user.md', 'Language: <%= it.language %>. Return JSON only.');
     await this.writeFile('prompts/translation/system.md', 'Translate, preserving Markdown structure exactly.');
     await this.writeFile(
@@ -117,11 +120,15 @@ export interface FakeCall {
 /**
  * Deterministic stand-in for a provider.
  *
- * Three shapes, told apart by `response_format`:
- *  - `json_schema` → extraction, answered with the supplied metadata;
- *  - `json_object` → a string batch, answered by echoing every key (an identity
- *    translation, which is the one answer guaranteed to keep the structure and
+ * Three shapes. Extraction and a string batch both ask for `json_object` now —
+ * the extraction contract is a flat table of facts, not a schema — so they are
+ * told apart by what the request actually carries: a `json` fenced block is a
+ * `{key: text}` batch, a `markdown` one is an article.
+ *
+ *  - a `json` block  → a string batch, answered by echoing every key (an
+ *    identity translation, the one answer guaranteed to keep the structure and
  *    every mask token intact);
+ *  - `json_object` without one → extraction, answered with the supplied facts;
  *  - otherwise → whole-document translation, answered with the document itself.
  */
 export class FakeClient implements LlmClient {
@@ -132,10 +139,10 @@ export class FakeClient implements LlmClient {
     private readonly behaviour: (call: FakeCall, index: number) => CompletionResponse | Error = () => new Error('unset'),
   ) {}
 
-  static happyPath(metadata: unknown = { metadata: { forename: 'Пако', surname: 'де Лусия' } }): FakeClient {
+  static happyPath(facts: unknown = DEFAULT_FACTS): FakeClient {
     return new FakeClient((call) => {
-      if (call.request.responseFormat?.type === 'json_schema') return respond(JSON.stringify(metadata));
-      if (call.request.responseFormat?.type === 'json_object') return respond(echoTable(call.request));
+      if (isStringBatch(call.request)) return respond(echoTable(call.request));
+      if (call.request.responseFormat?.type === 'json_object') return respond(JSON.stringify(facts));
       return respond(lastFencedBlock(call.request));
     });
   }
@@ -171,6 +178,24 @@ export function respond(text: string, overrides: Partial<CompletionResponse> = {
     latencyMs: 1,
     ...overrides,
   };
+}
+
+/** The flat facts the extraction card asks for, as a model would answer them. */
+export const DEFAULT_FACTS = {
+  forename: 'Пако',
+  surname: 'де Лусия',
+  born: '21.12.1947',
+  jobs: 'Гитарист,Композитор',
+  url: 'https://fundacionpacodelucia.com/legado/',
+  type: 'guitarist',
+  gender: 'm',
+  country: 'es',
+  latin: 'Paco de Lucia',
+};
+
+/** A `{key: text}` table is fenced as `json`; an article is fenced as `markdown`. */
+export function isStringBatch(request: CompletionRequest): boolean {
+  return (request.messages.at(-1)?.content ?? '').includes('```json');
 }
 
 /** The document block the MessageBuilder appended last. */

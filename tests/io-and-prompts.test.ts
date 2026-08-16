@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { placeholdersOf, renderPathTemplate } from '../src/io/PathTemplate.js';
 import { MessageBuilder } from '../src/prompts/MessageBuilder.js';
 import { extractJsonBlock } from '../src/shared/json.js';
-import { hasField, mergeMetadata } from '../src/pipelines/extraction/merge.js';
+import { readCatalogue } from '../src/io/CatalogueReader.js';
 import { estimateCost } from '../src/llm/CostCalculator.js';
+import { Workspace } from './helpers/workspace.js';
 import { HeuristicTokenEstimator } from '../src/llm/TokenEstimator.js';
 
 describe('path templates', () => {
@@ -75,27 +76,38 @@ describe('JSON recovery', () => {
   });
 });
 
-describe('metadata merge', () => {
-  it('takes the first non-empty scalar and unions media by target', () => {
-    const merged = mergeMetadata([
-      { metadata: { forename: 'Пако' }, media: { photos: [{ label: 'a', target: '/a.jpg' }], music: [] }, documents: [] },
-      {
-        metadata: { forename: 'Paco', surname: 'де Лусия' },
-        media: { photos: [{ label: 'a again', target: '/a.jpg' }, { label: 'b', target: '/b.jpg' }], music: [] },
-        documents: [],
-      },
-    ]);
+describe('reading a published catalogue', () => {
+  it('sorts the files into index, name indices and dossiers, keeping the raw bytes', async () => {
+    const workspace = await Workspace.create();
+    try {
+      await workspace.writeFile('site/index.json', '[{"id":"1","md":"/a.bio.md"}]');
+      await workspace.writeFile('site/index-ru.json', '{"1":["А"]}');
+      await workspace.writeFile('site/ru/a.bio.json', '{"metadata":{}}');
+      await workspace.writeFile('site/ru/a.bio.md', '# A');
+      await workspace.writeFile('site/photos/a.jpg', 'not really a jpeg');
 
-    expect(merged.metadata['forename']).toBe('Пако');
-    expect(merged.metadata['surname']).toBe('де Лусия');
-    expect(merged.media.photos.map((photo) => photo.target)).toEqual(['/a.jpg', '/b.jpg']);
+      const snapshot = await readCatalogue(workspace.path('site'), { supportedLanguages: ['ru', 'en'] });
+
+      expect(snapshot.index.value).toEqual([{ id: '1', md: '/a.bio.md' }]);
+      expect(snapshot.index.raw).toContain('"id"');
+      expect([...snapshot.names.keys()]).toEqual(['ru']);
+      expect([...snapshot.dossiers.keys()]).toEqual(['ru/a.bio.json']);
+      expect(snapshot.files.has('photos/a.jpg')).toBe(true);
+    } finally {
+      await workspace.destroy();
+    }
   });
 
-  it('resolves dot paths for required-field checks', () => {
-    const document = { metadata: { forename: 'X', dates: { born: '01.01.1900' } }, media: { photos: [], music: [] }, documents: [] };
-    expect(hasField(document, 'metadata.forename')).toBe(true);
-    expect(hasField(document, 'metadata.dates.born')).toBe(true);
-    expect(hasField(document, 'metadata.surname')).toBe(false);
+  it('records an unparseable file rather than failing the read', async () => {
+    const workspace = await Workspace.create();
+    try {
+      await workspace.writeFile('site/index.json', '[{"id":');
+      const snapshot = await readCatalogue(workspace.path('site'), { supportedLanguages: ['ru'] });
+      expect(snapshot.index.value).toBeUndefined();
+      expect(snapshot.index.raw).toBe('[{"id":');
+    } finally {
+      await workspace.destroy();
+    }
   });
 });
 

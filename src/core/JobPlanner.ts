@@ -125,6 +125,7 @@ export class JobPlanner {
         items,
         workItemId,
         dependencies: [],
+        ...(seed.usesLlm === undefined ? {} : { usesLlm: seed.usesLlm }),
       },
     };
   }

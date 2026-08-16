@@ -1,15 +1,9 @@
-import type { CatalogRow } from './IdAllocator.js';
+import type { Dossier, EntryRow } from '../../domain/types.js';
+import { text } from '../../domain/values.js';
 import { isLatinScript, romanizeCyrillic, toAscii } from './romanize.js';
 
-/** The part of a dossier the catalogue reads: the display name only. */
-export interface DossierNames {
-  metadata?: {
-    forename?: unknown;
-    surname?: unknown;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
+/** The part of a dossier the catalogue reads: the name components only. */
+export type DossierNames = Pick<Dossier, 'metadata'> & { [key: string]: unknown };
 
 export interface NameOptions {
   /** Emit search-only aliases after the display name. */
@@ -20,30 +14,29 @@ export interface NameOptions {
  * Display names per language, in the `index-<lang>.json` shape.
  *
  * `[0]` is the rendered display name; `[1…]` are **search-only** aliases, and
- * they are the whole reason this file exists — a reader who types `Сеговия`,
+ * they are the whole reason the file exists — a reader who types `Сеговия`,
  * `Segovia` or `Segovia Andres` should reach the same entry. Three aliases are
  * derivable without guesswork and each answers a real query:
  *
  *  - the **bare surname**, which is how most people search;
  *  - the **inverted order**, which is how catalogues and record sleeves print it;
- *  - a **romanization**, for a non-Latin edition — this is what lets a Latin
- *    query find an entry written in Cyrillic, and it is the one case where the
- *    guide's "aliases make multilingual search work" is doing real work.
+ *  - a **romanization**, for a non-Latin edition — the one mechanism that lets a
+ *    Latin query reach an entry whose every name is in Cyrillic.
  *
- * A language is omitted when its name equals the Latin `title` and there is no
- * alias to add — the guide calls a lone `["Django Reinhardt"]` under a row
- * already titled that "dead weight", and its validator warns about it.
+ * A language is omitted when its only name would repeat the Latin `title`: the
+ * fallback chain produces exactly that string anyway, so the entry would be dead
+ * weight (`INV-14`).
  */
 export function displayNamesOf(
-  row: CatalogRow,
+  row: Pick<EntryRow, 'title'>,
   dossiers: ReadonlyMap<string, DossierNames>,
   options: NameOptions = { aliases: true },
 ): Map<string, string[]> {
   const result = new Map<string, string[]>();
 
   for (const [lang, dossier] of dossiers) {
-    const forename = text(dossier.metadata?.forename);
-    const surname = text(dossier.metadata?.surname);
+    const forename = text(dossier.metadata?.forename) ?? '';
+    const surname = text(dossier.metadata?.surname) ?? '';
     const display = [forename, surname].filter(Boolean).join(' ').trim();
     if (!display) continue;
 
@@ -60,7 +53,7 @@ export function displayNamesOf(
 /**
  * The display name first, then aliases in the order a search index benefits
  * from them. Deduplicated case-insensitively, because an alias identical to the
- * display name is dead weight the guide's validator flags.
+ * display name is dead weight a validator flags.
  */
 function withAliases(display: string, forename: string, surname: string, title: string): string[] {
   const candidates = [display];
@@ -70,7 +63,7 @@ function withAliases(display: string, forename: string, surname: string, title: 
   // inverting it would produce nonsense.
   if (forename && surname && !forename.includes(',')) candidates.push(`${surname} ${forename}`);
 
-  // Only for a name that a Latin-keyboard reader cannot type as it stands.
+  // Only for a name a Latin-keyboard reader cannot type as it stands.
   if (!isLatinScript(display)) {
     const romanized = romanizeCyrillic(display);
     if (romanized && romanized !== title) candidates.push(romanized);
@@ -85,23 +78,19 @@ function withAliases(display: string, forename: string, surname: string, title: 
 /**
  * The Latin/ASCII fallback title, in the order the sources deserve to be trusted.
  *
- *  1. What a model concluded while reading the article (`extract`'s catalogue
- *     hint) — the only source that can romanize a CJK name at all.
+ *  1. What a model concluded while reading the article (the catalogue hint) —
+ *     the only source that can romanize a CJK name at all.
  *  2. A Latin-script edition's own name, folded to ASCII: `Andrés` → `Andres`,
- *     which is what §5.3 asks for and what a Latin-keyboard search can reach.
+ *     which is what `VD-LATIN` asks for and what a Latin query can reach.
  *  3. The de-slugged filename.
  *  4. A transliteration of a non-Latin edition's name.
  *
- * The slug outranks transliteration deliberately. Slugs are Latin by rule (§4.2)
- * and authored by a person, so `paco-de-lucia` yields `Paco de Lucia` — the name
- * the man actually used — where transliterating `Пако де Лусия` yields
- * `Pako de Lusiya`, which is defensible as a search alias and wrong as a title.
+ * The slug outranks transliteration deliberately. Slugs are Latin by rule and
+ * authored by a person, so `paco-de-lucia` yields `Paco de Lucia` — the name the
+ * man actually used — where transliterating `Пако де Лусия` yields
+ * `Pako de Lusiya`, defensible as a search alias and wrong as a title.
  */
-export function latinTitleOf(
-  slug: string,
-  dossiers: ReadonlyMap<string, DossierNames>,
-  hint?: string,
-): string {
+export function latinTitleOf(slug: string, dossiers: ReadonlyMap<string, DossierNames>, hint?: string): string {
   const fromHint = hint ? toAscii(hint) : undefined;
   if (fromHint) return fromHint;
 
@@ -126,8 +115,8 @@ export function latinTitleOf(
 }
 
 function nameOf(dossier: DossierNames): string | undefined {
-  const forename = text(dossier.metadata?.forename);
-  const surname = text(dossier.metadata?.surname);
+  const forename = text(dossier.metadata?.forename) ?? '';
+  const surname = text(dossier.metadata?.surname) ?? '';
   return [forename, surname].filter(Boolean).join(' ').trim() || undefined;
 }
 
@@ -166,8 +155,4 @@ function unique(values: readonly string[]): string[] {
     result.push(trimmed);
   }
   return result;
-}
-
-function text(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
 }
