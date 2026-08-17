@@ -56,7 +56,7 @@ export class Workspace {
       'Search for these facts:\n<% var card = it.fields || []; card.forEach(function (f) { %>- <%= f.key %>: <%= f.hint %>\n<% }); %>' +
         '<% if (it.checkLiveness) { %>Also answer status: alive | dead | unknown.<% } %>',
     );
-    await this.writeFile('prompts/websearch/user.md', 'Return JSON only.');
+    await this.writeFile('prompts/websearch/user.md', 'Language: <%= it.language %>. Return JSON only.');
   }
 
   path(...segments: string[]): string {

@@ -373,6 +373,73 @@ describe('an entry that already has a dossier', () => {
   });
 });
 
+/**
+ * A biography states its identity in the lead and everything else wherever the
+ * prose reached it. The head-first ladder answered the first question and
+ * stopped, so every fact past the truncation point came back absent —
+ * indistinguishable from an article that never stated it.
+ */
+describe('extraction reads the whole article', () => {
+  /** Long enough to be truncated by `headTokens: 1500`, small enough to fit one call. */
+  const TAIL = 'Играл на гитаре, лютне и даже балалайке.';
+  const LONG =
+    '# Пако де Лусия\n\nИспанский гитарист и композитор.\n\n' +
+    'Пако много гастролировал по всему миру и записывал новые альбомы.\n\n'.repeat(200) +
+    `${TAIL}\n`;
+
+  const CORPUS = { baseDir: 'corpus', include: ['*/long.bio.md'], sourceLanguage: 'auto' as const };
+
+  /** What the article block of each extraction call actually carried. */
+  function articlesSent(client: FakeClient): string[] {
+    return client.calls
+      .filter((call) => call.request.responseFormat?.type === 'json_object')
+      .map((call) => call.request.messages.at(-1)?.content ?? '');
+  }
+
+  beforeEach(async () => {
+    await workspace.writeFile('corpus/ru/long.bio.md', LONG);
+  });
+
+  it('skips the truncated rungs of the configured ladder instead of stopping at one', async () => {
+    const client = FakeClient.happyPath();
+    const app = workspace.app(
+      {
+        input: CORPUS,
+        tasks: { extract: { enabled: true, requiredFields: ['metadata.forename'] } },
+        context: { strategy: 'truncation-first' },
+      },
+      client,
+    );
+
+    await runJob(app);
+    const sent = articlesSent(client);
+
+    // One call, and it carried the sentence the head slice would have cut.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(TAIL);
+  });
+
+  it('still honours a deployment that asks for the cheap head-first reading', async () => {
+    const client = FakeClient.happyPath();
+    const app = workspace.app(
+      {
+        input: CORPUS,
+        tasks: {
+          extract: { enabled: true, requiredFields: ['metadata.forename'], readWholeDocument: false },
+        },
+        context: { strategy: 'truncation-first' },
+      },
+      client,
+    );
+
+    await runJob(app);
+    const sent = articlesSent(client);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toContain(TAIL);
+  });
+});
+
 describe('the catalogue is updated, not rebuilt', () => {
   const CATALOG_ONLY = { extract: { enabled: true }, catalog: { enabled: true } };
 

@@ -31,6 +31,21 @@ export interface EscalationSpec<T> {
   promptId: string;
   pool?: string;
   contextStrategyId: string;
+  /**
+   * How much of the document an answer is allowed to be based on.
+   *
+   * `any` (the default) walks the strategy's ladder as planned — the cheap
+   * truncated rungs first, which is right for a task that looks for a *specific*
+   * fact and can tell when it has found it.
+   *
+   * `whole` drops every rung that does not carry the entire document. A harvest
+   * task — "answer every key this article supports" — cannot tell "the article
+   * does not say" apart from "we did not send the part that says it", so a
+   * truncated rung there is not a cheap win but a silently incomplete answer.
+   * Skipping those rungs at plan time is also what keeps it free: rejecting them
+   * after the call would bill for a reading that was never usable.
+   */
+  coverage?: 'any' | 'whole';
   requiredCapabilities?: readonly Capability[];
   responseFormat?: ResponseFormat;
   expectedOutputTokens: number;
@@ -73,7 +88,7 @@ export async function runWithEscalation<T>(spec: EscalationSpec<T>): Promise<Esc
   };
 
   const strategy = context.contexts.get(spec.contextStrategyId);
-  const attempts = strategy.plan(document, budget);
+  const attempts = coveringAttempts(strategy.plan(document, budget), spec.coverage ?? 'any');
   const notes: string[] = [];
 
   let usage: TokenUsage = { ...EMPTY_USAGE };
@@ -183,6 +198,22 @@ async function callSegment<T>(
 
 function dedupe(notes: readonly string[]): string[] {
   return [...new Set(notes)];
+}
+
+/**
+ * The rungs that are allowed to answer, under this spec's coverage rule.
+ *
+ * Every built-in strategy ends with an attempt that carries the whole document
+ * (`full`, or `chunked` when it does not fit a window), so the filter normally
+ * leaves at least one. A custom strategy that offers nothing but truncated
+ * attempts keeps its plan rather than being left with nothing to run — a
+ * partial reading is still better than no reading, and the pipeline says so in
+ * its notes.
+ */
+function coveringAttempts(attempts: ContextAttempt[], coverage: 'any' | 'whole'): ContextAttempt[] {
+  if (coverage === 'any') return attempts;
+  const whole = attempts.filter((attempt) => !attempt.partial);
+  return whole.length > 0 ? whole : attempts;
 }
 
 /** Largest usable input window across the routing pool this task will use. */

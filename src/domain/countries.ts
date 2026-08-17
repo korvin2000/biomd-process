@@ -176,6 +176,9 @@ const NAME_LOCALES = ['en', 'ru', 'es', 'de', 'fr', 'it', 'pt', 'ja', 'zh', 'ko'
 /** Built once, on the first value that is not already a code. */
 let nameIndex: Map<string, Set<string>> | undefined;
 
+/** One `Intl.DisplayNames` per locale, built on first use. */
+const displayNames = new Map<string, Intl.DisplayNames | undefined>();
+
 export function isCountryCode(value: string): boolean {
   return alpha2.has(value.trim().toLowerCase());
 }
@@ -197,7 +200,9 @@ export function resolveCountry(raw: string): string | undefined {
   if (!value) return undefined;
 
   const lower = value.toLowerCase();
-  if (/^[a-z]{2}$/.test(lower)) return alpha2.has(lower) ? lower : undefined;
+  // Two letters are alpha-2 by intent — but only the alias table knows that
+  // `uk` means `gb`, and returning early here made its own entry unreachable.
+  if (/^[a-z]{2}$/.test(lower) && alpha2.has(lower)) return lower;
 
   const upper = value.toUpperCase();
   if (/^[A-Z]{3}$/.test(upper)) {
@@ -214,6 +219,63 @@ export function resolveCountry(raw: string): string | undefined {
   if (exact?.size === 1) return [...exact][0];
 
   return byUniquePrefix(key, names);
+}
+
+/**
+ * `("au", "ru")` → `"Австралия"`. The reverse of {@link resolveCountry}.
+ *
+ * `country` is a machine token, but a *place* is prose: `birthplace` is read by
+ * a human off a card, in the language of the edition it belongs to. A code that
+ * leaks into one — `"Melbourne, au"` — is not a terse spelling of the country,
+ * it is a value from the wrong domain, and it is exactly what a model produces
+ * when it has been told, once, that countries are ISO codes. ICU already knows
+ * every region's name in every deployment language, so repairing it is free.
+ *
+ * Falls back to English, then to `undefined` on a runtime without the locale
+ * data — never to the code itself, so a caller can tell "no name" from a name.
+ */
+export function countryName(code: string, language: string): string | undefined {
+  const value = code.trim().toLowerCase();
+  if (!alpha2.has(value)) return undefined;
+
+  const region = value.toUpperCase();
+  for (const locale of [language.trim().toLowerCase(), 'en']) {
+    const display = displayNamesFor(locale);
+    if (!display) continue;
+    try {
+      const name = display.of(region);
+      if (name && name !== region) return name;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The region-name facility for one locale, or nothing.
+ *
+ * An unsupported locale does **not** throw: `new Intl.DisplayNames(['zz'], …)`
+ * quietly resolves to the host's default locale, which would make the country
+ * name in a published dossier depend on which machine produced it. Asking
+ * `supportedLocalesOf` first is the only way to tell "ICU knows this language"
+ * from "ICU substituted yours".
+ */
+function displayNamesFor(locale: string): Intl.DisplayNames | undefined {
+  if (!locale) return undefined;
+  if (displayNames.has(locale)) return displayNames.get(locale);
+
+  let display: Intl.DisplayNames | undefined;
+  try {
+    display =
+      Intl.DisplayNames.supportedLocalesOf([locale]).length > 0
+        ? new Intl.DisplayNames([locale], { type: 'region', fallback: 'none' })
+        : undefined;
+  } catch {
+    display = undefined;
+  }
+  displayNames.set(locale, display);
+  return display;
 }
 
 /**

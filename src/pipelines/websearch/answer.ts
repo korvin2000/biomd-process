@@ -20,7 +20,7 @@
  *     recorded as having answered, not as having failed.
  */
 
-import { resolveCountry } from '../../domain/countries.js';
+import { countryName, resolveCountry } from '../../domain/countries.js';
 import { normalizeDate, normalizeUrl, refinesDate, text, type DatePrecision } from '../../domain/values.js';
 import { extractJsonBlock, safeJsonParse } from '../../shared/json.js';
 import type { WebField } from './gaps.js';
@@ -48,6 +48,21 @@ export interface AnswerOptions {
   minConfidence: number;
   /** Values already held, so a "refinement" that contradicts them is refused. */
   current?: Partial<Record<WebField, string>>;
+  /**
+   * The language of the edition this answer completes.
+   *
+   * The dossier being written is `out/<lang>/<slug>.bio.json`, so a prose value
+   * belongs in that language. The prompt asks for it; this is what the reader
+   * can still repair when the answer arrives in another form.
+   */
+  language?: string;
+  /**
+   * This entry's country, when `index.json` or an earlier task already knows
+   * it. Only used to disambiguate a code inside a place — see
+   * {@link normalizePlace}. When it is absent the answer's own `country` is
+   * used, and when that is absent too, no place is rewritten.
+   */
+  country?: string;
 }
 
 /**
@@ -64,11 +79,15 @@ export function parseWebAnswer(raw: string, options: AnswerOptions): WebAnswer |
   const values: WebValue[] = [];
   const rejected: string[] = [];
 
+  // Resolved before the loop, because a place is read against it and `country`
+  // comes after `birthplace` in the field order.
+  const context: AnswerOptions = { ...options, country: options.country ?? countryIn(root) };
+
   for (const field of options.asked) {
     const entry = readEntry(root, field);
     if (!entry) continue;
 
-    const verdict = accept(field, entry, options);
+    const verdict = accept(field, entry, context);
     if ('reason' in verdict) {
       rejected.push(`${field}: ${verdict.reason}`);
       continue;
@@ -118,6 +137,12 @@ function entry(value: string | undefined, source: string | undefined, confidence
   };
 }
 
+/** The country this same answer reports, whatever shape it reported it in. */
+function countryIn(root: Record<string, unknown>): string | undefined {
+  const entry = readEntry(root, 'country');
+  return entry ? resolveCountry(entry.value) : undefined;
+}
+
 function readStatus(root: Record<string, unknown>): LivenessStatus | undefined {
   const raw = (text(root['status']) ?? text(root['liveness']) ?? '').toLowerCase();
   if (/^(alive|living|жив)/.test(raw)) return 'alive';
@@ -139,7 +164,7 @@ function accept(field: WebField, entry: RawEntry, options: AnswerOptions): Verdi
     return { reason: `no usable source URL (${entry.source ?? 'none given'})` };
   }
 
-  const value = normalizeValue(field, entry.value, options.datePrecision);
+  const value = normalizeValue(field, entry.value, options);
   if (!value) return { reason: `"${entry.value}" is not a usable ${field}` };
 
   const current = options.current?.[field];
@@ -152,22 +177,94 @@ function accept(field: WebField, entry: RawEntry, options: AnswerOptions): Verdi
   };
 }
 
-function normalizeValue(field: WebField, raw: string, datePrecision: DatePrecision): string | undefined {
+function normalizeValue(field: WebField, raw: string, options: AnswerOptions): string | undefined {
   switch (field) {
     case 'born':
     case 'died':
-      return normalizeDate(raw, datePrecision);
+      return normalizeDate(raw, options.datePrecision);
     case 'country':
       return resolveCountry(raw);
     case 'url':
       return normalizeUrl(raw);
-    default: {
-      const value = text(raw);
-      // A place is two or three words; a sentence is the model explaining
-      // itself into a field a reader renders as a caption.
-      return value && value.length <= 120 ? value : undefined;
-    }
+    default:
+      return normalizePlace(raw, {
+        ...(options.language ? { language: options.language } : {}),
+        ...(options.country ? { country: options.country } : {}),
+      });
   }
+}
+
+/** A place is two or three words; a sentence is the model explaining itself. */
+const PLACE_MAX_CHARS = 120;
+
+export interface PlaceOptions {
+  /** The edition's language — the one the name is spelled back out in. */
+  language?: string;
+  /** This entry's country, when it is known. See {@link normalizePlace}. */
+  country?: string;
+}
+
+/**
+ * A place, with a country **code** inside it spelled back out as a word.
+ *
+ * `"Melbourne, au"` is what a search model writes once it has been told that
+ * countries are ISO 3166-1 alpha-2 — the rule belongs to the `country` key, and
+ * the model applies it to every country-shaped thing it produces. The result is
+ * published verbatim into a prose field and then *translated* by `localize`,
+ * which faithfully carries `au` into every edition.
+ *
+ * The repair only fires when the code is **unambiguous**, because a two-letter
+ * token after a city name is very often not a country at all:
+ *
+ * | | | |
+ * |---|---|---|
+ * | `Nashville, TN` | Tennessee | not Tunisia |
+ * | `Adelaide, SA`  | South Australia | not Saudi Arabia |
+ * | `Recife, PE`    | Pernambuco | not Peru |
+ * | `Los Angeles, CA` | California | not Canada |
+ *
+ * So alpha-3 (`AUS`) is expanded on sight — no subnational scheme collides with
+ * it — while alpha-2 is expanded only when it agrees with the country already
+ * established for this entry. Everything else is left exactly as written: a
+ * value that reads oddly is a smaller defect than a birthplace in the wrong
+ * hemisphere, and a country spelled as a word (`"Atlanta, Georgia"`) is never
+ * touched at all.
+ */
+export function normalizePlace(raw: string, options: PlaceOptions = {}): string | undefined {
+  const value = text(raw);
+  if (!value || value.length > PLACE_MAX_CHARS) return undefined;
+
+  // The whole value is a code: `"au"` → `"Австралия"`.
+  const whole = countryOf(value, options.country);
+  if (whole) return countryName(whole, options.language ?? 'en') ?? value;
+
+  // The tail is a code: `"Melbourne, au"` → `"Melbourne, Австралия"`.
+  const cut = value.lastIndexOf(',');
+  if (cut <= 0) return value;
+
+  const head = value.slice(0, cut).trim();
+  const code = head ? countryOf(value.slice(cut + 1).trim(), options.country) : undefined;
+  if (!code) return value;
+
+  const name = countryName(code, options.language ?? 'en');
+  return name ? `${head}, ${name}` : value;
+}
+
+/**
+ * The country a bare code names, when there is no other thing it could name.
+ *
+ * Anything that is not a two- or three-letter token is left to the caller: a
+ * country written as a word is already prose and needs no repair.
+ */
+function countryOf(token: string, known: string | undefined): string | undefined {
+  if (!/^[A-Za-z]{2,3}$/.test(token)) return undefined;
+
+  const code = resolveCountry(token);
+  if (!code) return undefined;
+  if (token.length === 3) return code;
+
+  // Two letters: only when the entry's own country already says so.
+  return known && code === known.toLowerCase() ? code : undefined;
 }
 
 function refines(field: WebField, current: string, candidate: string): boolean {

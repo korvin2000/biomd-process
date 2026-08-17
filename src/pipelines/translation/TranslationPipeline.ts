@@ -214,6 +214,10 @@ export class TranslationPipeline implements DocumentPipeline {
       promptId: PIPELINE_ID,
       pool: config.pool,
       contextStrategyId: config.contextStrategy ?? DEFAULT_CONTEXT_STRATEGY,
+      // A truncated rung can never produce a complete translation, so it is
+      // dropped before it is called rather than paid for and then rejected
+      // below. The rejection stays as the last line of defence.
+      coverage: 'whole',
       expectedOutputTokens: Math.ceil(document.estimatedTokens * OUTPUT_TOKEN_RATIO),
       variables: (_attempt, segment) => ({
         ...config.promptVariables,

@@ -390,6 +390,28 @@ export const extractTaskSchema = taskBase
      */
     fields: z.array(z.string()).default([]),
     /**
+     * Read the **whole** article, skipping the context ladder's truncated rungs.
+     *
+     * Extraction is a harvest, not a lookup: the question is "answer every key
+     * this article supports", and a model that was sent the first 1500 tokens
+     * answers it for the first 1500 tokens. It cannot report that it never saw
+     * the sentence naming the teachers, the award and the instruments — those
+     * keys simply come back absent, indistinguishable from an article that does
+     * not state them. Biographies put identity in the lead and everything else
+     * wherever the prose reached it.
+     *
+     * So the truncated rungs of whatever `context.strategy` is configured
+     * (`truncation-first`, `staged`) are dropped for this task and the ladder
+     * starts at the first rung that carries the whole document — which is also
+     * why this costs nothing rather than double-billing: the cheap call that
+     * would have been rejected is never made. An article too large for any
+     * window still degrades to a chunked pass, and `mergeFlat` unions the parts.
+     *
+     * `false` restores the cheap head-first behaviour for a corpus whose
+     * articles really do state everything in their opening paragraphs.
+     */
+    readWholeDocument: z.boolean().default(true),
+    /**
      * What to do when `<slug>.bio.json` already exists — beside the article, or
      * from a previous run.
      *

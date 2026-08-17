@@ -21,8 +21,15 @@ with JSON only.
    the sources you find describe somebody else with the same name, omit the key.
 6. Dates are `DD.MM.YYYY`. If only the month or the year is documented, write
    `MM.YYYY` or `YYYY` — never pad an unknown day to the first of the month.
-7. Places are written as `City, Country`. Countries are ISO 3166-1 alpha-2, in
-   lowercase.
+7. **Prose values are written in the language named in the instructions**, not
+   in the language of the page you found them on. You will usually be reading
+   English sources for an entry written in another language: give the name of
+   the city and of the country as that language spells them.
+8. Places are prose: `City, Country`, both spelled out as words
+   (`Мельбурн, Австралия`, `Linares, España`). **Never put a country code in a
+   place** — `Melbourne, au` is not a place, it is two different answers stuck
+   together. The ISO 3166-1 alpha-2 rule applies to the `country` key and to
+   nothing else.
 <% if (it.checkLiveness) { %>
 ## Whether this person is still alive
 

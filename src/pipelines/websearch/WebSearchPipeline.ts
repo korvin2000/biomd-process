@@ -111,7 +111,7 @@ export class WebSearchPipeline implements DocumentPipeline {
       notes.push(`No date of death and an age of about ${gaps.age}; asking whether this person is still alive.`);
     }
 
-    const answer = await this.ask(task, context, item, dossier, gaps);
+    const answer = await this.ask(task, context, item, dossier, gaps, hints);
     notes.push(...answer.notes);
 
     return this.apply(config, item, dossier, answer.value, gaps, options, notes, answer.usage, answer.costUsd);
@@ -128,6 +128,7 @@ export class WebSearchPipeline implements DocumentPipeline {
     item: WorkItem,
     dossier: Dossier,
     gaps: GapAnalysis,
+    hints: CatalogHints,
   ): Promise<{ value: WebAnswer; usage: typeof EMPTY_USAGE; costUsd: number; notes: string[] }> {
     const config = context.config.tasks.websearch;
     const asked = gaps.questions.map((question) => question.field);
@@ -168,6 +169,10 @@ export class WebSearchPipeline implements DocumentPipeline {
             requireSource: config.requireSource,
             minConfidence: config.minConfidence,
             current: currentValues(gaps.questions),
+            // The dossier being completed is this item's own edition, so a
+            // prose value belongs in its language.
+            language: item.language,
+            ...(hints.country ? { country: hints.country } : {}),
           });
           if (!parsed) return { ok: false, reason: 'the answer was not a JSON object' };
 

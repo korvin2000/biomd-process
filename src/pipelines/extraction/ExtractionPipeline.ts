@@ -131,6 +131,10 @@ export class ExtractionPipeline implements DocumentPipeline {
       promptId: PIPELINE_ID,
       pool: config.pool,
       contextStrategyId: config.contextStrategy ?? context.config.context.strategy,
+      // A harvest cannot tell "the article does not say" apart from "we did not
+      // send the part that says it", so the truncated rungs are not a cheap win
+      // here — they are a silently incomplete dossier.
+      coverage: config.readWholeDocument ? 'whole' : 'any',
       responseFormat: { type: 'json_object' },
       expectedOutputTokens: EXPECTED_OUTPUT_TOKENS,
       variables: (attempt, segment) => ({
@@ -149,6 +153,15 @@ export class ExtractionPipeline implements DocumentPipeline {
 
     const built = buildDossier(outcome.value, fields, { ...options, media: harvest });
     notes.push(...outcome.notes, ...built.notes);
+
+    // An absent key means two different things depending on this, and only the
+    // run log can tell them apart afterwards.
+    if (outcome.attempt.partial) {
+      notes.push(
+        `Only part of the article was read (${outcome.attempt.description}), so an absent field may be a fact ` +
+          'that was never sent rather than one the article omits.',
+      );
+    }
 
     if (!base) {
       return this.emit(config, item, built.dossier, built.hints, outcome.usage, outcome.costUsd, notes);
@@ -300,6 +313,7 @@ export class ExtractionPipeline implements DocumentPipeline {
       datePrecision,
       fields: fieldsFor({ include: config.fields, catalogHints: config.emitCatalogHints }).map((field) => field.key),
       requiredFields: [...config.requiredFields].sort(),
+      readWholeDocument: config.readWholeDocument,
       harvest: config.harvest,
       promptVariables: config.promptVariables,
     };

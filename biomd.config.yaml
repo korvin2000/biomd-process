@@ -89,7 +89,27 @@ tasks:
     pool: extract
     outputChannel: metadata
     # A response missing all of these is rejected and retried / escalated.
+    # They are the *minimum* for a usable dossier, not the extraction target:
+    # every key of the card is asked for, and every one the article answers is
+    # filled in. See `readWholeDocument` below for what that requires.
     requiredFields: [forename, surname]
+    # Read the whole article, skipping the context ladder's truncated rungs.
+    #
+    # Extraction is a harvest: the question is "answer every key this article
+    # supports". A model sent the first 1500 tokens answers it for the first
+    # 1500 tokens, and it cannot tell you that the sentence naming the teachers,
+    # the award and the instruments was never in the part it saw — those keys
+    # simply come back absent, exactly as if the article had never stated them.
+    # Biographies put identity in the lead and everything else wherever the
+    # prose reached it, which is routinely 85% of the way in.
+    #
+    # This costs nothing rather than double-billing: the truncated rung is
+    # dropped at plan time, so the call that would have been rejected is never
+    # made. An article too large for any context window still degrades to a
+    # chunked pass and the parts are merged.
+    #
+    # false restores the cheap head-first reading.
+    readWholeDocument: true
     # An existing <slug>.bio.json — beside the article, or from a previous run —
     # is authored data:
     #   reuse    (default) never call a model; normalize, migrate to v2, re-emit
@@ -363,19 +383,29 @@ cost:
 #   truncation-first head slice first, whole document only if that is rejected
 #   chunked          split into token-bounded chunks, merge the results
 #   staged           head -> head+tail -> chunked
+#
+# `chunked` is the safe general answer: it sends the whole document in a single
+# call whenever it fits and only splits when it cannot, so nothing is ever lost
+# to a window that was too small.
+#
+# The truncated ladders (`truncation-first`, `staged`) exist for a task that
+# looks for one specific fact and can tell when it has found it. They are *not*
+# used by the tasks that must see everything: `extract` (unless
+# `readWholeDocument: false`) and whole-document `translate` skip their
+# truncated rungs, so setting one here no longer quietly halves what gets read.
 # --------------------------------------------------------------------------
 context:
-  strategy: truncation-first
+  strategy: full
   tokenEstimator:
     type: heuristic
     charsPerToken: 3.2 # cyrillic/CJK pack fewer chars per token than latin
   reserveOutputTokens: 2048
   safetyMarginRatio: 0.9
   truncation:
-    headTokens: 1500
+    headTokens: 3000
     tailTokens: 0
   chunking:
-    maxTokens: 2500
+    maxTokens: 5000
     overlapTokens: 150
     splitOn: heading
 

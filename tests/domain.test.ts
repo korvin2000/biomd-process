@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveCountry, isCountryCode } from '../src/domain/countries.js';
+import { countryName, resolveCountry, isCountryCode } from '../src/domain/countries.js';
 import {
   isEmptyDossier,
   mergeDossier,
@@ -200,6 +200,19 @@ describe('VD-COUNTRY', () => {
   it('knows which two-letter codes are real regions', () => {
     expect(isCountryCode('es')).toBe(true);
     expect(isCountryCode('xx')).toBe(false);
+  });
+
+  it('reaches the alias table for a two-letter value that is not itself a region', () => {
+    expect(resolveCountry('uk')).toBe('gb');
+  });
+
+  it('spells a code back out in the language of the edition that will carry it', () => {
+    expect(countryName('au', 'ru')).toBe('Австралия');
+    expect(countryName('es', 'en')).toBe('Spain');
+    expect(countryName('es', 'es')).toBe('España');
+    // Unknown locale falls back to English rather than to two letters of noise.
+    expect(countryName('es', 'zz')).toBe('Spain');
+    expect(countryName('xx', 'en')).toBeUndefined();
   });
 });
 

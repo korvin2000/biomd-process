@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseWebAnswer } from '../src/pipelines/websearch/answer.js';
+import { normalizePlace, parseWebAnswer } from '../src/pipelines/websearch/answer.js';
 import { findGaps, ageOf, type GapOptions } from '../src/pipelines/websearch/gaps.js';
 import { leadParagraph } from '../src/pipelines/websearch/WebSearchPipeline.js';
 import type { Dossier } from '../src/domain/types.js';
@@ -138,6 +138,54 @@ describe('reading a web answer', () => {
     expect(parseWebAnswer(JSON.stringify({ status: 'Deceased' }), answerOptions)?.status).toBe('dead');
     expect(parseWebAnswer(JSON.stringify({ status: 'not sure' }), answerOptions)?.status).toBe('unknown');
     expect(parseWebAnswer('not json at all', answerOptions)).toBeUndefined();
+  });
+});
+
+describe('a place is prose, not a code', () => {
+  it('spells out an alpha-3, which nothing else collides with', () => {
+    expect(normalizePlace('Melbourne, AUS', { language: 'ru' })).toBe('Melbourne, Австралия');
+    expect(normalizePlace('Linares, ESP', { language: 'es' })).toBe('Linares, España');
+  });
+
+  it('spells out an alpha-2 that agrees with the country on record', () => {
+    expect(normalizePlace('Melbourne, au', { language: 'ru', country: 'au' })).toBe('Melbourne, Австралия');
+    expect(normalizePlace('au', { language: 'ru', country: 'au' })).toBe('Австралия');
+  });
+
+  it('leaves a two-letter tail alone when nothing confirms it is a country', () => {
+    // TN is Tennessee before it is Tunisia, SA is South Australia before it is
+    // Saudi Arabia, and PE is Pernambuco before it is Peru. With no country to
+    // agree with, the value stays exactly as it was written.
+    expect(normalizePlace('Nashville, TN', { language: 'en', country: 'us' })).toBe('Nashville, TN');
+    expect(normalizePlace('Adelaide, SA', { language: 'en', country: 'au' })).toBe('Adelaide, SA');
+    expect(normalizePlace('Melbourne, au', { language: 'ru' })).toBe('Melbourne, au');
+  });
+
+  it('leaves a country written as a word exactly as it came', () => {
+    // "Georgia" is a US state as often as it is a country, and resolving the
+    // word would move the person to the Caucasus.
+    expect(normalizePlace('Atlanta, Georgia', { language: 'en', country: 'us' })).toBe('Atlanta, Georgia');
+    expect(normalizePlace('Мельбурн, Австралия', { language: 'ru' })).toBe('Мельбурн, Австралия');
+    expect(normalizePlace('Linares, Jaén', { language: 'es', country: 'es' })).toBe('Linares, Jaén');
+  });
+
+  it('still refuses a sentence dressed up as a place', () => {
+    expect(normalizePlace(`He was probably born somewhere near ${'x'.repeat(120)}`)).toBeUndefined();
+    expect(normalizePlace('   ')).toBeUndefined();
+  });
+
+  it('takes the country from the same answer, which reports it a key later', () => {
+    const answer = parseWebAnswer(
+      JSON.stringify({
+        birthplace: { value: 'Melbourne, au', source: 'https://example.org/a', confidence: 0.9 },
+        country: { value: 'Australia', source: 'https://example.org/a', confidence: 0.9 },
+      }),
+      { ...answerOptions, asked: ['birthplace', 'country'], language: 'ru' },
+    );
+    expect(answer?.values.map((value) => [value.field, value.value])).toEqual([
+      ['birthplace', 'Melbourne, Австралия'],
+      ['country', 'au'],
+    ]);
   });
 });
 

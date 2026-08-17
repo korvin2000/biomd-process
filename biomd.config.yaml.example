@@ -89,7 +89,16 @@ tasks:
     pool: extract
     outputChannel: metadata
     # A response missing all of these is rejected and retried / escalated.
+    # They are the *minimum* for a usable dossier, not the extraction target:
+    # every key of the card is asked for, and every one the article answers is
+    # filled in.
     requiredFields: [forename, surname]
+    # Read the whole article, skipping the context ladder's truncated rungs.
+    # Extraction is a harvest — it cannot report that the sentence naming the
+    # instruments was never in the part it was sent, so those keys just come
+    # back absent. Costs nothing: the rung that would have been rejected is
+    # dropped at plan time rather than called. false = cheap head-first reading.
+    readWholeDocument: true
     # An existing <slug>.bio.json — beside the article, or from a previous run —
     # is authored data:
     #   reuse    (default) never call a model; normalize, migrate to v2, re-emit

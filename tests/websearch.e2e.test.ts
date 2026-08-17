@@ -95,6 +95,47 @@ describe('websearch', () => {
     expect(hints.country).toBe('ru');
   });
 
+  it('writes a place as prose in the edition\'s language, not as a country code', async () => {
+    const client = new FakeClient((call) => {
+      const content = call.request.messages.at(-1)?.content ?? '';
+      if (!isWebSearch(content)) return respond(JSON.stringify({}));
+
+      // The instructions name the language the answer belongs in.
+      expect(content).toContain('Language: ru');
+
+      // What a search model writes once it has been told countries are ISO
+      // codes: the rule belongs to `country`, and it applies it to everything.
+      return respond(
+        JSON.stringify({
+          birthplace: { value: 'Melbourne, au', source: 'https://example.org/w', confidence: 0.9 },
+          country: { value: 'au', source: 'https://example.org/w', confidence: 0.9 },
+        }),
+      );
+    });
+
+    await runJob(workspace.app({ tasks: TASKS }, client));
+
+    expect((await readDossier()).metadata['birthplace']).toBe('Melbourne, Австралия');
+  });
+
+  it('leaves a place alone when nothing confirms the two letters are a country', async () => {
+    const client = new FakeClient((call) => {
+      const content = call.request.messages.at(-1)?.content ?? '';
+      if (!isWebSearch(content)) return respond(JSON.stringify({}));
+
+      // No country anywhere: `TN` is Tennessee at least as often as Tunisia.
+      return respond(
+        JSON.stringify({
+          birthplace: { value: 'Nashville, TN', source: 'https://example.org/w', confidence: 0.9 },
+        }),
+      );
+    });
+
+    await runJob(workspace.app({ tasks: TASKS }, client));
+
+    expect((await readDossier()).metadata['birthplace']).toBe('Nashville, TN');
+  });
+
   it('never turns "still alive" into a date of death', async () => {
     const client = new FakeClient((call) => {
       const content = call.request.messages.at(-1)?.content ?? '';
