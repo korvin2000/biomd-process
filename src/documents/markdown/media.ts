@@ -37,6 +37,17 @@ export interface HarvestOptions {
 export interface HarvestResult {
   photos: MediaItem[];
   music: MediaItem[];
+  /**
+   * Every image the article references, in document order, caption or not.
+   *
+   * Not the same list as {@link photos}: a gallery item needs a label
+   * (`external/05` makes `label` required, and there is nowhere to invent one
+   * from), so an uncaptioned `::: image` is correctly absent there. It is still
+   * an image the article chose to show, which is exactly what the portrait
+   * matcher wants — and in this corpus the entry's own photograph is uncaptioned
+   * as often as not.
+   */
+  imageTargets: string[];
   notes: string[];
 }
 
@@ -52,6 +63,15 @@ const LINK = /(?<!!)\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
 export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT_HARVEST): HarvestResult {
   const photos = new Collector(options.maxItems);
   const music = new Collector(options.maxItems);
+  const imageTargets: string[] = [];
+  const seenTarget = new Set<string>();
+  const sawImage = (target: string): void => {
+    const clean = target.trim();
+    if (!clean || clean.startsWith('#') || clean.includes('/#/')) return;
+    if (seenTarget.has(clean) || imageTargets.length >= options.maxItems) return;
+    seenTarget.add(clean);
+    imageTargets.push(clean);
+  };
   // Split on both line endings: a stray `\r` at the end of a line defeats every
   // `$`-anchored attribute pattern below, silently and on Windows only.
   const lines = markdown.split(/\r?\n/);
@@ -80,12 +100,16 @@ export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT
       const block = readAttributes(lines, index + 1);
       index = block.end;
       const target = block.attributes['src'];
-      if (target) photos.add(block.attributes['caption'] ?? block.attributes['alt'] ?? '', target);
+      if (target) {
+        sawImage(target);
+        photos.add(block.attributes['caption'] ?? block.attributes['alt'] ?? '', target);
+      }
       continue;
     }
 
     if (options.photos) {
       for (const match of line.matchAll(INLINE_IMAGE)) {
+        sawImage(match[2] ?? '');
         photos.add(match[1] ?? '', match[2] ?? '');
       }
     }
@@ -96,7 +120,7 @@ export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT
   if (photos.truncated) notes.push(`Harvested only the first ${options.maxItems} photo(s) from the article.`);
   if (music.truncated) notes.push(`Harvested only the first ${options.maxItems} audio item(s) from the article.`);
 
-  return { photos: photos.items, music: music.items, notes };
+  return { photos: photos.items, music: music.items, imageTargets, notes };
 }
 
 /**

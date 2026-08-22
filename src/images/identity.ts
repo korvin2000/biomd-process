@@ -40,6 +40,24 @@ export const IDENTITY = {
   /** Base score of the strongest single piece of evidence. */
   base: {
     metaPeople: 1,
+    /**
+     * The article embeds this image, and embeds it **first**.
+     *
+     * Whoever wrote the entry chose the picture that opens it, which is the
+     * closest thing to a curated answer the corpus contains. It is also the only
+     * evidence that survives a name the index cannot spell: `photo/k/kag.jpg`
+     * against the slug `classicalag`.
+     */
+    articleFirstImage: 0.95,
+    /**
+     * The article embeds it, further down.
+     *
+     * Deliberately below the default acceptance threshold. A biography's later
+     * pictures are its teachers, its colleagues and its record sleeves as often
+     * as they are its subject, so one of those wins only with a name match
+     * behind it — which the bonuses below supply when it is genuine.
+     */
+    articleImage: 0.86,
     fullNameFile: 0.98,
     concatenation: 0.95,
     fullNameDir: 0.94,
@@ -71,6 +89,7 @@ export const IDENTITY = {
 } as const;
 
 export type EvidenceKind =
+  | 'article-image'
   | 'meta-people'
   | 'full-name-file'
   | 'concatenation'
@@ -128,6 +147,14 @@ export function scoreIdentity(record: ImageRecord, query: NameQuery): IdentityVe
     best.reason = reason;
   };
 
+  const embedded = articleImageRank(record, query);
+  if (embedded !== undefined) {
+    consider(
+      embedded === 0 ? IDENTITY.base.articleFirstImage : IDENTITY.base.articleImage,
+      'article-image',
+      embedded === 0 ? 'the article opens with this image' : `the article embeds this image (#${embedded + 1})`,
+    );
+  }
   if (matchesMetaPeople(record, query)) {
     consider(IDENTITY.base.metaPeople, 'meta-people', 'meta.people names this person');
   }
@@ -211,6 +238,16 @@ export function scoreIdentity(record: ImageRecord, query: NameQuery): IdentityVe
   // be the reason a portrait is rejected.
   const rounded = Math.round(Math.max(0, Math.min(1, score)) * 1000) / 1000;
   return { score: rounded, kind: best.kind, reasons, foreign };
+}
+
+/** Where this record appears among the article's own images, if it does. */
+export function articleImageRank(record: ImageRecord, query: NameQuery): number | undefined {
+  if (query.articleImages.size === 0) return undefined;
+
+  const path = record.relPath.toLowerCase();
+  const byPath = query.articleImages.get(path);
+  if (byPath !== undefined) return byPath;
+  return query.articleImages.get(`#${record.fileName.toLowerCase()}`);
 }
 
 /** `meta.people` is a full name; compare it whole, never by substring. */

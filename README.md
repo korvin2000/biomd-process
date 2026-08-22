@@ -66,7 +66,7 @@ to execute.
 | `models` | List resolved model targets, pools, and a routing preview. |
 | `prompts list` / `prompts show <task>` | Inspect and render templates without spending tokens. |
 | `report [runId]` | Summarize a finished run from its journal. |
-| `portrait <who…>` | Search the image index for one person and print the ranking with its reasoning. Spends nothing. |
+| `portrait <who…>` | Search the image index for one entry and print the ranking with its reasoning (`--faces n` for an ensemble). Spends nothing. |
 | `validate [dir]` | Check a published catalogue against the format invariants. Spends nothing. |
 
 Useful `run` flags: `--only extract,translate`, `--lang en,de`, `--limit 10`,
@@ -108,6 +108,11 @@ Measured on the sample corpus in `examples/ru`:
 |---|---|---|
 | dossier localization | **52% smaller** | 142 → 117 distinct strings (**-18%**) |
 | article translation | **18% smaller** (9–26% per file) | negligible between distinct articles |
+
+A fragment that is not written in the source language is not sent at all: a
+Russian article quotes work titles, discographies and Latin spellings of names as
+their own languages write them, and on `input/ru` that is 11% of the fragments —
+every one of them a title, a composer or a link label.
 
 The structural guarantee matters at least as much as the bytes: a `:::` block
 that is never sent cannot come back unbalanced, so no retry or model escalation
@@ -199,6 +204,10 @@ await runJob(app);
   `photo/w/john_williams/` is the guitarist or the film composer depending on
   facts no filename carries. `portrait` never overwrites a curated `img`, which
   is the answer there.
+- Whether an entry is one person or an ensemble is read from its **title**, not
+  from its prose: "played in a duo with Meleshko" is a sentence about one
+  guitarist. An ensemble whose title says so nowhere — no heading, no roster
+  entry, nothing in the slug — is scored as a soloist.
 - Search aliases for CJK names depend entirely on the extraction hint — no
   algorithm gets from 塞戈维亚 back to "Segovia". That is a property of the
   problem, not of this implementation.

@@ -65,11 +65,39 @@ one you want; the version hash keeps the runs distinguishable in the journal.
 
 | Task | Variables |
 |---|---|
-| `extract` | `fields[]` (`{key, hint}` — the field card), `language`, `requiredFields[]`, `partial`, `partLabel`, `notes` |
-| `websearch` | `fields[]` (`{key, hint, refine?, current?}` — only what is missing), `language`, `checkLiveness`, `age`, `requireSource` |
-| `translate` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `partial`, `partLabel` |
-| `translateSegments` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `count` |
-| `localize` | `sourceLanguage`, `targetLanguage`, `glossary{}`, `count` |
+| `extract` | `fields[]` (`{key, hint}` — the field card), `language`, `languageName`, `requiredFields[]`, `partial`, `partLabel`, `notes` |
+| `websearch` | `fields[]` (`{key, hint, refine?, current?}` — only what is missing), `language`, `languageName`, `checkLiveness`, `age`, `collective`, `requireSource` |
+| `translate` | `sourceLanguage`, `targetLanguage`, `sourceLanguageName`, `targetLanguageName`, `glossary{}`, `partial`, `partLabel` |
+| `translateSegments` | `sourceLanguage`, `targetLanguage`, `sourceLanguageName`, `targetLanguageName`, `glossary{}`, `count` |
+| `localize` | `sourceLanguage`, `targetLanguage`, `sourceLanguageName`, `targetLanguageName`, `glossary{}`, `count` |
+
+Every `*Name` variable is the language spelled out — `ru` → `Russian` — because a
+two-letter code is unambiguous to a program and merely probable to a model.
+
+**Name a language exactly once, with one expression.** `languageName()` already
+falls back to the code when the runtime has no name for it, so
+`<%= it.languageName %>` can never render empty and the old
+`<%= it.languageName || it.language %>` bought nothing. It also *read* like two
+languages being offered to the model, which is a real cost in a file whose whole
+job is to be unambiguous — write `<%= it.sourceLanguageName %>` and nothing else.
+
+The bare `sourceLanguage` / `targetLanguage` / `language` codes stay available
+for a template that genuinely needs a machine value.
 
 Everything under `prompts.variables` in the config is merged in as well, for
 project-wide values such as `projectName`.
+
+## What is *not* a template variable
+
+Two things reach the model without passing through a template, and both are
+deliberate — see mechanism 1 in `CLAUDE.md`. The **document** (or the
+`{hash: text}` table) is appended after the rendered instructions as a volatile
+section, so the provider's prompt cache hits across the whole corpus. So is the
+**article context line** that `translateSegments` receives (`## About this
+article` — the title and the opening of the lead): it changes per document, and
+putting it in a template would break the cached prefix for every document that
+follows.
+
+Which is also the rule for editing these files: anything document-specific in a
+template — a filename, a counter, a timestamp — silently costs the whole corpus
+its cache.

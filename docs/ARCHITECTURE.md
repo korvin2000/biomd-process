@@ -45,7 +45,7 @@ it re-derives a rule, and a specification change has exactly one landing site.
 | `types.ts` | `EntryRow`, `NameIndex`, `Dossier` — `external/08` §8.4, transcribed |
 | `values.ts` | The `VD-*` value domains: dates, comma lists, ranking, URL, target, slug, id, content/asset paths |
 | `countries.ts` | ISO 3166-1 alpha-2, plus alpha-3, localized names and demonyms resolving into it |
-| `vocabulary.ts` | `type`, `gender`, `documents[].type`, `lang` — multilingual synonyms → canonical token |
+| `vocabulary.ts` | `type`, `gender`, `documents[].type`, `lang`, the collective words — multilingual synonyms → canonical token |
 | `dossier.ts` | Sanitize (with the version 1 → 2 migration), merge-without-overwriting, house member order |
 | `catalog.ts` | `CatalogIndex` (load, upsert, allocate ids) and `mergeNameIndex` |
 | `validate.ts` | `INV-1 … INV-28` as a pure function over a snapshot of the published files |
@@ -157,6 +157,7 @@ Dependencies point **inward**. No module imports from a layer above it.
         │ │   llm   │    │  documents  │  │  prompts   │ │    state    │
         │ │ gateway │    │  context    │  │ templates  │ │ journal     │
         │ └────┬────┘    │   images    │  └────────────┘ └─────────────┘
+        │      │         │   roster    │
         │      │         └─────────────┘
         │ ┌────▼─────────────────┐
         │ │ routing │ reliability│
@@ -173,7 +174,8 @@ Dependencies point **inward**. No module imports from a layer above it.
 | `llm` | OpenAI-compatible transport, usage, cost, token estimate | tasks, documents |
 | `prompts` | template files → messages, cache-friendly ordering | LLM transport |
 | `documents` | document model, segmentation, context strategies | prompts, LLM |
-| `images` | the image-index format and portrait selection (identity, suitability, ranking) | config, pipelines, LLM |
+| `images` | the image-index format and portrait selection (identity, suitability, ranking, subject shape) | config, pipelines, LLM |
+| `roster` | the name-roster format: article → name components, collective title, hand-authored aliases | config, pipelines, LLM |
 | `io` | discovery, path templates, atomic artifact writing, catalogue reading | pipelines |
 | `state` | run journal, checkpoints, fingerprints, resume | pipelines |
 | `domain` | the catalogue format: value domains, vocabularies, dossier and index documents, invariants | scheduling, LLMs, the filesystem |

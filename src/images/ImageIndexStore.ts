@@ -125,6 +125,8 @@ export function buildIndex(images: readonly RawImageRecord[], source: string): I
   const byPhonetic = new Map<string, ImageRecord[]>();
   const byConcatenation = new Map<string, ImageRecord[]>();
   const byMetaName = new Map<string, ImageRecord[]>();
+  const byPath = new Map<string, ImageRecord>();
+  const byFileName = new Map<string, ImageRecord[]>();
   const add = (map: Map<string, ImageRecord[]>, key: string, record: ImageRecord): void => {
     if (!key) return;
     const bucket = map.get(key);
@@ -134,6 +136,11 @@ export function buildIndex(images: readonly RawImageRecord[], source: string): I
   };
 
   for (const record of records) {
+    // Two path lookups, for the one piece of evidence that needs no name at
+    // all: the article that embeds the photograph says whose it is.
+    byPath.set(record.relPath.toLowerCase(), record);
+    add(byFileName, record.fileName.toLowerCase(), record);
+
     for (const token of record.tokens) {
       add(byToken, token.text, record);
       add(byPhonetic, token.phonetic, record);
@@ -157,6 +164,8 @@ export function buildIndex(images: readonly RawImageRecord[], source: string): I
     byPhonetic,
     byConcatenation,
     byMetaName,
+    byPath,
+    byFileName,
     vocabulary: [...byToken.keys()],
     source,
     skipped,

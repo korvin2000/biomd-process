@@ -75,7 +75,13 @@ export class AppLogger implements Logger {
   private log(level: LogLevel, message: string, fields?: JsonObject): void {
     if (ORDER[level] < this.threshold) return;
 
-    const record = { ts: new Date().toISOString(), level, message, ...this.fields, ...fields };
+    // The envelope is written *after* the fields, not before. A caller passing
+    // `{ message: … }` as context is ordinary — a fallback carries the provider's
+    // own message alongside its own summary — and letting it land on `message`
+    // replaced the line that says what happened with the line that says why:
+    // `"Falling back or-search → or-osearch"` became `"404 No active
+    // credentials"`, so the JSONL log never named the target that died.
+    const record = { ...this.fields, ...fields, ts: new Date().toISOString(), level, message };
     void AppLogger.fileSink?.append(JSON.stringify(record)).catch(() => undefined);
 
     if (this.console === 'off') return;
@@ -92,6 +98,8 @@ const BADGE: Record<LogLevel, string> = {
 
 function formatPretty(level: LogLevel, message: string, record: Record<string, unknown>): string {
   const { ts, level: _level, message: _message, ...rest } = record;
+  void _level;
+  void _message;
   const time = pc.dim(String(ts).slice(11, 19));
   const extra = Object.keys(rest).length > 0 ? pc.dim(` ${formatFields(rest)}`) : '';
   return `${time} ${BADGE[level]} ${message}${extra}`;

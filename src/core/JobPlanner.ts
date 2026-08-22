@@ -125,6 +125,7 @@ export class JobPlanner {
         items,
         workItemId,
         dependencies: [],
+        requiredDependencies: [],
         ...(seed.usesLlm === undefined ? {} : { usesLlm: seed.usesLlm }),
       },
     };
@@ -136,10 +137,16 @@ export class JobPlanner {
    * A dependency that matches nothing is dropped rather than failed: disabling
    * `extract` should not make `localize` unschedulable, because it can still
    * read a dossier that already exists on disk.
+   *
+   * Ordering and prerequisite are resolved as two separate lists, because
+   * `optional: true` means "wait for it, then run anyway". A task id reached
+   * through both a required and an optional declaration is required — the
+   * stricter reading wins.
    */
   private resolveDependencies(candidates: readonly Candidate[]): void {
     for (const candidate of candidates) {
       const resolved = new Set<string>();
+      const required = new Set<string>();
 
       for (const dependency of candidate.seed.dependsOn ?? []) {
         const sameItem = (dependency.scope ?? 'item') === 'item';
@@ -149,9 +156,11 @@ export class JobPlanner {
           if (dependency.variant !== undefined && other.task.variant !== dependency.variant) continue;
           if (sameItem && other.task.workItemId !== candidate.task.workItemId) continue;
           resolved.add(other.task.taskId);
+          if (!dependency.optional) required.add(other.task.taskId);
         }
       }
       candidate.task.dependencies = [...resolved];
+      candidate.task.requiredDependencies = [...required];
     }
   }
 
@@ -161,7 +170,7 @@ export class JobPlanner {
     const skippedIds = new Set<string>();
 
     for (const { task, seed } of candidates) {
-      const reason = await this.skipReason(task.fingerprint, seed.expectedOutputs);
+      const reason = await this.skipReason(task.fingerprint, seed.expectedOutputs, seed.mergesOutput);
       if (!reason) {
         tasks.push(task);
         continue;
@@ -182,6 +191,7 @@ export class JobPlanner {
     // it would stall its dependents behind a task that will never run.
     for (const task of tasks) {
       task.dependencies = task.dependencies.filter((id) => !skippedIds.has(id));
+      task.requiredDependencies = task.requiredDependencies.filter((id) => !skippedIds.has(id));
     }
 
     return { workItems, tasks, skipped };
@@ -205,8 +215,15 @@ export class JobPlanner {
   private async skipReason(
     fingerprint: string,
     expectedOutputs: Array<{ channel: string; pathVars: PathVars }>,
+    mergesOutput = false,
   ): Promise<SkipReason | undefined> {
     if (isTaskDone(this.deps.resumeIndex.get(fingerprint))) return 'resume';
+
+    // A merge's output file exists from the moment the first run ends, and says
+    // nothing about whether *this* run's work is in it. Resume still applies:
+    // that compares fingerprints, which is a claim about the work rather than
+    // about a filename.
+    if (mergesOutput) return undefined;
 
     if (this.deps.config.run.skipExistingOutputs && expectedOutputs.length > 0) {
       const paths = expectedOutputs.map((output) =>

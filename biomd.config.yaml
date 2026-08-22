@@ -29,6 +29,37 @@ input:
   limit: 0 # 0 = no limit
 
 # --------------------------------------------------------------------------
+# A second input source: the extracted index of the site's own name list.
+#
+# article file -> full name, family name, given name, patronymic, alternative
+# spellings. It knows things one reading of one article cannot — the family name
+# behind a patronymic-only byline, the pseudonym a reader will type, a
+# collective's own title — and it is also incomplete (739 of ~1000 articles) and
+# wrong in places (`authors.bio.md` is a page title split across the name
+# columns). So every consumer treats it as corroboration, never as authority:
+# it fills a gap the article left and never overwrites a fact the article states.
+#
+# Three tasks read it: extract (gap-filling + a conflict report), portrait
+# (extra name spellings, which is how a collective gets found at all), and
+# catalog (hand-authored search aliases).
+# --------------------------------------------------------------------------
+roster:
+  file: data/names.json # empty disables the roster entirely
+  # The language it is written in. Its names are variants, not translations, so
+  # they are offered to index-ru.json and to no other language index.
+  language: ru
+  # Supply forename/surname the article did not yield. Gap-filling only.
+  fillMetadata: true
+  # Contribute its spellings and its own name order as search aliases.
+  aliases: true
+  # Feed its spellings to the portrait matcher.
+  nameHints: true
+  # Report a roster name that contradicts the extracted one. Off by default:
+  # on a thousand articles the two disagree about hundreds of abbreviations
+  # ("Е." against "Евгений") and a note per document is noise. On for a QA pass.
+  reportConflicts: false
+
+# --------------------------------------------------------------------------
 # Where results go. Templates are relative to output.baseDir.
 # --------------------------------------------------------------------------
 output:
@@ -110,8 +141,8 @@ tasks:
     #
     # false restores the cheap head-first reading.
     readWholeDocument: true
-    # An existing <slug>.bio.json — beside the article, or from a previous run —
-    # is authored data:
+    # An authored <slug>.bio.json beside the article (this tool's own output in
+    # `out/` deliberately does not count — see the schema) is authored data:
     #   reuse    (default) never call a model; normalize, migrate to v2, re-emit
     #   complete ask only for the fields it lacks, and never overwrite one it has
     #   rebuild  ignore it and extract from scratch
@@ -157,6 +188,21 @@ tasks:
     livenessAgeYears: 78
     # Also ask for the exact day when only a year or a month is on record.
     upgradePrecision: true
+    # What to do when the sourced answer disagrees with the date on record.
+    #
+    # An article that says "born about 1950" and a cited 25.07.1949 are not two
+    # facts of equal standing: one is a rounded approximation, the other a full
+    # date with a page behind it. `prefer-precise` lets the strictly more
+    # precise sourced date win, disagreeing year included — and only then. Two
+    # dates of the *same* precision that disagree are a real conflict, so they
+    # are written to out/.hints/<slug>.web.json with their source and left for
+    # a human, never resolved by provenance alone.
+    #
+    #   report  never overwrite; record every disagreement for review
+    #   ignore  drop it (the behaviour before this setting existed)
+    #
+    # Whatever happens is in the run notes: `biomd report --notes conflict`.
+    onDateConflict: prefer-precise
     # none | lead. The lead paragraph is how a namesake gets told apart.
     includeContext: lead
     contextChars: 600
@@ -184,14 +230,36 @@ tasks:
     # document: send the whole Markdown. More context for the translator, more
     #   tokens, and the structure guard becomes the only defence.
     mode: segments
-    maxSegmentsPerCall: 40
+    # keep | translate — what to do with a fragment that is not written in the
+    # source language. A Russian article prints work titles, discographies and
+    # Latin spellings of names as their own languages write them (`Allegro vivo`,
+    # `Plays Domenico Scarlatti`, `'Amadeus' Guitar Duo`); `keep` never sends a
+    # fragment with no Cyrillic in it. Cheaper than asking, and more reliable:
+    # an instruction is obeyed on most calls, a fragment that was never sent on
+    # all of them. A mixed fragment is always sent.
+    foreignFragments: keep
+    # Characters of the article's title and lead sent with each batch, so the
+    # fragments arrive with a subject. Rides in the volatile part of the message,
+    # so the prompt-cache prefix is untouched. 0 sends nothing.
+    contextChars: 300
+    # Sized so the *answer* fits the smallest model in the pool, which is the
+    # binding constraint and not the context window: the reply repeats every key
+    # and runs longer than the source, so a batch needs roughly
+    # `chars(prose) / charsPerToken * 1.6` output tokens. Against local-small's
+    # 8192-token ceiling that is ~16k characters of prose per call — about 20
+    # paragraphs of these biographies, and 40 was over it on the longer ones.
+    #
+    # Going over is no longer fatal (the batch is halved and re-asked, and the
+    # router will not hand it to a model that cannot finish it), but every
+    # oversized call is still one cut-off answer paid for before the correction.
+    maxSegmentsPerCall: 30
     # Models routinely answer 39 of 40 keys. A repair call re-asks for just the
     # missing ones instead of re-sending (and re-paying for) the whole batch.
     # 0 restores all-or-nothing retries.
     repairAttempts: 2
     # off | run | persistent. `persistent` keeps the cache in run.memoryDir, so a
     # re-run over a grown corpus pays only for the strings that are new.
-    useTranslationMemory: run
+    useTranslationMemory: persistent
 
   # Per-language edition of the dossier. Only the prose values are sent, keyed by
   # content hash; dates, ranking, url, every media target and every unknown field
@@ -202,7 +270,7 @@ tasks:
     outputChannel: metadata
     targetLanguages: [en] # empty follows tasks.translate.targetLanguages
     maxStringsPerCall: 60
-    repairAttempts: 1
+    repairAttempts: 2
     useTranslationMemory: run
 
   # The entry's portrait, chosen out of an existing image index. No LLM: the
@@ -247,12 +315,67 @@ tasks:
     indexChannel: catalogIndex
     localizedIndexChannel: catalogLocalizedIndex
     localizedNames: true
-    # Search-only aliases after the display name: the bare surname, the inverted
-    # order, and a romanization for a non-Latin edition.
+    # Search-only aliases after the display name.
     generateAliases: true
-    # Update the existing index.json rather than replacing it. Turning this off
-    # deletes every row this run did not visit — and with them their ids, which
-    # index-<lang>.json joins on and which must be stable forever.
+    # distinct | spec — which aliases are worth authoring.
+    #
+    # `spec` is external/04 §4.5 as written: every form a reader might type, the
+    # bare family name and a transliteration included.
+    #
+    # `distinct` is this deployment's deliberate narrowing of it — the second
+    # place after catalogue.datePrecision where a setting overrides the
+    # specification on purpose. The consumer grades a match by position and
+    # counts a word-start hit, so a query for "Сеговия" already reaches
+    # "Андрес Сеговия": the bare surname adds a row and a tie and no
+    # reachability. Dropped for the same reason: an alias equal to the row's
+    # `title` (which is searched in its own right) and a machine
+    # transliteration ("Andres Segoviya", "Dzhon Vilyams"), which nobody types.
+    # Kept, because nothing else reaches them: the inverted order
+    # ("Сеговия Андрес"), the birth name, and the roster's own spellings.
+    aliasPolicy: distinct
+    # Which name goes in index-<lang>.json[0] — the string the reader prints
+    # under the thumbnail, as opposed to the aliases behind it, which are
+    # search-only. index.json.title is Latin-only, so for every non-Latin
+    # language this element *is* the display name.
+    #
+    #   roster         the roster's own `fullname` for the roster's language
+    #                  ("Абитон Жерар" — a person wrote it, in the catalogue's
+    #                  own order), falling back to `Surname Forename` when the
+    #                  roster does not know the entry. Every other language
+    #                  keeps `Forename Surname`: a Russian filing convention is
+    #                  not an English one.
+    #   surname-first  `Surname Forename` in every language.
+    #   given-first    `Forename Surname` everywhere (the old behaviour).
+    #
+    # Whichever order loses becomes the first alias, so nothing stops being
+    # findable.
+    displayNameOrder: roster
+    # Row members this run may *correct* rather than only fill in.
+    #
+    # `merge: true` protects hand-edits by never overwriting a value that is
+    # already there — which also means a value this tool derived *wrongly* is
+    # permanent. Changing `tasks.portrait.assetPrefix` is the case that bites:
+    # every row keeps a path built from the old prefix, silently, for ever.
+    # (`biomd validate` now calls that out: a VD-PATH-ASSET value has no `..`
+    # segment in it.)
+    #
+    #   img, title, type, gender, country   members of index.json
+    #   displayNames                        index-<lang>.json[0]
+    #
+    # Each replacement is reported in the run notes. Turn a member on for the
+    # run that fixes it, then take it back out — the protective default is the
+    # right steady state.
+    refresh: []
+    # Update the existing index.json and index-<lang>.json rather than replacing
+    # them. Turning this off deletes every row this run did not visit — and with
+    # them their ids, which index-<lang>.json joins on and which must be stable
+    # forever.
+    #
+    # It is also the only way to *correct* a derived display name: the merge
+    # treats every existing `[0]` as hand-authored, so a name this tool got
+    # wrong last run survives being fixed. The surgical version of that is to
+    # delete the one `index-<lang>.json` and re-run with merge still on — it
+    # carries no ids of its own, so nothing is lost but the names being redone.
     merge: true
 
 # --------------------------------------------------------------------------
@@ -265,6 +388,11 @@ llm:
       baseUrl: http://192.168.1.26:8080/v1
       maxConcurrent: 1
       requestsPerMinute: 0
+
+    - id: omniroute
+      baseUrl: http://192.168.1.26:20129/v1
+      apiKey: ${OMNIROUTE_API_KEY}
+      requestsPerMinute: 60
 
     - id: openrouter
       baseUrl: https://openrouter.ai/api/v1
@@ -279,7 +407,7 @@ llm:
       endpoint: local
       model: gemma4-31b-local
       contextWindow: 65536
-      maxOutputTokens: 8192
+      maxOutputTokens: 18432
       capabilities: [json_schema, json_object, prompt_cache]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
       tags: [local, cheap]
@@ -288,7 +416,7 @@ llm:
       endpoint: openrouter
       model: deepseek/deepseek-v4-flash
       contextWindow: 128000
-      maxOutputTokens: 16384
+      maxOutputTokens: 24576
       capabilities: [json_schema, json_object, tools, prompt_cache]
       pricing: { inputPer1M: 0.07, outputPer1M: 0.17, cachedInputPer1M: 0.075 }
       # This model reasons unless told not to, and reasoning tokens bill at the
@@ -297,7 +425,7 @@ llm:
       # Drop the whole block (or set dialect: none) to leave the model's default
       # alone; set enabled: true when a task genuinely needs the deliberation.
       reasoning: { enabled: false, dialect: reasoning }
-      tags: [remote, cheap]
+      tags: [remote]
 
     # A model that actually searches. Three ways to get one on OpenRouter, in
     # descending order of how little has to be true for it to work:
@@ -307,21 +435,42 @@ llm:
     # The `web_search` capability is what `tasks.websearch` routes on; declaring
     # it on a model that cannot search is how you get confident fiction.
     - id: or-search
+      endpoint: omniroute
+      model: cx/gpt-5.6-luna
+      contextWindow: 127000
+      maxOutputTokens: 4096
+      capabilities: [json_object, tools, web_search]
+      pricing: { inputPer1M: 0, outputPer1M: 0 }
+      params:
+        temperature: 0
+        # For option 3, keep the model as it is and add:
+        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      tags: [remote, search, cheap]
+
+    # The `:online` suffix is what makes this one *search*. Without it the model
+    # is a plain chat model that declares `web_search` here and answers from
+    # memory anyway — which is precisely the failure the capability gate exists
+    # to prevent, and it is invisible: the answers arrive, fluent and sourceless.
+    # `:online` bills a per-request search fee on top of the tokens.
+    - id: or-osearch
       endpoint: openrouter
-      model: openai/gpt-5.6-luna
+      model: openai/gpt-5.6-luna:online
       contextWindow: 127000
       maxOutputTokens: 4096
       capabilities: [json_object, tools, web_search]
       pricing: { inputPer1M: 0.1, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
       params:
         temperature: 0
-        # For option 3, keep the model as it is and add:
+        # The explicit form of the same thing, if you want to size the results:
         # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search]
 
+    # `:batch` is reachable only through OpenRouter's Batch API, never through
+    # /chat/completions — `biomd models --probe` answers 404 on it. It is in no
+    # pool today, so nothing has failed yet; it would fail on first use.
     - id: or-quality
       endpoint: openrouter
-      model: google/gemini-3.7-flash:batch
+      model: google/gemini-3.7-flash
       contextWindow: 200000
       maxOutputTokens: 16384
       capabilities: [json_schema, tools, reasoning, prompt_cache]
@@ -333,14 +482,34 @@ llm:
   routing:
     # cost-optimized | context-optimized | sequential | round-robin
     strategy: cost-optimized
+    # A pool is the fallback chain. `cost-optimized` always ranks the free local
+    # model first among the targets that can serve the request, so the paid
+    # entries behind it cost nothing until the local one cannot do the job — a
+    # document too large for its 8K output ceiling, a restart, a temporary
+    # overload. A single-model pool has no chain at all: that is what
+    # "All 1 model target(s) failed" means, and it is the one shape to avoid.
     pools:
-      default: [local-small]
+      default: [local-small, or-cheap]
       # Extraction is mechanical: start cheap, escalate only on failure.
-      extract: [local-small]
-      # Translation is quality-sensitive: prefer the strong model first.
-      translate: [local-small]
+      extract: [local-small, or-cheap]
+      # Translation is quality-sensitive, and the most likely to outgrow a small
+      # model's output limit — a long article's prose has to come back in full.
+      translate: [local-small, or-cheap]
       # Only models that can search belong here; see tasks.websearch.
-      websearch: [or-search]
+      websearch: [or-search, or-osearch]
+    # demote | skip — what to do with a target that cannot serve a request,
+    # either because the prompt exceeds its context window or because the answer
+    # would exceed its `maxOutputTokens`.
+    #
+    # `skip` is the setting that stops a small model being handed a document it
+    # cannot finish: it is dropped from the chain rather than called, cut off
+    # mid-sentence and only then given up on. `demote` (the default) still calls
+    # it last, which is right when the pool has nothing better.
+    #
+    # It never routes nowhere — if no model in the pool fits, the least
+    # overloaded one is still tried, so a mis-sized pool surfaces as a real
+    # provider error rather than as silence.
+    onOverflow: skip
     options: {}
 
   defaults:
@@ -374,7 +543,7 @@ cost:
   budget:
     maxRequests: 0
     maxTotalTokens: 0
-    maxCostUsd: 0
+    maxCostUsd: 10
   onExceeded: stop
 
 # --------------------------------------------------------------------------
@@ -438,13 +607,13 @@ prompts:
 
 # --------------------------------------------------------------------------
 run:
-  concurrency: 1
+  concurrency: 3
   stateDir: .biomd/runs
   memoryDir: .biomd/memory # only used by useTranslationMemory: persistent
   resume: auto # auto | off | <runId>
   dryRun: false
   failFast: false
-  skipExistingOutputs: false
+  skipExistingOutputs: true
 
 logging:
   level: info

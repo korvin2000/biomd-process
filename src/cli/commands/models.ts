@@ -1,10 +1,10 @@
 import { Command } from 'commander';
 import pc from 'picocolors';
 
-import { createApp } from '../../app/container.js';
+import { createApp, type App } from '../../app/container.js';
 import { loadConfig } from '../../config/loader.js';
-import { usableInputTokens } from '../../llm/types.js';
-import { formatTokens, renderTable } from '../ui/format.js';
+import { usableInputTokens, type ModelTarget } from '../../llm/types.js';
+import { formatDuration, formatTokens, renderTable, symbols, truncate } from '../ui/format.js';
 import { heading } from '../ui/report.js';
 
 export function createModelsCommand(): Command {
@@ -13,9 +13,10 @@ export function createModelsCommand(): Command {
     .option('-c, --config <file>', 'path to the config file')
     .option('--pool <name>', 'preview the routing order for a pool')
     .option('--tokens <n>', 'assume this many input tokens when previewing', '4000')
-    .action(async (options: { config?: string; pool?: string; tokens?: string }) => {
+    .option('--probe', 'send one tiny completion to every target and report which ones answer')
+    .action(async (options: { config?: string; pool?: string; tokens?: string; probe?: boolean }) => {
       const loaded = await loadConfig({ file: options.config });
-      const app = createApp(loaded, { dryRun: true });
+      const app = createApp(loaded, { dryRun: false });
 
       heading('Targets');
       process.stdout.write(
@@ -64,5 +65,91 @@ export function createModelsCommand(): Command {
       for (const strategy of app.strategies.all()) {
         process.stdout.write(`${strategy.id.padEnd(20)} ${pc.dim(strategy.description)}\n`);
       }
+
+      if (options.probe) process.exitCode = (await probeTargets(app)) ? 0 : 1;
     });
+}
+
+/**
+ * Ask every configured target to say one word, and report who answered.
+ *
+ * Everything above this line reads the *config*, and a config is happy to
+ * describe a model that does not exist: `llm.models` is a set of claims about
+ * an endpoint, and nothing verifies them until a real run makes a real call and
+ * quietly falls back. The endpoint's own `/v1/models` listing is not the check
+ * either — a model can be listed and still reject every completion, which is
+ * exactly what a router with an unconfigured upstream provider does.
+ *
+ * So the probe is a genuine completion, deliberately the smallest one that can
+ * fail for the right reasons: a few tokens in, a few out, no JSON mode, no
+ * tools. It costs a fraction of a cent across a whole config and it is the only
+ * thing that distinguishes "declared" from "works".
+ */
+async function probeTargets(app: App): Promise<boolean> {
+  heading('Probe');
+
+  const targets = app.models.all();
+  const results = await Promise.all(targets.map((target) => probeOne(app, target)));
+  const failed = results.filter((result) => !result.ok);
+
+  process.stdout.write(
+    `${renderTable(results, [
+      { header: '', value: (row) => (row.ok ? symbols.ok : symbols.fail) },
+      { header: 'MODEL', value: (row) => row.target.modelId },
+      { header: 'ENDPOINT', value: (row) => row.target.endpointId },
+      { header: 'WIRE NAME', value: (row) => row.target.modelName },
+      { header: 'LATENCY', value: (row) => (row.ok ? formatDuration(row.latencyMs) : pc.dim('—')), align: 'right' },
+      { header: 'RESULT', value: (row) => (row.ok ? pc.dim(row.detail) : pc.red(truncate(row.detail, 80))) },
+    ])}\n`,
+  );
+
+  if (failed.length === 0) {
+    process.stdout.write(pc.green(`\nAll ${results.length} target(s) answered.\n`));
+    return true;
+  }
+
+  process.stdout.write(
+    pc.red(`\n${failed.length} of ${results.length} target(s) did not answer.\n`) +
+      pc.dim(
+        'A target that fails here fails silently during a run: its pool falls back to the next model, ' +
+          'the run completes, and the only sign is the bill. Fix the model id or its credentials, ' +
+          'or take it out of `llm.routing.pools`.\n',
+      ),
+  );
+  return false;
+}
+
+interface ProbeResult {
+  target: ModelTarget;
+  ok: boolean;
+  latencyMs: number;
+  detail: string;
+}
+
+async function probeOne(app: App, target: ModelTarget): Promise<ProbeResult> {
+  const startedAt = Date.now();
+  try {
+    const response = await app.clients.for(target.endpointId).complete(
+      target,
+      {
+        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
+        params: { ...target.params, maxOutputTokens: 16 },
+      },
+      { timeoutMs: target.timeoutMs },
+    );
+    const text = response.text.trim().replace(/\s+/g, ' ');
+    return {
+      target,
+      ok: true,
+      latencyMs: Date.now() - startedAt,
+      detail: text ? truncate(text, 40) : `answered ${response.usage.completionTokens} token(s)`,
+    };
+  } catch (error: unknown) {
+    return {
+      target,
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

@@ -6,6 +6,8 @@ import { selectPortrait } from '../src/images/select.js';
 import { similarity } from '../src/images/similarity.js';
 import { analysePath, phoneticKey } from '../src/images/tokens.js';
 import type { RawImageRecord } from '../src/images/types.js';
+import { detectSubject, faceFit, type SubjectShape } from '../src/images/subject.js';
+import { tierOf } from '../src/images/suitability.js';
 import { assetPath } from '../src/pipelines/portrait/PortraitPipeline.js';
 
 /**
@@ -182,6 +184,128 @@ describe('visual suitability', () => {
     // beating a colour 1.9 MP one because the subject is actually visible in it.
     const chosen = selectPortrait(index, buildQuery({ slug: 'xuefei-yang', latinTitle: 'Xuefei Yang' })).chosen;
     expect(chosen?.record.relPath).toBe('photo/x/xuefeiyang.jpg');
+  });
+});
+
+describe('who the picture must show', () => {
+  it('reads the shape off the title, the roster name and the slug', () => {
+    expect(detectSubject({ titles: ['Гитарный дуэт "Торнадо"'], slug: 'tornado' })).toMatchObject({
+      kind: 'group',
+      size: 2,
+    });
+    // No H1 at all: the roster and the slug are what is left.
+    expect(detectSubject({ titles: [], names: ["'КИÏВ' квартет"], slug: 'kiev_quartet' })).toMatchObject({ size: 4 });
+    expect(detectSubject({ titles: ['Армик'], slug: 'armik' })).toEqual({
+      kind: 'solo',
+      evidence: 'nothing names a collective',
+    });
+  });
+
+  it('rates a face count against what the subject is', () => {
+    const duo: SubjectShape = { kind: 'group', size: 2, evidence: 'test' };
+    const ensemble: SubjectShape = { kind: 'group', evidence: 'test' };
+
+    expect(faceFit(1, undefined)).toBe('exact');
+    expect(faceFit(2, undefined)).toBe('wrong-count');
+    expect(faceFit(2, duo)).toBe('exact');
+    // A portrait of one member is the single most misleading avatar an
+    // ensemble can be given.
+    expect(faceFit(1, duo)).toBe('wrong-count');
+    expect(faceFit(3, duo)).toBe('plausible');
+    expect(faceFit(5, ensemble)).toBe('exact');
+    // §18: nothing detected is not the same statement as nobody present.
+    expect(faceFit(0, duo)).toBe('unknown');
+  });
+
+  it('puts the group photograph in tier 1 and the member portrait below it', () => {
+    const trio: SubjectShape = { kind: 'group', size: 3, evidence: 'test' };
+    const line = record('photo/t/trio_ural.jpg', {
+      ai: { class: 'group', confidence: 0.71, faceCount: 3, faceCoverage: 0.026 },
+    });
+    const member = record('photo/t/kozlov.jpg', {
+      ai: { class: 'portrait', confidence: 0.9, faceCount: 1, faceCoverage: 0.24 },
+    });
+
+    const [lineUp, portrait] = buildIndex([line, member], 'fixture').records;
+    expect(tierOf(lineUp!, trio)).toBe(1);
+    expect(tierOf(portrait!, trio)).toBe(3);
+    // And the other way round for a soloist, which is the calibration that was
+    // there before any of this.
+    expect(tierOf(portrait!)).toBe(1);
+    expect(tierOf(lineUp!)).toBe(3);
+  });
+
+  it('chooses the line-up for a trio and the portrait for a soloist', () => {
+    const index = buildIndex(
+      [
+        record('photo/t/trio_ural.jpg', {
+          nameTokens: ['trio', 'ural'],
+          image: { width: 400, height: 280, orientation: 'landscape', mp: 0.11 },
+          ai: { class: 'group', confidence: 0.71, faceCount: 3, faceCoverage: 0.026 },
+        }),
+        record('photo/t/ural_kozlov.jpg', {
+          nameTokens: ['ural', 'kozlov'],
+          ai: { class: 'portrait', confidence: 0.9, faceCount: 1, faceCoverage: 0.24 },
+        }),
+      ],
+      'fixture',
+    );
+    const query = buildQuery({ slug: 'trio_ural' });
+    const trio: SubjectShape = { kind: 'group', size: 3, evidence: 'the title says "трио"' };
+
+    expect(selectPortrait(index, query, { subject: trio }).chosen?.record.relPath).toBe('photo/t/trio_ural.jpg');
+    // Without the subject the same archive yields the wrong answer — a
+    // photograph of one of the three, or nothing at all.
+    expect(selectPortrait(index, query).chosen?.record.relPath).not.toBe('photo/t/trio_ural.jpg');
+  });
+});
+
+describe('the article as evidence', () => {
+  const index = buildIndex(
+    [
+      record('photo/k/kag.jpg', {
+        nameTokens: ['kag'],
+        image: { width: 420, height: 300, orientation: 'landscape', mp: 0.13 },
+        ai: { class: 'group', confidence: 0.7, faceCount: 3, faceCoverage: 0.027 },
+      }),
+      record('photo/k/m_kornishin.jpg', { nameTokens: ['kornishin'] }),
+    ],
+    'fixture',
+  );
+
+  it('finds a file no name matching can reach, because the article embeds it', () => {
+    // `classicalag` against `kag.jpg`: there is no name in common, and the
+    // article's own `::: image` block is the only thing that connects them.
+    const blind = selectPortrait(index, buildQuery({ slug: 'classicalag' }));
+    expect(blind.chosen).toBeUndefined();
+
+    const seeing = selectPortrait(
+      index,
+      buildQuery({ slug: 'classicalag', articleImages: ['photo/k/kag.jpg', 'photo/k/m_kornishin.jpg'] }),
+      { subject: { kind: 'group', evidence: 'the title says "ансамбль"' } },
+    );
+    expect(seeing.chosen?.record.relPath).toBe('photo/k/kag.jpg');
+    expect(seeing.chosen?.identity.reasons[0]).toContain('opens with this image');
+  });
+
+  it('trusts the first image and makes a later one earn its place', () => {
+    // A biography's later pictures are its teachers and its record sleeves as
+    // often as they are its subject, so they land below the threshold and need
+    // a name match behind them.
+    const later = selectPortrait(
+      index,
+      buildQuery({ slug: 'somebody-else', articleImages: ['photo/k/m_kornishin.jpg', 'photo/k/kag.jpg'] }),
+      { subject: { kind: 'group', evidence: 'test' } },
+    );
+    expect(later.chosen).toBeUndefined();
+    expect(later.declined).toContain('below');
+  });
+
+  it('matches a path the article spells differently', () => {
+    const query = buildQuery({ slug: 'classicalag', articleImages: ['/PHOTO/K/KAG.JPG'] });
+    expect(selectPortrait(index, query, { subject: { kind: 'group', evidence: 'test' } }).chosen?.record.relPath).toBe(
+      'photo/k/kag.jpg',
+    );
   });
 });
 

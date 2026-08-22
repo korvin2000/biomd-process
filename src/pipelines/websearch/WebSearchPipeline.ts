@@ -10,6 +10,7 @@ import {
   type WorkItem,
 } from '../../core/types.js';
 import { mergeDossier, orderDossier, sanitizeDossier, type DossierOptions } from '../../domain/dossier.js';
+import { sharpensDate } from '../../domain/values.js';
 import type { CatalogHints, Dossier } from '../../domain/types.js';
 import type { Artifact } from '../../io/types.js';
 import { MessageBuilder } from '../../prompts/MessageBuilder.js';
@@ -19,7 +20,20 @@ import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import { findDossierToLocalize } from '../shared/dossierSource.js';
 import { parseWebAnswer, type WebAnswer, type WebValue } from './answer.js';
+import { readTitle } from '../../documents/markdown/title.js';
+import { languageName, resolveEnsemble } from '../../domain/vocabulary.js';
 import { findGaps, type FieldQuestion, type GapAnalysis, type WebField } from './gaps.js';
+
+/** A sourced date that disagrees with the record, recorded for a human to settle. */
+export interface DateConflict {
+  field: 'born' | 'died' | string;
+  /** What the dossier holds now. */
+  recorded: string;
+  /** What the search returned. */
+  found: string;
+  source?: string;
+  confidence: number;
+}
 
 const PIPELINE_ID = 'websearch';
 /** A handful of short values, each with a URL beside it. */
@@ -65,12 +79,18 @@ export class WebSearchPipeline implements DocumentPipeline {
           minConfidence: config.minConfidence,
           livenessAgeYears: config.livenessAgeYears,
           upgradePrecision: config.upgradePrecision,
+          onDateConflict: config.onDateConflict,
           includeContext: config.includeContext,
           recordSources: config.recordSources,
           datePrecision: context.config.catalogue.datePrecision,
+          collective: resolveEnsemble(readTitle(item.content).lines.join(' | ')).group,
         },
         promptVersion: await context.prompts.versionOf(PIPELINE_ID),
         expectedOutputs: [{ channel: config.outputChannel, pathVars: this.pathVars(item) }],
+        // The declared output is the dossier `extract` writes, which therefore
+        // exists before this task ever starts. Reading that as "already done"
+        // meant the task ran exactly once per corpus and never again.
+        mergesOutput: true,
         // The dossier this completes is the one `extract` just wrote.
         dependsOn: context.config.tasks.extract.enabled ? [{ pipeline: 'extract' }] : [],
       },
@@ -91,14 +111,20 @@ export class WebSearchPipeline implements DocumentPipeline {
     const dossier = sanitizeDossier(loaded.value, options).dossier;
     const hints = await this.readHints(item, context);
 
+    // A trio has no birthday. Read from the title, never from the prose.
+    const collective = resolveEnsemble(readTitle(item.content).lines.join(' | ')).group;
     const gaps = findGaps(dossier, {
       fields: config.fields as WebField[],
       datePrecision: options.datePrecision ?? 'day',
       upgradePrecision: config.upgradePrecision,
       livenessAgeYears: config.livenessAgeYears,
+      collective,
       ...(hints.country ? { known: { country: hints.country } } : {}),
     });
 
+    if (collective) {
+      notes.push('The title names a collective, so the personal questions (born, died, places) were not asked.');
+    }
     if (gaps.questions.length === 0) {
       return {
         artifacts: [],
@@ -111,7 +137,7 @@ export class WebSearchPipeline implements DocumentPipeline {
       notes.push(`No date of death and an age of about ${gaps.age}; asking whether this person is still alive.`);
     }
 
-    const answer = await this.ask(task, context, item, dossier, gaps, hints);
+    const answer = await this.ask(task, context, item, dossier, gaps, hints, collective);
     notes.push(...answer.notes);
 
     return this.apply(config, item, dossier, answer.value, gaps, options, notes, answer.usage, answer.costUsd);
@@ -129,6 +155,7 @@ export class WebSearchPipeline implements DocumentPipeline {
     dossier: Dossier,
     gaps: GapAnalysis,
     hints: CatalogHints,
+    collective: boolean,
   ): Promise<{ value: WebAnswer; usage: typeof EMPTY_USAGE; costUsd: number; notes: string[] }> {
     const config = context.config.tasks.websearch;
     const asked = gaps.questions.map((question) => question.field);
@@ -136,6 +163,7 @@ export class WebSearchPipeline implements DocumentPipeline {
     const prompt = await context.prompts.render(PIPELINE_ID, {
       ...config.promptVariables,
       language: item.language,
+      languageName: languageName(item.language),
       fields: gaps.questions.map((question) => ({
         key: question.field,
         hint: question.hint,
@@ -143,13 +171,19 @@ export class WebSearchPipeline implements DocumentPipeline {
       })),
       checkLiveness: gaps.checkLiveness,
       age: gaps.age,
+      collective,
       requireSource: config.requireSource,
     });
 
     // The person, as facts rather than prose. Volatile, so it lands after every
     // stable instruction and the prompt-cache prefix survives the corpus.
     const messages = MessageBuilder.build(prompt, [
-      { title: 'Person', body: this.identityCard(item, dossier, config), volatile: true, fence: 'yaml' },
+      {
+        title: collective ? 'Ensemble' : 'Person',
+        body: this.identityCard(item, dossier, config),
+        volatile: true,
+        fence: 'yaml',
+      },
     ]);
 
     let parsed: WebAnswer | undefined;
@@ -242,9 +276,15 @@ export class WebSearchPipeline implements DocumentPipeline {
     usage: typeof EMPTY_USAGE,
     costUsd: number,
   ): TaskResult {
-    const accepted = this.filterLiveness(answer, gaps, notes);
-    if (accepted.length === 0) {
-      notes.push('The search returned nothing usable; the dossier is unchanged.');
+    const live = this.filterLiveness(answer, gaps, notes);
+    const settled = this.settleConflicts(config, dossier, live, notes);
+    const accepted = settled.values;
+
+    if (accepted.length === 0 && settled.conflicts.length === 0) {
+      notes.push(
+        'The search returned nothing usable; the dossier is unchanged. ' +
+          `${gaps.questions.length} question(s) were asked and every answer was missing or refused.`,
+      );
       return { artifacts: [], usage, costUsd, notes };
     }
 
@@ -277,7 +317,7 @@ export class WebSearchPipeline implements DocumentPipeline {
       if (best) incoming.metadata.url = best;
     }
 
-    const merged = mergeDossier(dossier, incoming, options);
+    const merged = mergeDossier(settled.dossier, incoming, options);
     notes.push(...merged.notes);
     for (const value of accepted) {
       notes.push(
@@ -287,10 +327,13 @@ export class WebSearchPipeline implements DocumentPipeline {
           '.',
       );
     }
-    if (merged.filled.length === 0) notes.push('Everything found was already on record; nothing changed.');
+    if (merged.filled.length === 0 && settled.conflicts.length === 0) {
+      notes.push('Everything found was already on record; nothing changed.');
+    }
 
-    const artifacts: Artifact[] = [
-      {
+    const artifacts: Artifact[] = [];
+    if (accepted.length > 0) {
+      artifacts.push({
         channel: config.outputChannel,
         format: 'json',
         body: orderDossier(merged.dossier) as unknown as JsonValue,
@@ -298,20 +341,107 @@ export class WebSearchPipeline implements DocumentPipeline {
         // This *is* the dossier plus what the search added. Refusing to replace
         // the file `extract` wrote a moment ago would discard the whole task.
         overwrite: true,
-      },
-    ];
+      });
+    }
 
-    if (hints.country) {
+    // The hint file carries two different things and is written for either: a
+    // `country`, which belongs to `index.json`, and an unresolved date conflict,
+    // which belongs to whoever has to settle it. A conflict recorded nowhere is
+    // the failure this task was accused of, so it gets a file of its own.
+    if (hints.country || settled.conflicts.length > 0) {
       artifacts.push({
         channel: config.hintsChannel,
         format: 'json',
-        body: { slug: item.slug, language: item.language, ...hints } as JsonValue,
+        body: {
+          slug: item.slug,
+          language: item.language,
+          ...hints,
+          ...(settled.conflicts.length > 0 ? { conflicts: settled.conflicts } : {}),
+        } as unknown as JsonValue,
         pathVars: this.pathVars(item),
         overwrite: true,
       });
     }
 
     return { artifacts, usage, costUsd, notes };
+  }
+
+  /**
+   * What to do about an answer that disagrees with the record.
+   *
+   * `upgradePrecision` asks for the sharper form of a date the article stated
+   * loosely, and an article that says "born about 1950" is sometimes simply
+   * wrong about the year — so the sharper answer arrives *contradicting* the
+   * blunter one rather than refining it, and the old rule dropped it without
+   * saying so. Three things can happen now, and all three are audible:
+   *
+   *  - **`prefer-precise`** — a strictly more precise sourced date wins. The
+   *    recorded value is removed so `mergeDossier` fills the gap in its normal
+   *    gap-filling way; nothing here reaches into the merge's rules.
+   *  - **`report`** — the record stands and the candidate is written to the
+   *    hint file with its source, for a human to settle.
+   *  - **`ignore`** — dropped, with a note. Never silence.
+   *
+   * A conflict of *equal* precision is never an upgrade: two full dates that
+   * disagree are two claims about a person, and picking one by provenance alone
+   * would publish a coin toss.
+   */
+  private settleConflicts(
+    config: WebSearchTaskConfig,
+    dossier: Dossier,
+    values: readonly WebValue[],
+    notes: string[],
+  ): { dossier: Dossier; values: WebValue[]; conflicts: DateConflict[] } {
+    if (!values.some((value) => value.conflictsWith)) return { dossier, values: [...values], conflicts: [] };
+
+    const next = structuredClone(dossier);
+    const kept: WebValue[] = [];
+    const conflicts: DateConflict[] = [];
+
+    for (const value of values) {
+      const current = value.conflictsWith;
+      if (!current) {
+        kept.push(value);
+        continue;
+      }
+
+      const sharper = sharpensDate(current, value.value);
+      const describe =
+        `${value.field}: the web says "${value.value}"` +
+        (value.source ? ` (${value.source})` : '') +
+        ` and the record says "${current}"`;
+
+      if (config.onDateConflict === 'prefer-precise' && sharper) {
+        // Clearing the recorded value is what turns an overwrite into the
+        // ordinary gap fill `mergeDossier` already performs and reports.
+        const dates = next.metadata?.dates as Record<string, string> | undefined;
+        if (dates) delete dates[value.field];
+        kept.push(value);
+        notes.push(`${describe}; the sourced date is more precise, so it replaces the recorded one.`);
+        continue;
+      }
+
+      if (config.onDateConflict === 'ignore') {
+        notes.push(`${describe}; onDateConflict is "ignore", so the web answer was dropped.`);
+        continue;
+      }
+
+      conflicts.push({
+        field: value.field,
+        recorded: current,
+        found: value.value,
+        confidence: value.confidence,
+        ...(value.source ? { source: value.source } : {}),
+      });
+      notes.push(
+        `${describe}; ` +
+          (sharper
+            ? 'recorded as a conflict for review rather than published.'
+            : 'both are equally precise, so neither can be called a correction — recorded as a conflict for review.'),
+      );
+    }
+
+    return { dossier: next, values: kept, conflicts };
   }
 
   /**

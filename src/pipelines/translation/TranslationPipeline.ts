@@ -10,11 +10,14 @@ import {
   type WorkItem,
 } from '../../core/types.js';
 import { applyTextSpans, extractTextSpans, missingMasks, type TextSpan } from '../../documents/markdown/textSpans.js';
+import { readTitle } from '../../documents/markdown/title.js';
+import { languageName } from '../../domain/vocabulary.js';
 import type { DocumentSegment } from '../../documents/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
 import { keyOf, type LocalizationUnit } from '../localization/StringTable.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
+import { hasOwnScript, isTranslatable } from '../shared/script.js';
 import { translateUnits } from '../shared/stringBatch.js';
 import { StructureGuard } from './StructureGuard.js';
 
@@ -60,6 +63,10 @@ export class TranslationPipeline implements DocumentPipeline {
         targetLang,
         mode: config.mode,
         verifyStructure: config.verifyStructure,
+        // Both change what a correct output looks like, so both belong in the
+        // fingerprint: turning either on or off must re-translate the corpus.
+        foreignFragments: config.foreignFragments,
+        contextChars: config.contextChars,
         promptVariables: config.promptVariables,
       },
       promptVersion,
@@ -155,6 +162,9 @@ export class TranslationPipeline implements DocumentPipeline {
     }
 
     const units = dedupe(spans);
+    const keepForeign = config.foreignFragments === 'keep' && hasOwnScript(document.language);
+    const articleContext = describeArticle(document, config.contextChars);
+
     const batch = await translateUnits({
       task,
       context,
@@ -164,6 +174,10 @@ export class TranslationPipeline implements DocumentPipeline {
       units,
       maxPerCall: config.maxSegmentsPerCall,
       repairAttempts: config.repairAttempts,
+      ...(articleContext ? { articleContext } : {}),
+      // A fragment with no letter of the source script in it is a work title, a
+      // name or a discography line — never a sentence of the article.
+      ...(keepForeign ? { keepVerbatim: (unit) => !isTranslatable(unit.text, document.language) } : {}),
       memory: await context.memories.acquire(
         `${PIPELINE_ID}-${await context.prompts.versionOf(SEGMENTS_PROMPT_ID)}`,
         config.useTranslationMemory,
@@ -172,6 +186,10 @@ export class TranslationPipeline implements DocumentPipeline {
         ...config.promptVariables,
         sourceLanguage: document.language,
         targetLanguage: targetLang,
+        // The names as well as the codes: `pt` is unambiguous to a program and
+        // merely probable to a model, and the word costs one token.
+        sourceLanguageName: languageName(document.language),
+        targetLanguageName: languageName(targetLang),
         count: part.length,
       }),
       // A dropped mask token means a lost URL — catch it while a retry is cheap.
@@ -223,6 +241,8 @@ export class TranslationPipeline implements DocumentPipeline {
         ...config.promptVariables,
         sourceLanguage: document.language,
         targetLanguage: targetLang,
+        sourceLanguageName: languageName(document.language),
+        targetLanguageName: languageName(targetLang),
         partial: segment.total > 1,
         partLabel: segment.label,
       }),
@@ -282,6 +302,30 @@ interface Outcome {
   costUsd: number;
   attempt: string;
   notes: string[];
+}
+
+/**
+ * The one or two lines that tell a translator what they are translating.
+ *
+ * The article's own title and the opening of its lead, nothing else: no dossier,
+ * no dependency on `extract`, no second file to read. It rides in the volatile
+ * part of the message, so the cached prefix is unaffected, and it costs about
+ * eighty tokens per call against a batch of twenty fragments.
+ *
+ * Why it earns them: the fragments are lifted out of their document by design,
+ * and a sentence like "Здесь ему открылась вся прелесть фламенко" arrives with
+ * no way to know that *ему* is a guitarist, that the register is a reference
+ * work's, or that `фламенко` is the genre rather than the dance.
+ */
+function describeArticle(document: WorkItem, limit: number): string | undefined {
+  if (limit <= 0) return undefined;
+
+  const { title, lead } = readTitle(document.content, { leadChars: limit });
+  const lines = [
+    ...(title ? [`Title: ${title}`] : []),
+    ...(lead ? [`Opening: ${lead}`] : []),
+  ];
+  return lines.length > 0 ? lines.join('\n') : undefined;
 }
 
 /** Distinct span texts, in document order — the unit of translation and of caching. */

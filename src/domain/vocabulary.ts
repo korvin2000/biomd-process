@@ -173,6 +173,127 @@ export function isEntryType(value: string): value is EntryType {
 }
 
 // ---------------------------------------------------------------------------
+// how many people the entry is about
+// ---------------------------------------------------------------------------
+
+export interface EnsembleResolution {
+  /** True when the name describes a collective rather than one person. */
+  group: boolean;
+  /** How many people, when the word names a number: duo → 2, quartet → 4. */
+  size?: number;
+  /** The word that decided it, for the diagnostic note. */
+  word?: string;
+}
+
+const SOLO: EnsembleResolution = { group: false };
+
+/**
+ * Words that name a collective, and how many people each implies.
+ *
+ * The Cyrillic entries are *stems*, because Russian declines them (`дуэта`,
+ * `квартетом`, `ансамбля`) and a whole-word table would miss most real titles.
+ * The Latin ones are whole words on purpose: `^band[\p{L}]*$` also matches
+ * `Bandini` and `bandurria`, and this is a corpus of Spanish and Italian names.
+ * Dutch and German write these words as the tail of a compound (`Gitaartrio`,
+ * `Gitarrenquartett`), which {@link COMPOUND_TAILS} covers from the other end.
+ *
+ * Kept beside `type` and `gender` because it answers the same kind of question
+ * — a multilingual word to a canonical value — and because the answer feeds two
+ * of them: a collective is `gender: mixed` (`external/02`), and the size is what
+ * tells the portrait matcher that a photograph with three faces in it is the
+ * *right* photograph rather than a group shot to be avoided.
+ */
+const ENSEMBLE_WORDS: ReadonlyArray<{ match: RegExp; size?: number }> = [
+  { match: /^(?:duo|duos|duet|duett|duetto|dueto|d[uú]o)$/u, size: 2 },
+  { match: /^(?:дуэт|дуо|дует)[а-яё]*$/u, size: 2 },
+  { match: /^(?:trio|trios|tr[ií]o)$/u, size: 3 },
+  { match: /^трио$/u, size: 3 },
+  { match: /^(?:quartet|quartets|quartett|quartetto|cuarteto|quatuor|kwartet|kvartet)$/u, size: 4 },
+  { match: /^квартет[а-яё]*$/u, size: 4 },
+  { match: /^(?:quintet|quintets|quintett|quintetto|quinteto|kwintet|kvintet)$/u, size: 5 },
+  { match: /^квинтет[а-яё]*$/u, size: 5 },
+  { match: /^(?:sextet|sextett|sextetto|sexteto)$/u, size: 6 },
+  { match: /^секстет[а-яё]*$/u, size: 6 },
+  { match: /^(?:septet|septett|septetto|septeto)$/u, size: 7 },
+  { match: /^септет[а-яё]*$/u, size: 7 },
+  { match: /^(?:octet|octets|oktett|octeto)$/u, size: 8 },
+  { match: /^октет[а-яё]*$/u, size: 8 },
+  { match: /^(?:ensemble|ensembles|ensamble|conjunto|ansambl)$/u },
+  { match: /^(?:ансамбл|колектив|коллектив)[а-яё]*$/u },
+  { match: /^(?:orchestra|orchestras|orquesta|orchester|orchestre)$/u },
+  { match: /^оркестр[а-яё]*$/u },
+  { match: /^(?:band|bands|group|groups|grupo|gruppe|groupe)$/u },
+  { match: /^групп[а-яё]*$/u },
+  { match: /^(?:choir|chorus|coro|chor)$/u },
+  { match: /^хор$/u },
+];
+
+/**
+ * The same words as the tail of a compound: `Gitaartrio`, `Gitarrenquartett`,
+ * `Blockflötenduo`.
+ *
+ * Two guards, and both are load-bearing. The word must be **long**, and the
+ * letter before the tail must be a **consonant** — which is what separates a
+ * Germanic compound (`gitaa|r|trio`, `gitarre|n|quartett`, `zupf|quintett`) from
+ * a Romance name or noun that merely ends the same way. Without the second
+ * guard, `Demetrio` is a trio and `individuo` is a duo, and this is a corpus
+ * full of Spanish and Italian names.
+ */
+const COMPOUND_TAILS: ReadonlyArray<{ match: RegExp; size?: number }> = [
+  { match: /[^aeiouаеёиоуыэюяй](?:trio)$/u, size: 3 },
+  { match: /[^aeiouаеёиоуыэюяй](?:duo|duett?)$/u, size: 2 },
+  { match: /[^aeiouаеёиоуыэюяй](?:quartett?|kwartet|kvartet)$/u, size: 4 },
+  { match: /[^aeiouаеёиоуыэюяй](?:quintett?|kwintet)$/u, size: 5 },
+  { match: /[^aeiouаеёиоуыэюяй](?:ensemble|orkest|orchester)$/u },
+];
+
+const COMPOUND_MIN_LENGTH = 8;
+
+/**
+ * `"Гитарный дуэт 'Торнадо'"` → `{ group: true, size: 2 }`.
+ *
+ * Ask this of a **name** — a title, a heading, a slug, the roster's own entry —
+ * never of the article's prose. "Played in a band for ten years" is a sentence
+ * about one guitarist, and the same table that reads `ГРАН-дуэт` correctly would
+ * read that as a collective.
+ *
+ * The largest number wins when several words appear: `"Трио гитаристов Урала"`
+ * inside a page that also mentions a `дуэт` is still a trio, and a
+ * `"квартет"` in a title that also says `"ансамбль"` is a quartet, because the
+ * numbered word is the more specific claim.
+ */
+export function resolveEnsemble(name: string): EnsembleResolution {
+  const words = name
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .normalize('NFC')
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+
+  let best: EnsembleResolution | undefined;
+  const consider = (entry: { size?: number }, word: string): void => {
+    const candidate: EnsembleResolution = {
+      group: true,
+      ...(entry.size === undefined ? {} : { size: entry.size }),
+      word,
+    };
+    if (!best || (candidate.size ?? 0) > (best.size ?? 0)) best = candidate;
+  };
+
+  for (const word of words) {
+    for (const entry of ENSEMBLE_WORDS) {
+      if (entry.match.test(word)) consider(entry, word);
+    }
+    if (word.length < COMPOUND_MIN_LENGTH) continue;
+    for (const entry of COMPOUND_TAILS) {
+      if (entry.match.test(word)) consider(entry, word);
+    }
+  }
+  return best ?? SOLO;
+}
+
+// ---------------------------------------------------------------------------
 // gender — VD-ENUM-GENDER
 // ---------------------------------------------------------------------------
 
@@ -304,6 +425,26 @@ export function resolveLanguage(
   const fixed = LANG_FIXES[value] ?? value;
   if (!/^[a-z]{2}$/.test(fixed)) return undefined;
   return supported.includes(fixed) ? fixed : undefined;
+}
+
+/**
+ * `"ru"` → `"Russian"`; `("ru", "de")` → `"Russisch"`.
+ *
+ * For prompts, mostly. A two-letter code is unambiguous to a program and merely
+ * probable to a language model — `"pt"` is Portuguese to one reader and a
+ * typo to another — and the name costs one token more than the code. Falls back
+ * to the code itself where the runtime has no name for it.
+ */
+export function languageName(code: string, inLanguage = 'en'): string {
+  const normalized = code.trim().toLowerCase().split(/[-_]/)[0] ?? '';
+  if (!normalized) return code;
+
+  try {
+    const display = new Intl.DisplayNames([inLanguage], { type: 'language' });
+    return display.of(normalized) ?? code;
+  } catch {
+    return code;
+  }
 }
 
 // ---------------------------------------------------------------------------

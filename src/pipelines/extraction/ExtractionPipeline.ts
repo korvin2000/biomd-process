@@ -1,4 +1,4 @@
-import type { ExtractTaskConfig } from '../../config/schema.js';
+import type { AppConfig, ExtractTaskConfig } from '../../config/schema.js';
 import {
   soleItem,
   type DocumentPipeline,
@@ -10,6 +10,7 @@ import {
   type WorkItem,
 } from '../../core/types.js';
 import { harvestMedia, type HarvestResult } from '../../documents/markdown/media.js';
+import { readTitle } from '../../documents/markdown/title.js';
 import {
   emptyDossier,
   isEmptyDossier,
@@ -19,10 +20,15 @@ import {
   type DossierOptions,
 } from '../../domain/dossier.js';
 import type { CatalogHints, Dossier } from '../../domain/types.js';
+import { mergeCsvLists, normalizeCsvList, text } from '../../domain/values.js';
+import { languageName, resolveEnsemble, type EnsembleResolution } from '../../domain/vocabulary.js';
 import type { Artifact } from '../../io/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
+import type { NameRosterStore } from '../../roster/NameRosterStore.js';
+import type { RosterEntry } from '../../roster/types.js';
 import type { JsonValue } from '../../shared/json.js';
 import { findSourceDossier, type ExistingDossier } from '../shared/dossierSource.js';
+import { rosterEntryFor } from '../shared/roster.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
 import {
   answeredKeys,
@@ -31,6 +37,7 @@ import {
   mergeFlat,
   normalizeFlat,
   parseFlatAnswer,
+  PERSON_ONLY_FIELDS,
   toCardKey,
   type FlatField,
   type FlatRecord,
@@ -65,15 +72,23 @@ export class ExtractionPipeline implements DocumentPipeline {
   readonly id = PIPELINE_ID;
   readonly description = 'Extract structured metadata from a document into a dossier JSON.';
 
+  constructor(private readonly roster: NameRosterStore) {}
+
   async plan(item: WorkItem, context: PlanContext): Promise<TaskSeed[]> {
     const config = context.config.tasks.extract;
     const existing = await findSourceDossier(item, context.config);
     const plan = planFor(config, existing);
+    // The roster is an input to the answer, so it belongs in the fingerprint:
+    // editing a name in it must re-extract that entry and no other.
+    const roster = await rosterEntryFor(item, context.config, this.roster);
 
     return [
       {
         label: `${item.slug} → metadata (${item.language})${plan === 'reuse' ? ' [reused]' : ''}`,
-        contract: this.contractOf(config, plan, existing?.hash, context.config.catalogue.datePrecision),
+        contract: {
+          ...(this.contractOf(config, plan, existing?.hash, context.config.catalogue.datePrecision) as object),
+          roster: roster ? { name: roster.displayName, aliases: roster.aliases.length } : 'none',
+        },
         promptVersion: plan === 'reuse' ? 'none' : await context.prompts.versionOf(PIPELINE_ID),
         // A reused dossier costs nothing, and a cost preview that says otherwise
         // is a cost preview nobody trusts.
@@ -91,6 +106,7 @@ export class ExtractionPipeline implements DocumentPipeline {
     const existing = await findSourceDossier(item, context.config);
     const plan = planFor(config, existing);
     const notes: string[] = [];
+    const local = await this.localFacts(item, context);
 
     // An existing file is read through the same sanitizer as a fresh answer, so
     // a version 1 document is migrated in passing: its `title`/`type`/`gender`/
@@ -102,7 +118,7 @@ export class ExtractionPipeline implements DocumentPipeline {
     }
 
     if (plan === 'reuse' && base) {
-      return this.emit(config, item, base.dossier, base.hints, { ...EMPTY_USAGE }, 0, notes);
+      return this.emit(config, item, base.dossier, base.hints, { ...EMPTY_USAGE }, 0, notes, local, context.config);
     }
 
     const harvest = this.harvest(config, item, notes);
@@ -121,10 +137,16 @@ export class ExtractionPipeline implements DocumentPipeline {
         { ...EMPTY_USAGE },
         0,
         [...notes, ...(merged?.notes ?? [])],
+        local,
+        context.config,
       );
     }
 
+    // A field the roster answers is a field a partial extraction may leave out:
+    // the answer is already on this side, so rejecting the response over it
+    // would buy a retry that changes nothing.
     const satisfied = base ? this.satisfiedKeys(base.dossier) : new Set<string>();
+    for (const key of Object.keys(local.metadata)) satisfied.add(key);
     const outcome = await runWithEscalation<FlatRecord>({
       task,
       context,
@@ -140,6 +162,7 @@ export class ExtractionPipeline implements DocumentPipeline {
       variables: (attempt, segment) => ({
         ...config.promptVariables,
         language: item.language,
+        languageName: languageName(item.language),
         fields: fields.map((field) => ({ key: field.key, hint: field.hint })),
         requiredFields: config.requiredFields.map(toCardKey).filter((key) => fields.some((f) => f.key === key)),
         partial: attempt.partial || segment.total > 1,
@@ -148,7 +171,7 @@ export class ExtractionPipeline implements DocumentPipeline {
       section: (segment) => ({ title: 'Article', body: segment.text, volatile: true, fence: 'markdown' }),
       parse: (text) => this.parse(text, fields, options),
       merge: (parts) => mergeFlat(parts, fields),
-      accept: (record) => this.accept(record, config, satisfied),
+      accept: (record) => this.accept(record, config, satisfied, local),
     });
 
     const built = buildDossier(outcome.value, fields, { ...options, media: harvest });
@@ -164,7 +187,17 @@ export class ExtractionPipeline implements DocumentPipeline {
     }
 
     if (!base) {
-      return this.emit(config, item, built.dossier, built.hints, outcome.usage, outcome.costUsd, notes);
+      return this.emit(
+        config,
+        item,
+        built.dossier,
+        built.hints,
+        outcome.usage,
+        outcome.costUsd,
+        notes,
+        local,
+        context.config,
+      );
     }
 
     // Completion never overwrites: the file on disk is the authority, the fresh
@@ -182,12 +215,98 @@ export class ExtractionPipeline implements DocumentPipeline {
       outcome.usage,
       outcome.costUsd,
       notes,
+      local,
+      context.config,
     );
+  }
+
+  /**
+   * What this run knows about the entry **without** reading a model's answer:
+   * the roster's name components, and whether the title names a collective.
+   *
+   * Both are corroboration, never authority. The roster fills a gap the article
+   * left and is reported when it contradicts one it did not; the collective test
+   * decides one machine token (`gender`) that the format defines by fiat —
+   * `mixed` *means* "a collective entry" (`external/02`), so a title that says
+   * `квартет` settles it more reliably than a model reading between the lines.
+   */
+  private async localFacts(item: WorkItem, context: ExecutionContext | PlanContext): Promise<LocalFacts> {
+    const entry = await rosterEntryFor(item, context.config, this.roster);
+    const title = readTitle(item.content);
+    // Titles, the roster name and the slug — never the prose, where "played in
+    // a duo with Meleshko" would file a soloist as a pair.
+    const named = [...title.lines, entry?.fullName ?? '', item.slug.replace(/[_-]+/g, ' ')];
+    const ensemble = resolveEnsemble(named.filter(Boolean).join(' | '));
+
+    const metadata: Record<string, string> = {};
+    if (entry && context.config.roster.fillMetadata) {
+      if (entry.personName) {
+        if (entry.surname) metadata['surname'] = entry.surname;
+        if (entry.forename) metadata['forename'] = entry.forename;
+      } else if (entry.ensemble.group && entry.fullName) {
+        // A collective has no family name; its own title is the name the
+        // catalogue displays, and `surname` is where a dossier keeps it.
+        metadata['surname'] = entry.fullName;
+      }
+    }
+    return { entry, metadata, ensemble, title: title.title };
+  }
+
+  /**
+   * The roster's contribution, applied the way every other second source is:
+   * gaps only.
+   *
+   * A disagreement is not resolved here. The article is what the entry is about
+   * and the roster is a list maintained by hand elsewhere; when they differ the
+   * article wins, and the run log says so if it was asked to.
+   */
+  private applyRoster(dossier: Dossier, local: LocalFacts, appConfig: AppConfig, notes: string[]): Dossier {
+    if (Object.keys(local.metadata).length === 0) return dossier;
+
+    const options: DossierOptions = {
+      supportedLanguages: appConfig.catalogue.supportedLanguages,
+      allowUnknownTypes: appConfig.catalogue.allowUnknownTypes,
+      datePrecision: appConfig.catalogue.datePrecision,
+    };
+
+    // A mononym is the case this guards: the article gives `forename: Армик`
+    // and no family name, the roster's only column is `surname: Армик`, and
+    // filling the gap publishes "Армик Армик" as the display name. One name
+    // twice is not two names.
+    const metadata: Record<string, string> = {};
+    for (const [key, value] of Object.entries(local.metadata)) {
+      const other = key === 'surname' ? 'forename' : 'surname';
+      // Exact, not the loose `agree` the conflict report uses: `Виктор` is
+      // *contained* in `Викторов` and they are two different name parts.
+      if (sameName(text(dossier.metadata?.[other]) ?? '', value)) {
+        notes.push(`The roster's ${key} "${value}" repeats the ${other} already on record; left as it was.`);
+        continue;
+      }
+      metadata[key] = value;
+    }
+    if (Object.keys(metadata).length === 0) return dossier;
+
+    if (appConfig.roster.reportConflicts) {
+      for (const [key, value] of Object.entries(metadata)) {
+        const current = dossier.metadata?.[key];
+        if (typeof current !== 'string' || !current) continue;
+        if (agree(current, value)) continue;
+        notes.push(`The roster spells ${key} "${value}"; the article gave "${current}". Kept the article's.`);
+      }
+    }
+
+    const merged = mergeDossier(dossier, { metadata }, options);
+    if (merged.filled.length > 0) {
+      notes.push(`The name roster supplied ${merged.filled.join(', ')}; the article did not state as much.`);
+    }
+    return merged.dossier;
   }
 
   /** The gallery, read out of the article rather than asked for. */
   private harvest(config: ExtractTaskConfig, item: WorkItem, notes: string[]): HarvestResult {
-    if (!config.harvest.photos && !config.harvest.music) return { photos: [], music: [], notes: [] };
+    if (!config.harvest.photos && !config.harvest.music) {
+      return { photos: [], music: [], imageTargets: [], notes: [] };
+    }
 
     const harvested = harvestMedia(item.content, config.harvest);
     notes.push(...harvested.notes);
@@ -243,9 +362,17 @@ export class ExtractionPipeline implements DocumentPipeline {
     record: FlatRecord,
     config: ExtractTaskConfig,
     satisfied: ReadonlySet<string>,
+    local: LocalFacts,
   ): { ok: true } | { ok: false; reason: string } {
     const answered = answeredKeys(record);
-    const missing = config.requiredFields
+    // A collective has no given name to be missing. Requiring one rejects the
+    // answer, retries it, escalates it to a paid model and finally fails the
+    // document — over a field an ensemble cannot have.
+    const required = local.ensemble.group
+      ? config.requiredFields.filter((field) => !PERSON_ONLY_FIELDS.includes(toCardKey(field)))
+      : config.requiredFields;
+
+    const missing = required
       .map(toCardKey)
       .filter((key) => !answered.has(key) && !satisfied.has(key));
 
@@ -264,27 +391,104 @@ export class ExtractionPipeline implements DocumentPipeline {
     usage: TokenUsage,
     costUsd: number,
     notes: string[],
+    local: LocalFacts,
+    appConfig: AppConfig,
   ): TaskResult {
+    const complete = this.applyRoster(this.forCollective(dossier, local, notes), local, appConfig, notes);
+    const classified = this.classify(hints, local, notes);
+
     const artifacts: Artifact[] = [
       {
         channel: config.outputChannel,
         format: 'json',
-        body: dossier as unknown as JsonValue,
+        body: complete as unknown as JsonValue,
         pathVars: this.pathVars(item),
       },
     ];
 
-    if (config.emitCatalogHints && Object.keys(hints).length > 0) {
+    if (config.emitCatalogHints && Object.keys(classified).length > 0) {
       artifacts.push({
         channel: config.hintsChannel,
         format: 'json',
-        body: { slug: item.slug, language: item.language, ...hints } as JsonValue,
+        body: { slug: item.slug, language: item.language, ...classified } as JsonValue,
         pathVars: this.pathVars(item),
       });
     }
 
-    if (isEmptyDossier(dossier)) notes.push('The dossier is structurally valid but carries no facts.');
+    if (isEmptyDossier(complete)) notes.push('The dossier is structurally valid but carries no facts.');
     return { artifacts, usage, costUsd, notes };
+  }
+
+  /**
+   * A collective has no given name, so whatever is in `forename` is one of
+   * three other things.
+   *
+   * The field matters because it is not decoration: `displayNamesOf` renders
+   * `forename + surname`, so `"Хеленус де Рижке, Ольга Франсен, Эстер
+   * Стинберген"` in `forename` publishes that as the beginning of the trio's
+   * display name in every language index, and
+   * `"Классический ансамбль гитаристов"` publishes the ensemble's name twice.
+   *
+   * What actually turns up there, in order of how the value is treated:
+   *
+   *  1. **the collective's name**, when the model had nowhere else to put it —
+   *     promoted to `surname`, which is where the format keeps it;
+   *  2. **the collective's name again**, beside a `surname` that already says
+   *     it — dropped;
+   *  3. **the members** — moved to `relatives`, which `external/05` defines as
+   *     "related persons" and the reader renders as exactly that comma-joined
+   *     line. A real fact in the wrong member is worth moving, not discarding.
+   */
+  private forCollective(dossier: Dossier, local: LocalFacts, notes: string[]): Dossier {
+    if (!local.ensemble.group) return dossier;
+
+    const forename = text(dossier.metadata?.forename);
+    if (!forename) return dossier;
+
+    const metadata = { ...dossier.metadata };
+    delete metadata['forename'];
+    const surname = text(metadata['surname']);
+    const subject = local.title || 'this entry';
+
+    // A comma is what separates the two: an ensemble's name is one name, and
+    // its members are a list. `Классический ансамбль гитаристов` is the first,
+    // `Козлов, Ковба, Мухатдинов` is the second.
+    if (!surname && !forename.includes(',')) {
+      metadata['surname'] = forename;
+      notes.push(`"${subject}" is a collective, so "${forename}" is its name rather than a given name.`);
+      return { ...dossier, metadata };
+    }
+    if (surname && agree(surname, forename)) {
+      notes.push(`"${subject}" is a collective: dropped forename "${forename}", which repeats its name.`);
+      return { ...dossier, metadata };
+    }
+
+    const existing = text(metadata['relatives']);
+    metadata['relatives'] = existing ? mergeCsvLists(existing, forename) : normalizeCsvList(forename);
+    notes.push(
+      `"${subject}" is a collective, so it has no given name: moved "${forename}" from forename to ` +
+        'relatives, where the format puts related persons.',
+    );
+    return { ...dossier, metadata };
+  }
+
+  /**
+   * The one classification this pipeline decides rather than reads.
+   *
+   * `gender: mixed` is defined by `external/02` as "a collective entry", so a
+   * title that says `квартет` answers it outright — and a model asked to
+   * choose between `m`, `f` and `mixed` for an ensemble of four men will answer
+   * `m` often enough to matter. Everything else the model noticed passes
+   * through untouched.
+   */
+  private classify(hints: CatalogHints, local: LocalFacts, notes: string[]): CatalogHints {
+    if (!local.ensemble.group || hints.gender === 'mixed') return hints;
+
+    notes.push(
+      `"${local.title || local.entry?.fullName || 'this entry'}" names a collective ` +
+        `("${local.ensemble.word}"), so gender is mixed${hints.gender ? ` rather than ${hints.gender}` : ''}.`,
+    );
+    return { ...hints, gender: 'mixed' };
   }
 
   private dossierOptions(context: ExecutionContext): DossierOptions {
@@ -318,6 +522,37 @@ export class ExtractionPipeline implements DocumentPipeline {
       promptVariables: config.promptVariables,
     };
   }
+}
+
+/** Everything known about the entry before a model is asked anything. */
+interface LocalFacts {
+  entry?: RosterEntry;
+  /** `metadata` members the roster can supply, already normalized. */
+  metadata: Record<string, string>;
+  ensemble: EnsembleResolution;
+  /** The article's own title, for the diagnostic note. */
+  title: string;
+}
+
+/** The same name written twice, ignoring case, diacritics and punctuation. */
+function sameName(left: string, right: string): boolean {
+  return Boolean(left) && Boolean(right) && foldName(left) === foldName(right);
+}
+
+/** Two spellings of the same name, one possibly abbreviated — for the conflict report. */
+function agree(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  const a = foldName(left);
+  const b = foldName(right);
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function foldName(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
 /** `reuse` only applies when there is something to reuse. */

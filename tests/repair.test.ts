@@ -135,6 +135,70 @@ describe('partial batch answers', () => {
   });
 });
 
+/**
+ * The `williams2` failure, one level down from routing: the model was willing
+ * and the payload was fine, the answer simply had nowhere left to go. Halving
+ * the table is the cheapest repair — half a batch needs half the output — and it
+ * keeps the work on the model already chosen instead of escalating to a wider,
+ * paid one.
+ */
+describe('a batch whose answer does not fit', () => {
+  /** Refuses any table with more than `limit` keys, the way an output cap does. */
+  function cutsOffAbove(limit: number): { client: FakeClient; batches: FakeCall[] } {
+    const batches: FakeCall[] = [];
+
+    const client = new FakeClient((call): CompletionResponse => {
+      if (call.request.responseFormat?.type !== 'json_object') return respond('');
+      batches.push(call);
+
+      const asked = Object.keys(requestedTable(call)).length;
+      if (asked > limit) return respond('{"partial": "cut off mid-', { finishReason: 'length' });
+      return respond(echoTable(call.request));
+    });
+
+    return { client, batches };
+  }
+
+  it('splits it instead of failing the document', async () => {
+    const { client, batches } = cutsOffAbove(1);
+    const app = workspace.app({ tasks: TRANSLATE_ONLY }, client);
+
+    const outcome = await runJob(app);
+
+    expect(outcome.summary.status).toBe('completed');
+    expect(batches.some((call) => Object.keys(requestedTable(call)).length > 1)).toBe(true);
+    // Every batch that was actually answered had come down to the size that fits.
+    const answered = batches.filter((call) => Object.keys(requestedTable(call)).length <= 1);
+    expect(answered.length).toBeGreaterThan(1);
+  });
+
+  it('produces the complete document, not one missing the fragments that were cut', async () => {
+    const { client } = cutsOffAbove(1);
+    await runJob(workspace.app({ tasks: TRANSLATE_ONLY }, client));
+
+    const translated = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
+    expect(translated.trim()).toBe(ARTICLE.trim());
+  });
+
+  it('does not retry the identical payload before narrowing it', async () => {
+    // A cut-off answer is deterministic, so a retry buys the same cut twice.
+    const { client } = cutsOffAbove(1);
+    const app = workspace.app({ tasks: TRANSLATE_ONLY }, client);
+
+    await runJob(app);
+
+    expect(app.metrics.snapshot().retries).toBe(0);
+  });
+
+  it('gives up on a single fragment that still does not fit, rather than looping', async () => {
+    const { client } = cutsOffAbove(0);
+    const outcome = await runJob(workspace.app({ tasks: TRANSLATE_ONLY }, client));
+
+    expect(outcome.summary.status).toBe('failed');
+    expect(outcome.summary.failures[0]?.message).toMatch(/cut off by the output token limit/i);
+  });
+});
+
 describe('translation memory', () => {
   const TWO_DOCS = { translate: { enabled: true, targetLanguages: ['en'] } };
 

@@ -31,6 +31,20 @@ describe('gap analysis', () => {
     expect(gaps.checkLiveness).toBe(false);
   });
 
+  it('asks a collective nothing personal', () => {
+    // A quartet has no date of birth, and a search model asked for one answers
+    // it — with the founding year, or a member's.
+    const gaps = findGaps({ metadata: {} }, { ...OPTIONS, fields: [...OPTIONS.fields, 'url'], collective: true });
+    expect(gaps.questions.map((question) => question.field)).toEqual(['country', 'url']);
+    expect(gaps.checkLiveness).toBe(false);
+  });
+
+  it('does not check liveness for a collective, whatever its founding year', () => {
+    const founded: Dossier = { metadata: { dates: { born: '1900' } } };
+    expect(findGaps(founded, OPTIONS).checkLiveness).toBe(true);
+    expect(findGaps(founded, { ...OPTIONS, collective: true }).checkLiveness).toBe(false);
+  });
+
   it('does not ask for a country that index.json already has', () => {
     const gaps = findGaps({ metadata: {} }, { ...OPTIONS, known: { country: 'es' } });
     expect(gaps.questions.map((question) => question.field)).not.toContain('country');
@@ -118,19 +132,24 @@ describe('reading a web answer', () => {
     expect(answer?.rejected.join(' ')).toContain('below 0.70');
   });
 
-  it('refuses a "refinement" that contradicts the record', () => {
+  it('marks a date that contradicts the record instead of discarding it', () => {
+    // Not a rejection: an article that says "about 1950" and a cited 25.07.1949
+    // are a fact worth surfacing. Which one wins is `onDateConflict`'s call, and
+    // this layer only has to make the disagreement visible.
     const answer = parseWebAnswer(
       JSON.stringify({ born: { value: '21.02.1894', source: 'https://example.org/a', confidence: 1 } }),
       { ...answerOptions, asked: ['born'], current: { born: '1893' } },
     );
-    expect(answer?.values).toEqual([]);
-    expect(answer?.rejected[0]).toContain('contradicts');
+    expect(answer?.values[0]?.value).toBe('21.02.1894');
+    expect(answer?.values[0]?.conflictsWith).toBe('1893');
 
     const sharper = parseWebAnswer(
       JSON.stringify({ born: { value: '21.02.1893', source: 'https://example.org/a', confidence: 1 } }),
       { ...answerOptions, asked: ['born'], current: { born: '1893' } },
     );
     expect(sharper?.values[0]?.value).toBe('21.02.1893');
+    // A sharper reading of the same date is a refinement, not a conflict.
+    expect(sharper?.values[0]?.conflictsWith).toBeUndefined();
   });
 
   it('reads the liveness status', () => {

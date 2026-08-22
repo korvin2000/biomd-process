@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ErrorClassifier } from '../src/reliability/ErrorClassifier.js';
 import { CircuitBreakerRegistry } from '../src/reliability/CircuitBreaker.js';
-import { LlmCallError } from '../src/reliability/errors.js';
+import { AllTargetsFailedError, LlmCallError, isOutputTruncated } from '../src/reliability/errors.js';
 import { RetryPolicy } from '../src/reliability/RetryPolicy.js';
 import { TimeoutError } from '../src/shared/errors.js';
 import type { Clock } from '../src/shared/async.js';
@@ -65,6 +65,32 @@ describe('ErrorClassifier', () => {
   it('gives context_length a fallback-but-no-retry disposition', () => {
     const disposition = classifier.classify({ status: 413, message: 'too big' }).disposition;
     expect(disposition).toEqual({ retryable: false, fallbackable: true });
+  });
+});
+
+describe('a cut-off answer', () => {
+  const truncated = new LlmCallError('output_truncated', 'cut off at 8192 tokens');
+
+  it('is worth another model but not another attempt at the same one', () => {
+    // The two axes are separate on purpose: the payload was accepted and the
+    // model ran out of room, so the same request produces the same cut. Only a
+    // wider target — or a smaller request — changes the outcome.
+    expect(truncated.disposition).toEqual({ retryable: false, fallbackable: true });
+  });
+
+  it('is distinguishable from an unparseable one, which is worth retrying', () => {
+    expect(new LlmCallError('response_format', 'not JSON').disposition.retryable).toBe(true);
+  });
+
+  it('is recognizable through the exhausted-chain error a caller actually catches', () => {
+    const exhausted = new AllTargetsFailedError('everything failed', [
+      new LlmCallError('server', 'upstream exploded'),
+      truncated,
+    ]);
+
+    expect(isOutputTruncated(exhausted)).toBe(true);
+    expect(isOutputTruncated(new AllTargetsFailedError('down', [new LlmCallError('server', 'nope')]))).toBe(false);
+    expect(isOutputTruncated(new Error('unrelated'))).toBe(false);
   });
 });
 

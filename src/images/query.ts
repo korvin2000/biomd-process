@@ -35,6 +35,19 @@ export interface NameQuery {
   /** First letters of every name part, for the bucket-letter check. */
   initials: string[];
   /**
+   * Images the article itself embeds, by their position in it.
+   *
+   * The strongest evidence in the whole matcher, and the only one that needs no
+   * name: whoever wrote the article about this entry chose to show this
+   * photograph in it. It is also the only way to reach a file the name index
+   * cannot — `photo/k/kag.jpg` is the Classical Guitarists' Ensemble, and no
+   * amount of name matching turns `classicalag` into `kag`.
+   *
+   * Keyed twice: by lower-cased path, and by `#<file name>` for an article that
+   * writes the path with a prefix or from another directory.
+   */
+  articleImages: ReadonlyMap<string, number>;
+  /**
    * Words that belong to this person's story but are not their name —
    * birthplace, bands, teachers, instruments.
    *
@@ -52,10 +65,16 @@ export interface QueryInput {
   latinTitle?: string;
   /** Anything else worth treating as a name: an article heading, an alias. */
   extraNames?: readonly string[];
+  /** Image targets the article embeds, in document order. */
+  articleImages?: readonly string[];
 }
 
 /** Fields whose words describe the person's world rather than name them. */
 const CONTEXT_FIELDS = [
+  // An ensemble's members live here, and a relative shares a family name: both
+  // are people this entry's story explains, so a filename that mentions one is
+  // not evidence of a competing subject.
+  'relatives',
   'birthplace',
   'deathplace',
   'instruments',
@@ -127,6 +146,7 @@ export function buildQuery(input: QueryInput): NameQuery {
   const all = [...new Set([...surnames, ...forenames])];
   return {
     slug: input.slug,
+    articleImages: indexArticleImages(input.articleImages ?? []),
     surnames: [...surnames],
     forenames: [...forenames],
     all,
@@ -135,6 +155,39 @@ export function buildQuery(input: QueryInput): NameQuery {
     initials: [...new Set(all.map((name) => name.slice(0, 1)).filter(Boolean))],
     context,
   };
+}
+
+/**
+ * `photo/A/Armik1.JPG` → `photo/a/armik1.jpg`, plus `#armik1.jpg`.
+ *
+ * A basename key as well as the path, because an article is written by hand and
+ * may spell the same file `/photo/a/armik1.jpg` or `pages/photo/a/armik1.jpg`.
+ * A basename that appears twice under different directories is dropped rather
+ * than guessed at: two files named `1.jpg` are not evidence of anything.
+ */
+function indexArticleImages(targets: readonly string[]): Map<string, number> {
+  const byPath = new Map<string, number>();
+  const byName = new Map<string, number[]>();
+
+  targets.forEach((target, rank) => {
+    const path = target.trim().toLowerCase().replace(/^\.?\/+/, '');
+    if (!path || /^[a-z]+:/.test(path)) return;
+    if (!byPath.has(path)) byPath.set(path, rank);
+
+    const name = path.split('/').pop() ?? '';
+    if (!name) return;
+    const ranks = byName.get(name);
+    if (ranks) ranks.push(rank);
+    else byName.set(name, [rank]);
+  });
+
+  for (const [name, ranks] of byName) {
+    const unique = new Set(
+      [...byPath.entries()].filter(([path]) => path.endsWith(`/${name}`) || path === name).map(([path]) => path),
+    );
+    if (unique.size === 1 && ranks[0] !== undefined) byPath.set(`#${name}`, ranks[0]);
+  }
+  return byPath;
 }
 
 /**

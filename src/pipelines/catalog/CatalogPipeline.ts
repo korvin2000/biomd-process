@@ -14,8 +14,11 @@ import { CatalogIndex, mergeNameIndex, type CatalogOptions, type RowUpdate } fro
 import type { CatalogHints, EntryRow } from '../../domain/types.js';
 import type { Artifact, ArtifactWriter } from '../../io/types.js';
 import { EMPTY_USAGE } from '../../llm/types.js';
+import type { NameRosterStore } from '../../roster/NameRosterStore.js';
+import type { RosterEntry } from '../../roster/types.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
+import { rosterEntryFor } from '../shared/roster.js';
 import { displayNamesOf, latinTitleOf, type DossierNames } from './names.js';
 
 const PIPELINE_ID = 'catalog';
@@ -46,6 +49,8 @@ export class CatalogPipeline implements CorpusPipeline {
   readonly usesLlm = false;
   readonly description = 'Aggregate the corpus into index.json and the per-language name files.';
 
+  constructor(private readonly roster: NameRosterStore) {}
+
   async planCorpus(items: readonly WorkItem[], context: PlanContext): Promise<TaskSeed[]> {
     const config = context.config.tasks.catalog;
 
@@ -56,6 +61,10 @@ export class CatalogPipeline implements CorpusPipeline {
           languages: this.editionLanguages(context.config).sort(),
           localizedNames: config.localizedNames,
           generateAliases: config.generateAliases,
+          aliasPolicy: config.aliasPolicy,
+          displayNameOrder: config.displayNameOrder,
+          refresh: [...config.refresh].sort(),
+          roster: context.config.roster.aliases ? context.config.roster.file : '',
           merge: config.merge,
           catalogue: context.config.catalogue,
           portraits: context.config.tasks.portrait.enabled,
@@ -63,13 +72,28 @@ export class CatalogPipeline implements CorpusPipeline {
         promptVersion: 'none',
         usesLlm: false,
         expectedOutputs: [{ channel: config.indexChannel, pathVars: {} }],
-        // Everything the index describes must exist before it is indexed.
+        // index.json is read, edited and written back. Its existence is the
+        // normal state of a catalogue, not a sign that this run has nothing to
+        // add: skipping on it meant a new article could never reach the index.
+        mergesOutput: true,
+        /**
+         * Everything the index describes must have *finished* before it is
+         * indexed — but only finished, not succeeded.
+         *
+         * These are ordering barriers (`optional`), because this pipeline reads
+         * the disk rather than the plan: a language whose translation failed is
+         * simply absent from that entry's editions, which is the same answer it
+         * gives for a language nobody asked for. Treating them as prerequisites
+         * meant one document failing one translation retired the index for the
+         * entire corpus — every other entry losing its row to a neighbour's bad
+         * luck, which is the opposite of what an aggregate is for.
+         */
         dependsOn: [
-          { pipeline: 'extract', scope: 'all' },
-          { pipeline: 'websearch', scope: 'all' },
-          { pipeline: 'translate', scope: 'all' },
-          { pipeline: 'localize', scope: 'all' },
-          { pipeline: 'portrait', scope: 'all' },
+          { pipeline: 'extract', scope: 'all', optional: true },
+          { pipeline: 'websearch', scope: 'all', optional: true },
+          { pipeline: 'translate', scope: 'all', optional: true },
+          { pipeline: 'localize', scope: 'all', optional: true },
+          { pipeline: 'portrait', scope: 'all', optional: true },
         ],
       },
     ];
@@ -113,7 +137,9 @@ export class CatalogPipeline implements CorpusPipeline {
         notes.push(`${item.slug}: new row, id ${result.row.id}${describe(hints)}.`);
       }
 
-      if (config.localizedNames) this.collectNames(result.row, dossiers, derived, config.generateAliases);
+      if (config.localizedNames) {
+        await this.collectNames(result.row, item, dossiers, derived, context);
+      }
     }
 
     const artifacts: Artifact[] = [
@@ -259,17 +285,78 @@ export class CatalogPipeline implements CorpusPipeline {
     return (await readJsonFile<T>(file).catch(() => undefined)) ?? undefined;
   }
 
-  private collectNames(
+  private async collectNames(
     row: EntryRow,
+    item: WorkItem,
     dossiers: ReadonlyMap<string, DossierNames>,
     derived: Map<string, Map<string, string[]>>,
-    aliases: boolean,
-  ): void {
-    for (const [lang, entries] of displayNamesOf(row, dossiers, { aliases })) {
+    context: ExecutionContext,
+  ): Promise<void> {
+    const config = context.config.tasks.catalog;
+    const roster = await rosterEntryFor(item, context.config, this.roster);
+    const names = displayNamesOf(row, dossiers, {
+      aliases: config.generateAliases,
+      policy: config.aliasPolicy,
+      order: config.displayNameOrder,
+      rosterLanguage: context.config.roster.language,
+      extra: this.rosterAliases(context, roster),
+      ...(this.rosterDisplayName(context, roster) ?? {}),
+    });
+
+    for (const [lang, entries] of names) {
       const bucket = derived.get(lang) ?? new Map<string, string[]>();
       bucket.set(row.id, entries);
       derived.set(lang, bucket);
     }
+  }
+
+  /**
+   * The roster's own names for this entry, for the one language it is written in.
+   *
+   * These are the best aliases in the system and the only ones nothing else can
+   * derive: `Баццотти Марко` beside `Баззотти`, `Инсаров` for a man the
+   * catalogue files under `Черножуков`, `Буэк` for `Бюк`. They are hand-authored
+   * variants, not translations, so they are offered to their own language and to
+   * no other.
+   */
+  private rosterAliases(
+    context: ExecutionContext,
+    entry: RosterEntry | undefined,
+  ): ReadonlyMap<string, readonly string[]> | undefined {
+    const settings = context.config.roster;
+    if (!settings.aliases || !context.config.tasks.catalog.generateAliases || !entry) return undefined;
+
+    const names = [entry.fullName, ...entry.aliases].filter(Boolean);
+    return names.length > 0 ? new Map([[settings.language, names]]) : undefined;
+  }
+
+  /**
+   * The roster's heading, offered as the entry's **display name** rather than
+   * as one more alias.
+   *
+   * `index-<lang>.json[0]` is what the reader prints under the thumbnail, and
+   * a derived `Forename Surname` is a guess at what a person already wrote
+   * down: `Абитон Жерар` is the catalogue's own heading for that entry, and for
+   * a collective — where a dossier's name columns hold whatever the extractor
+   * could make of a title — it is frequently the only real name in the system.
+   *
+   * Two records are refused. One whose columns do not read as a name at all
+   * (`authors.bio.md`, a page title chopped into three) would publish
+   * `Музыкальные пристрастия – музыка гитариста` as somebody's name; a
+   * collective is *not* refused, because its `fullName` is precisely its title.
+   * And it is offered to the roster's own language only — these are variant
+   * spellings, not translations.
+   */
+  private rosterDisplayName(
+    context: ExecutionContext,
+    entry: RosterEntry | undefined,
+  ): { preferred: ReadonlyMap<string, string> } | undefined {
+    const settings = context.config.roster;
+    if (!entry || context.config.tasks.catalog.displayNameOrder !== 'roster') return undefined;
+    if (!entry.personName && !entry.ensemble.group) return undefined;
+
+    const name = entry.fullName.trim();
+    return name ? { preferred: new Map([[settings.language, name]]) } : undefined;
   }
 
   /**
@@ -297,9 +384,21 @@ export class CatalogPipeline implements CorpusPipeline {
         body: '',
         pathVars: { lang },
       });
-      const existing = (await pathExists(path)) ? await readJsonFile<unknown>(path).catch(() => undefined) : undefined;
+      // `merge: false` means "rebuild rather than update", and it has to mean
+      // the same thing here as it does for `index.json`. Otherwise a derived
+      // display name can never be *corrected*: `mergeNameIndex` treats every
+      // existing `[0]` as hand-authored — which is right, and which also makes
+      // a fix to this producer invisible until the file is deleted by hand.
+      const existing =
+        config.merge && (await pathExists(path))
+          ? await readJsonFile<unknown>(path).catch(() => undefined)
+          : undefined;
 
-      const merged = mergeNameIndex(existing, entries, { titles, knownIds });
+      const merged = mergeNameIndex(existing, entries, {
+        titles,
+        knownIds,
+        refreshDisplayNames: config.refresh.includes('displayNames'),
+      });
       notes.push(...merged.notes.map((note) => `index-${lang}.json: ${note}`));
       if (merged.unchanged && existing !== undefined) continue;
 
@@ -320,6 +419,7 @@ export class CatalogPipeline implements CorpusPipeline {
       defaultType: config.catalogue.defaultType,
       defaultPageType: config.catalogue.defaultPageType,
       allowUnknownTypes: config.catalogue.allowUnknownTypes,
+      refresh: config.tasks.catalog.refresh,
     };
   }
 

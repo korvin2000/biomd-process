@@ -8,6 +8,30 @@ export function formatDuration(ms: number): string {
   return `${minutes}m ${Math.round(seconds % 60)}s`;
 }
 
+/**
+ * How much longer, from how long it has taken so far.
+ *
+ * A flat extrapolation of the mean task duration, deliberately: these tasks
+ * differ by an order of magnitude (a free dossier reuse against a chunked
+ * translation) but they are shuffled through the same queue at a fixed
+ * concurrency, so the mean converges quickly and anything cleverer would be a
+ * more confident version of the same guess.
+ *
+ * `undefined` until enough tasks have finished to mean anything — a number
+ * extrapolated from two samples is worse than no number, because it is read as
+ * a promise rather than as noise.
+ */
+export function estimateRemaining(elapsedMs: number, done: number, total: number): number | undefined {
+  if (done < 3 || done >= total || elapsedMs <= 0) return undefined;
+  return Math.round((elapsedMs / done) * (total - done));
+}
+
+/** `18:42` for a wall-clock instant this many milliseconds from now. */
+export function formatEta(remainingMs: number, now: Date = new Date()): string {
+  const at = new Date(now.getTime() + remainingMs);
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+}
+
 export function formatCost(usd: number): string {
   if (usd === 0) return '$0';
   if (usd < 0.01) return `$${usd.toFixed(5)}`;

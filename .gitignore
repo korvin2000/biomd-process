@@ -146,3 +146,7 @@ vite.config.ts.timestamp-*
 .biomd/
 input/
 biomd.config.yaml.lastworking
+
+# scratch space for prompt A/B runs and one-off checks
+.scratch/
+out-*/

@@ -91,6 +91,10 @@ export interface ImageIndex {
   byConcatenation: ReadonlyMap<string, readonly ImageRecord[]>;
   /** Word from `meta.people` / `meta.title` / `meta.keywords` → records. */
   byMetaName: ReadonlyMap<string, readonly ImageRecord[]>;
+  /** Lower-cased `relPath` → record, for looking up an image an article embeds. */
+  byPath: ReadonlyMap<string, ImageRecord>;
+  /** Lower-cased file name → records, for an embedded path written another way. */
+  byFileName: ReadonlyMap<string, readonly ImageRecord[]>;
   /** Every distinct token, so a fuzzy pass can scan the vocabulary, not the corpus. */
   vocabulary: readonly string[];
   /** Where the index was read from; carried for diagnostics. */

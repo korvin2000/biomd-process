@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { Segmenter } from '../src/documents/Segmenter.js';
 import { splitBlocks } from '../src/documents/markdown/blocks.js';
 import { compareSkeletons, markdownSkeleton } from '../src/documents/markdown/skeleton.js';
+import { applyTextSpans, extractTextSpans } from '../src/documents/markdown/textSpans.js';
+import { readTitle } from '../src/documents/markdown/title.js';
+import { hasOwnScript, isTranslatable } from '../src/pipelines/shared/script.js';
 import { StructureGuard } from '../src/pipelines/translation/StructureGuard.js';
 import { HeuristicTokenEstimator } from '../src/llm/TokenEstimator.js';
 import type { SourceDocument } from '../src/documents/types.js';
@@ -107,6 +110,62 @@ describe('Segmenter', () => {
 
     expect(chunks.every((chunk) => chunk.text.trim().length > 0)).toBe(true);
     expect([...chunks].sort((a, b) => a.start - b.start).map((c) => c.index)).toEqual(chunks.map((c) => c.index));
+  });
+});
+
+describe('what the article calls itself', () => {
+  it('joins an H1 split over two lines, which is how this corpus centres a title', () => {
+    const title = readTitle('::: align\nposition: center\n\n# Амстердамское\n\n# гитарное трио\n\n:::\n');
+    expect(title.title).toBe('Амстердамское гитарное трио');
+    expect(title.lines).toEqual(['Амстердамское', 'гитарное трио']);
+  });
+
+  it('falls back to a centred block when the article has no heading at all', () => {
+    const title = readTitle('::: align\nposition: center\n\nКвартет гитаристов **"КИÏВ"**\n\n:::\n');
+    expect(title.title).toBe('Квартет гитаристов "КИÏВ"');
+  });
+
+  it('reads the lead, and ignores a section heading further down', () => {
+    const title = readTitle('# Армик\n\n::: lead\nАрмик — американский гитарист.\n:::\n\n## ДИСКОГРАФИЯ\n\n- Malaga\n');
+    expect(title.title).toBe('Армик');
+    expect(title.lead).toBe('Армик — американский гитарист.');
+  });
+
+  it('caps the lead where it was asked to', () => {
+    const title = readTitle('# X\n\n::: lead\n' + 'а'.repeat(500) + '\n:::\n', { leadChars: 100 });
+    expect(title.lead).toHaveLength(100);
+  });
+});
+
+describe('translatable prose', () => {
+  it('leaves the line-ending hard break outside the span, so it cannot be lost', () => {
+    const source = '**СТИНБЕРГЕН, Эстер**(Esther Steenbergen)\\\n';
+    const spans = extractTextSpans(source);
+    expect(spans[0]?.text).toBe('**СТИНБЕРГЕН, Эстер**(Esther Steenbergen)');
+
+    const rebuilt = applyTextSpans(source, spans, new Map([[spans[0]!.text, '**STEENBERGEN, Esther**']]));
+    expect(rebuilt).toBe('**STEENBERGEN, Esther**\\\n');
+  });
+
+  it('keeps an escaped backslash inside the text', () => {
+    expect(extractTextSpans('a path C:\\\\\n')[0]?.text).toBe('a path C:\\\\');
+  });
+
+  it('sends a fragment written in the source language and nothing else', () => {
+    expect(isTranslatable('Родился в Линаресе', 'ru')).toBe(true);
+    // Every Latin-only fragment in this corpus is a work title, a composer or a
+    // link label — 11% of them, and not one is a sentence of the article.
+    expect(isTranslatable('Plays Domenico Scarlatti', 'ru')).toBe(false);
+    expect(isTranslatable('Allegro vivo', 'ru')).toBe(false);
+    // Mixed prose is prose: the name's survival is the prompt's business.
+    expect(isTranslatable('Играл на гитаре Pedro Maldonado', 'ru')).toBe(true);
+    expect(isTranslatable('1994', 'ru')).toBe(false);
+  });
+
+  it('does nothing at all for a source language written in Latin', () => {
+    expect(hasOwnScript('ru')).toBe(true);
+    expect(hasOwnScript('en')).toBe(false);
+    expect(isTranslatable('Plays Domenico Scarlatti', 'en')).toBe(true);
   });
 });
 

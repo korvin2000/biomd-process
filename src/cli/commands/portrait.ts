@@ -6,6 +6,8 @@ import { loadConfig } from '../../config/loader.js';
 import { sanitizeDossier } from '../../domain/dossier.js';
 import { buildQuery } from '../../images/query.js';
 import { selectPortrait } from '../../images/select.js';
+import { describeSubject, detectSubject, SOLO_SUBJECT, type SubjectShape } from '../../images/subject.js';
+import { rosterEntryFor } from '../../pipelines/shared/roster.js';
 import { assetPath } from '../../pipelines/portrait/PortraitPipeline.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import { renderTable, truncate } from '../ui/format.js';
@@ -28,6 +30,9 @@ export function createPortraitCommand(): Command {
     .option('--top <n>', 'how many candidates to show', '10')
     .option('--min-identity <n>', 'override tasks.portrait.minIdentity')
     .option('--all', 'show candidates the visual filters rejected, too')
+    .option('--faces <n>', 'expect a collective of n people (0 = a collective of unknown size)')
+    .option('--solo', 'force one-person scoring, whatever the name says')
+    .option('--image <path...>', 'treat these index paths as images the article embeds')
     .option('--json', 'emit the full selection as JSON')
     .action(async (who: string[], options: Options) => {
       const loaded = await loadConfig({ file: options.config });
@@ -37,11 +42,15 @@ export function createPortraitCommand(): Command {
       const subject = who.join(' ').trim();
       const slug = toSlug(subject);
       const index = await app.images.load(config.indexFile);
+      const roster = await rosterEntryFor({ slug }, loaded.config, app.roster);
 
+      const shape = subjectShape(subject, slug, roster?.fullName, options);
       const query = buildQuery({
         slug,
         ...(await readDossier(app, slug, loaded.config.catalogue.supportedLanguages)),
         ...(isLatin(subject) ? { latinTitle: subject } : { extraNames: [subject] }),
+        ...(roster ? { extraNames: [subject, roster.fullName, roster.displayName, ...roster.aliases] } : {}),
+        ...(options.image?.length ? { articleImages: options.image } : {}),
       });
 
       const selection = selectPortrait(index, query, {
@@ -50,6 +59,7 @@ export function createPortraitCommand(): Command {
         minPixels: config.minPixels,
         excludeReleaseCovers: config.excludeReleaseCovers,
         keep: Number.parseInt(options.top ?? '10', 10) || 10,
+        subject: shape,
       });
 
       if (options.json) {
@@ -108,6 +118,28 @@ interface Options {
   minIdentity?: string;
   all?: boolean;
   json?: boolean;
+  faces?: string;
+  solo?: boolean;
+  image?: string[];
+}
+
+/**
+ * What the matcher should expect to see in the frame.
+ *
+ * The flags come first because this command exists to answer "why did it pick
+ * that one" — being able to force the expectation is how a wrong answer gets
+ * diagnosed rather than argued with.
+ */
+function subjectShape(subject: string, slug: string, rosterName: string | undefined, options: Options): SubjectShape {
+  if (options.solo) return SOLO_SUBJECT;
+
+  if (options.faces !== undefined) {
+    const size = Number.parseInt(options.faces, 10);
+    return Number.isFinite(size) && size > 0
+      ? { kind: 'group', size, evidence: `--faces ${size}` }
+      : { kind: 'group', evidence: '--faces 0' };
+  }
+  return detectSubject({ titles: [subject], names: rosterName ? [rosterName] : [], slug });
 }
 
 /** A dossier already on disk sharpens the query; its absence is normal. */

@@ -35,6 +35,16 @@ export interface FieldQuestion {
 export interface GapOptions {
   /** Fields the deployment allows this task to ask about. */
   fields: readonly WebField[];
+  /**
+   * Whether the entry is one person or a collective.
+   *
+   * A quartet has no date of birth, no birthplace and no date of death, and
+   * asking a search model for them produces an answer rather than a refusal —
+   * the founding year dressed up as a birthday, or a member's home town as the
+   * ensemble's. So those questions are simply not asked. What a collective
+   * *does* have is a country and a website, which are the two that remain.
+   */
+  collective?: boolean;
   /** Publish precision, so a year-only date is only a gap when days are wanted. */
   datePrecision: DatePrecision;
   /** Ask for a sharper date when one is already known to the year or month. */
@@ -80,8 +90,13 @@ const HINTS: Record<WebField, string> = {
   url: 'one authoritative biography page for this person',
 };
 
+/** Fields that describe one human being and make no sense for an ensemble. */
+const PERSON_ONLY: ReadonlySet<WebField> = new Set<WebField>(['born', 'died', 'birthplace', 'deathplace']);
+
 export function findGaps(dossier: Dossier, options: GapOptions): GapAnalysis {
-  const allowed = new Set(options.fields);
+  const allowed = new Set(
+    options.collective ? options.fields.filter((field) => !PERSON_ONLY.has(field)) : options.fields,
+  );
   const meta = dossier.metadata ?? {};
   const dates = (meta.dates ?? {}) as Record<string, string | undefined>;
 

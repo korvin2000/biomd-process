@@ -1,11 +1,26 @@
 import type { AttemptRecord } from '../llm/LlmGateway.js';
 import { emptyTotals, type RunTotals, type TaskStatus } from '../state/types.js';
 
+/** A target this run gave up on, and what the provider said about it. */
+export interface DownTarget {
+  target: string;
+  kind: string;
+  message: string;
+}
+
 export interface MetricsSnapshot extends RunTotals {
   errorsByKind: Record<string, number>;
   elapsedMs: number;
   /** Successfully completed + failed + skipped. */
   tasksDone: number;
+  /**
+   * Targets written off during the run.
+   *
+   * Kept out of `errorsByKind` on purpose: an error count says how often
+   * something went wrong, and this says that a model named in the config never
+   * worked at all — a different question, with a different fix.
+   */
+  downTargets: DownTarget[];
 }
 
 /**
@@ -19,6 +34,7 @@ export interface MetricsSnapshot extends RunTotals {
 export class MetricsCollector {
   private readonly totals: RunTotals = emptyTotals();
   private readonly errorsByKind = new Map<string, number>();
+  private readonly downTargets = new Map<string, DownTarget>();
   private readonly startedAt = Date.now();
 
   setPlanned(workItems: number, tasksPlanned: number): void {
@@ -50,6 +66,11 @@ export class MetricsCollector {
     else if (status === 'skipped') this.totals.tasksSkipped += 1;
   }
 
+  /** First failure of a target this run has stopped using. Idempotent per target. */
+  recordTargetDown(target: string, kind: string, message: string): void {
+    if (!this.downTargets.has(target)) this.downTargets.set(target, { target, kind, message });
+  }
+
   countError(kind: string): void {
     this.errorsByKind.set(kind, (this.errorsByKind.get(kind) ?? 0) + 1);
   }
@@ -61,6 +82,7 @@ export class MetricsCollector {
       errorsByKind: Object.fromEntries([...this.errorsByKind].sort((a, b) => b[1] - a[1])),
       elapsedMs: Date.now() - this.startedAt,
       tasksDone: this.totals.tasksCompleted + this.totals.tasksFailed + this.totals.tasksSkipped,
+      downTargets: [...this.downTargets.values()],
     };
   }
 

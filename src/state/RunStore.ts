@@ -1,4 +1,6 @@
+import { createReadStream } from 'node:fs';
 import { readdir } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { join, resolve } from 'node:path';
 
 import { LineAppender, ensureDir, pathExists, readJsonFile, writeFileAtomic } from '../shared/fs.js';
@@ -71,6 +73,35 @@ export class RunStore {
   static async loadManifest(stateDir: string, runId: string): Promise<RunManifest | undefined> {
     const file = resolve(stateDir, runId, MANIFEST);
     return (await pathExists(file)) ? readJsonFile<RunManifest>(file) : undefined;
+  }
+
+  /**
+   * The journal, one record at a time.
+   *
+   * Streamed rather than parsed whole: `events.jsonl` is the largest file a run
+   * produces — 290KB for fifty documents, so tens of megabytes for the real
+   * corpus — and a reader that only wants the notes should not have to hold the
+   * request log in memory to find them. A line that does not parse is skipped:
+   * the last line of an interrupted run is routinely half-written, and refusing
+   * to read the journal of the run that crashed would be exactly backwards.
+   */
+  static async *readEvents(stateDir: string, runId: string): AsyncGenerator<JournalRecord> {
+    const file = resolve(stateDir, runId, JOURNAL);
+    if (!(await pathExists(file))) return;
+
+    const stream = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
+    try {
+      for await (const line of stream) {
+        if (!line.trim()) continue;
+        try {
+          yield JSON.parse(line) as JournalRecord;
+        } catch {
+          // A truncated final line, or a record from a future version.
+        }
+      }
+    } finally {
+      stream.close();
+    }
   }
 
   get manifestSnapshot(): RunManifest {

@@ -1,7 +1,7 @@
 Translate the Markdown document supplied below.
 
-- Source language: **<%= it.sourceLanguage %>**
-- Target language: **<%= it.targetLanguage %>**
+- Source language: **<%= it.sourceLanguageName %>**
+- Target language: **<%= it.targetLanguageName %>**
 <% if (it.glossary && Object.keys(it.glossary).length) { %>- Use these renderings consistently:
 <% Object.entries(it.glossary).forEach(function (entry) { %>  - `<%= entry[0] %>` → `<%= entry[1] %>`
 <% }); } %><% if (it.partial) { %>- You are translating **part** of the document (<%= it.partLabel %>). Translate

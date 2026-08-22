@@ -148,9 +148,23 @@ function tableCells(line: string, lineStart: number): TextSpan[] {
   return spans;
 }
 
+/**
+ * A span, minus the line's trailing hard break.
+ *
+ * `**СТИНБЕРГЕН, Эстер**(Esther Steenbergen)\\` ends in a backslash, which is
+ * Markdown for "break the line here" and is markup, not words. Sending it invites
+ * a model to drop it — and a dropped hard break silently joins two lines of a
+ * three-member roster into one. Leaving it outside the span means the splice
+ * puts it back byte for byte, like every other piece of structure.
+ *
+ * A doubled backslash is an escaped backslash and stays inside the text.
+ */
 function makeSpan(prefix: string, text: string, lineStart: number, kind: SpanKind): TextSpan {
-  return maskSpan(text, lineStart + prefix.length, kind);
+  const body = HARD_BREAK.test(text) ? text.slice(0, -1) : text;
+  return maskSpan(body, lineStart + prefix.length, kind);
 }
+
+const HARD_BREAK = /(?:^|[^\\])(?:\\{2})*\\$/;
 
 function maskSpan(text: string, start: number, kind: SpanKind): TextSpan {
   const masks = new Map<string, string>();

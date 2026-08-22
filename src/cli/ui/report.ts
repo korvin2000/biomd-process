@@ -6,6 +6,7 @@ import { estimateCost } from '../../llm/CostCalculator.js';
 import type { MetricsSnapshot } from '../../observability/Metrics.js';
 import type { RunSummary } from '../../core/Orchestrator.js';
 import type { RunTotals } from '../../state/types.js';
+import type { TargetStats } from '../../routing/types.js';
 import { formatCost, formatDuration, formatTokens, renderTable, symbols, truncate } from './format.js';
 
 const OUT = process.stdout;
@@ -100,7 +101,17 @@ export function printPlan(app: App, plan: JobPlan): void {
   }
 }
 
-export function printSummary(summary: RunSummary, snapshot: MetricsSnapshot, runDir: string): void {
+export interface SummaryExtras {
+  /** Per-target counters, so a target that served nothing is visible by its zero. */
+  targets?: readonly TargetStats[];
+}
+
+export function printSummary(
+  summary: RunSummary,
+  snapshot: MetricsSnapshot,
+  runDir: string,
+  extras: SummaryExtras = {},
+): void {
   heading('Summary');
 
   const status =
@@ -142,6 +153,8 @@ export function printSummary(summary: RunSummary, snapshot: MetricsSnapshot, run
     OUT.write(pc.dim(`Errors      ${errorKinds.map(([kind, count]) => `${kind}×${count}`).join(', ')}\n`));
   }
 
+  printTargets(snapshot, extras.targets ?? []);
+
   if (summary.failures.length > 0) {
     heading(`Failures (${summary.failures.length})`);
     for (const failure of summary.failures.slice(0, 20)) {
@@ -178,4 +191,61 @@ function groupBy<T, K>(items: readonly T[], key: (item: T) => K): Map<K, T[]> {
     else groups.set(key(item), [item]);
   }
   return groups;
+}
+
+
+/**
+ * Which model actually did the work.
+ *
+ * A pool is a fallback chain, and its whole point is that a failure is
+ * survivable — which also means a first choice that never works is *invisible*:
+ * the run completes, every document is produced, and the only trace is a bill
+ * from the model that was supposed to be the backup. This table is the trace.
+ * A target with zero successes is called out by name, because "or-search served
+ * 0 of 45 requests" is a config bug and no other line in the summary says so.
+ */
+function printTargets(snapshot: MetricsSnapshot, targets: readonly TargetStats[]): void {
+  const used = targets.filter((target) => target.requests > 0);
+  const down = new Map(snapshot.downTargets.map((entry) => [entry.target, entry]));
+  if (used.length === 0 && down.size === 0) return;
+
+  heading('Model targets');
+  if (used.length > 0) {
+    OUT.write(
+      `${renderTable(used, [
+        { header: 'TARGET', value: (row) => (down.has(row.key) ? pc.red(row.key) : row.key) },
+        { header: 'REQ', value: (row) => String(row.requests), align: 'right' },
+        { header: 'OK', value: (row) => String(row.successes), align: 'right' },
+        {
+          header: 'FAILED',
+          value: (row) => (row.failures > 0 ? pc.yellow(String(row.failures)) : pc.dim('0')),
+          align: 'right',
+        },
+        {
+          header: 'AVG',
+          value: (row) => (row.successes > 0 ? formatDuration(row.totalLatencyMs / row.successes) : pc.dim('—')),
+          align: 'right',
+        },
+        { header: 'COST', value: (row) => formatCost(row.costUsd), align: 'right' },
+      ])}\n`,
+    );
+  }
+
+  for (const target of used) {
+    if (target.successes > 0) continue;
+    const reason = down.get(target.key);
+    OUT.write(
+      `${symbols.fail} ${pc.bold(target.key)} served ${pc.bold('0')} of its ${target.requests} request(s)` +
+        (reason ? ` ${pc.dim(`(${reason.kind}: ${truncate(reason.message, 90)})`)}` : '') +
+        `\n  ${pc.dim('Everything it was routed cost whatever the next target in its pool costs. ')}` +
+        `${pc.dim('Check the model id and its credentials with `biomd models --probe`.')}\n`,
+    );
+  }
+
+  // A target written off before it ever got a request of its own — the breaker
+  // opened on an earlier pipeline and every later call skipped it in silence.
+  for (const [key, reason] of down) {
+    if (used.some((target) => target.key === key)) continue;
+    OUT.write(`${symbols.fail} ${pc.bold(key)} was skipped for the whole run ${pc.dim(`(${reason.kind})`)}\n`);
+  }
 }

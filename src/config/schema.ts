@@ -145,6 +145,21 @@ export const routingSchema = z.object({
    * An empty pool list means "every enabled model".
    */
   pools: z.record(z.array(identifier)).default({}),
+  /**
+   * What to do with a target that cannot serve a request — either the prompt
+   * does not fit its context window, or the expected answer does not fit its
+   * `maxOutputTokens`.
+   *
+   * `demote` (the default, and the historical behaviour) ranks it behind every
+   * target that can, and still calls it when nothing else is left.
+   *
+   * `skip` drops it from the chain entirely, so a model with an 8K output
+   * ceiling is never asked for a 13K answer: the call that would be cut off
+   * mid-sentence, retried on the identical payload and only then escalated is
+   * never made at all. Requires the pool to contain something wider — with a
+   * single-model pool the two settings are the same call either way.
+   */
+  onOverflow: z.enum(['demote', 'skip']).default('demote'),
   /** Strategy-specific knobs, validated by the strategy itself. */
   options: z.record(z.unknown()).default({}),
 });
@@ -279,6 +294,57 @@ export const inputSchema = z.object({
   limit: z.number().int().nonnegative().default(0),
 });
 
+/**
+ * The name roster — a second input source, beside the corpus and the image
+ * index.
+ *
+ * It is an extracted index of the site's own name list: article file → full
+ * name, family name, given name, patronymic, alternative spellings. It is
+ * hand-maintained, incomplete and occasionally wrong, so every consumer treats
+ * it as corroboration rather than as authority: it fills a gap the article left
+ * and it never overwrites a fact the article states.
+ *
+ * It sits at the root rather than under a task because three of them read it.
+ */
+export const rosterSchema = z
+  .object({
+    /** Relative to `project.rootDir`. Empty disables the roster entirely. */
+    file: z.string().default(''),
+    /**
+     * The language the roster is written in.
+     *
+     * Its names are not translations: a Russian roster's aliases belong to
+     * `index-ru.json` and to the Russian dossier, and putting them in an
+     * English one would publish Cyrillic under an English name.
+     */
+    language: languageCode.default('ru'),
+    /**
+     * Supply `forename`/`surname` the article did not yield.
+     *
+     * Gap-filling only, in the same sense as `mergeDossier`: a value the
+     * extraction produced is never replaced, and a disagreement is reported as
+     * a note rather than silently resolved.
+     */
+    fillMetadata: z.boolean().default(true),
+    /**
+     * Contribute the roster's hand-authored alternative spellings and its own
+     * name order to `index-<lang>.json`, for its own language.
+     */
+    aliases: z.boolean().default(true),
+    /** Feed the roster's spellings to the portrait matcher as extra name evidence. */
+    nameHints: z.boolean().default(true),
+    /**
+     * Also report a roster name that contradicts what was extracted.
+     *
+     * Off by default for a reason: on a corpus of a thousand articles the roster
+     * and the extractor will disagree about hundreds of abbreviations
+     * (`Е.` against `Евгений`), and a note per document is noise. Turn it on for
+     * a QA pass.
+     */
+    reportConflicts: z.boolean().default(false),
+  })
+  .default({});
+
 export const outputSchema = z.object({
   baseDir: z.string().default('out'),
   /**
@@ -412,8 +478,14 @@ export const extractTaskSchema = taskBase
      */
     readWholeDocument: z.boolean().default(true),
     /**
-     * What to do when `<slug>.bio.json` already exists — beside the article, or
-     * from a previous run.
+     * What to do when an **authored** `<slug>.bio.json` exists beside the
+     * article.
+     *
+     * Only that one. This tool's own output is deliberately not an input to
+     * this decision (`findSourceDossier`): a run that saw the file it wrote last
+     * time would decide the entry is "already extracted" and re-plan on every
+     * run forever. Whether the output is already up to date is what `--resume`
+     * and `run.skipExistingOutputs` answer, without the feedback loop.
      *
      * - `reuse` (default) — do not call a model at all. The file is normalized,
      *   migrated to version 2 and re-emitted. Zero tokens.
@@ -486,6 +558,32 @@ export const translateTaskSchema = taskBase
     /** Text spans per LLM call in `segments` mode. */
     maxSegmentsPerCall: z.number().int().positive().default(40),
     /**
+     * What to do with a fragment that is not written in the source language.
+     *
+     * A Russian article prints work titles, discographies and Latin spellings of
+     * names as their own languages write them: `Plays Domenico Scarlatti`,
+     * `Allegro vivo`, `'Amadeus' Guitar Duo`. `keep` (the default) never sends a
+     * fragment with no letter of the source script in it — which is both cheaper
+     * and more reliable than asking a model not to translate it, because an
+     * instruction is obeyed on most calls and a fragment that was never sent is
+     * obeyed on all of them.
+     *
+     * A *mixed* fragment is always sent: "Играл на гитаре Pedro Maldonado" is
+     * Russian prose, and keeping the name intact is the prompt's job.
+     *
+     * The rule needs a source language with an alphabet of its own, so it does
+     * nothing at all for a Latin-script corpus.
+     */
+    foreignFragments: z.enum(['keep', 'translate']).default('keep'),
+    /**
+     * Characters of the article's title and lead sent with each batch, so the
+     * fragments arrive with a subject. `0` sends nothing.
+     *
+     * Cheap and cache-safe: it rides in the volatile part of the message, after
+     * the instructions, so the cached prefix is untouched.
+     */
+    contextChars: z.number().int().nonnegative().default(300),
+    /**
      * Follow-up calls that re-ask **only** for the fragments an answer left out.
      * Models routinely return 39 of 40 keys; repairing the one is far cheaper
      * than re-sending the batch. `0` restores all-or-nothing retries.
@@ -557,6 +655,28 @@ export const webSearchTaskSchema = taskBase
     livenessAgeYears: z.number().int().min(1).max(130).default(78),
     /** Also ask for a sharper form of a date already known to the year or month. */
     upgradePrecision: z.boolean().default(false),
+    /**
+     * What to do when a sourced web date disagrees with the date on record.
+     *
+     * `upgradePrecision` asks for the sharper form of a date the article gave
+     * to the year — and the article is sometimes simply wrong about that year.
+     * "Born about 1950" against a cited `25.07.1949` is not two competing facts
+     * of equal standing: one is a decade-rounded approximation and the other is
+     * a full date with a page behind it.
+     *
+     *  - `prefer-precise` (the default) lets a **strictly more precise** sourced
+     *    date replace the coarser one, disagreeing year included. A date of the
+     *    same precision, or a coarser one, never overwrites anything: two
+     *    day-precision dates that disagree are a real conflict, not an upgrade.
+     *  - `report` never overwrites. The dossier keeps what the article said and
+     *    the rejected candidate is written to the hint file with its source, so
+     *    a human can settle it.
+     *  - `ignore` drops a contradicting answer without recording it — the
+     *    behaviour before this setting existed, kept only for reproducibility.
+     *
+     * Every branch says what it did in the run notes; none of them is silent.
+     */
+    onDateConflict: z.enum(['prefer-precise', 'report', 'ignore']).default('prefer-precise'),
     /**
      * `lead` sends the article's opening paragraph so a namesake can be told
      * apart; `none` sends only the fact table. The article itself is never sent.
@@ -650,11 +770,60 @@ export const catalogTaskSchema = z
     /** Where `websearch` left the classification it found. Lowest precedence. */
     websearchChannel: z.string().default('websearchHints'),
     /**
-     * Search aliases beyond the display name — the bare surname, the inverted
-     * order, and a romanization for non-Latin scripts. Aliases are what makes
-     * cross-script search work without transliteration.
+     * Search aliases beyond the display name. Aliases are what makes
+     * cross-script and cross-order search work without transliteration.
      */
     generateAliases: z.boolean().default(true),
+    /**
+     * Which aliases are worth authoring.
+     *
+     * `distinct` (the default) drops every candidate that is already reachable
+     * through one it keeps — the bare family name inside the full name, a value
+     * equal to the row's `title`, a repeat that differs only in case. It keeps
+     * the ones nothing else reaches: the inverted order, the birth name, a
+     * genuinely different spelling.
+     *
+     * `spec` restores `external/04` §4.5 in full, including the bare surname and
+     * a machine transliteration of a Cyrillic name.
+     */
+    aliasPolicy: z.enum(['distinct', 'spec']).default('distinct'),
+    /**
+     * Which name goes in `index-<lang>.json[0]`, the entry's display name.
+     *
+     * `[0]` is not one alias among several — it is the string the reader prints
+     * under the thumbnail, and everything after it is search-only. So its order
+     * is a deployment decision rather than a derivation:
+     *
+     *  - `roster` (the default) uses the roster's own `fullname` for the
+     *    roster's language — `Абитон Жерар`, the catalogue's own heading,
+     *    written by a person — and falls back to `Surname Forename` when the
+     *    roster does not know the entry. Every other language keeps
+     *    `Forename Surname`, because a Russian filing convention is not an
+     *    English one.
+     *  - `surname-first` applies `Surname Forename` to every language.
+     *  - `given-first` is the old behaviour: `Forename Surname` everywhere, with
+     *    the roster name demoted to an alias.
+     *
+     * Whatever loses this choice is not discarded — it becomes the first alias,
+     * so both orders stay searchable.
+     */
+    displayNameOrder: z.enum(['roster', 'surname-first', 'given-first']).default('roster'),
+    /**
+     * Row members this run may **correct** in an index it is merging into.
+     *
+     * The merge exists to protect hand-edits, so an existing value normally
+     * wins over anything derived — which also means a value this tool got wrong
+     * last run can never be fixed by running it again. `img` is where that
+     * bites: change `tasks.portrait.assetPrefix` and every row keeps the path
+     * built from the old one, for ever, with no error anywhere.
+     *
+     * Naming a member here says "the derived value is the authority for this
+     * field". Empty (the default) keeps every existing value. `displayNames`
+     * is the same escape hatch for `index-<lang>.json[0]`.
+     */
+    refresh: z
+      .array(z.enum(['img', 'title', 'type', 'gender', 'country', 'displayNames']))
+      .default([]),
   })
   .default({});
 
@@ -787,6 +956,7 @@ export const appConfigSchema = z
       })
       .default({}),
     input: inputSchema.default({}),
+    roster: rosterSchema,
     output: outputSchema.default({}),
     catalogue: catalogueSchema,
     tasks: tasksSchema,
@@ -810,6 +980,7 @@ export type ReliabilityConfig = z.infer<typeof reliabilitySchema>;
 export type CostConfig = z.infer<typeof costSchema>;
 export type ContextConfig = z.infer<typeof contextSchema>;
 export type InputConfig = z.infer<typeof inputSchema>;
+export type RosterConfig = z.infer<typeof rosterSchema>;
 export type OutputConfig = z.infer<typeof outputSchema>;
 export type TasksConfig = z.infer<typeof tasksSchema>;
 export type CatalogueConfig = z.infer<typeof catalogueSchema>;

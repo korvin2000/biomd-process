@@ -64,8 +64,20 @@ export interface FlatField {
  * existing dossier's `ranking` is never touched.
  */
 export const DEFAULT_FIELDS: readonly FlatField[] = [
-  { key: 'forename', kind: 'text', target: 'metadata', member: 'forename', hint: 'given name, spelled as the article does' },
-  { key: 'surname', kind: 'text', target: 'metadata', member: 'surname', hint: 'family name' },
+  {
+    key: 'forename',
+    kind: 'text',
+    target: 'metadata',
+    member: 'forename',
+    hint: 'given name (and patronymic), spelled as the article does; omit for an ensemble',
+  },
+  {
+    key: 'surname',
+    kind: 'text',
+    target: 'metadata',
+    member: 'surname',
+    hint: 'family name — or, when the entry is a duo, trio, quartet or ensemble, its own full name',
+  },
   { key: 'birthname', kind: 'text', target: 'metadata', member: 'birthname', hint: 'full name at birth, only if it differs' },
   { key: 'birthplace', kind: 'text', target: 'metadata', member: 'birthplace', hint: 'place of birth, e.g. "Linares, Spain"' },
   { key: 'deathplace', kind: 'text', target: 'metadata', member: 'deathplace', hint: 'place of death' },
@@ -84,9 +96,15 @@ export const DEFAULT_FIELDS: readonly FlatField[] = [
   { key: 'genres', kind: 'list', target: 'metadata', member: 'genres', hint: 'musical genres' },
   { key: 'bands', kind: 'list', target: 'metadata', member: 'bands', hint: 'bands, ensembles, orchestras' },
   { key: 'awards', kind: 'list', target: 'metadata', member: 'awards', hint: 'awards and distinctions' },
-  { key: 'teachers', kind: 'list', target: 'metadata', member: 'teachers', hint: 'teachers and mentors' },
-  { key: 'disciples', kind: 'list', target: 'metadata', member: 'disciples', hint: 'notable students' },
-  { key: 'jobs', kind: 'list', target: 'metadata', member: 'jobs', hint: 'professions and professional roles' },
+  { key: 'teachers', kind: 'list', target: 'metadata', member: 'teachers', hint: 'who taught the subject' },
+  { key: 'disciples', kind: 'list', target: 'metadata', member: 'disciples', hint: 'whom the subject taught' },
+  {
+    key: 'jobs',
+    kind: 'list',
+    target: 'metadata',
+    member: 'jobs',
+    hint: 'professions and roles: performer, composer, teacher, editor, instrument maker…',
+  },
   { key: 'url', kind: 'url', target: 'metadata', member: 'url', hint: 'the single best external source URL the article names' },
 ];
 
@@ -97,9 +115,19 @@ export const CATALOG_FIELDS: readonly FlatField[] = [
     kind: 'type',
     target: 'catalog',
     member: 'type',
+    // Deliberately not "exactly one": `resolveEntryType` collapses two crafts to
+    // `musician`, which is what `external/02` assigns to that case. Pressing the
+    // model to choose gets `composer` for a man the article calls a vihuelist
+    // *and* a composer, and the collapse never happens.
     hint: 'craft: guitarist, musician, composer, conductor, luthier, guitar-historian or publisher',
   },
-  { key: 'gender', kind: 'gender', target: 'catalog', member: 'gender', hint: 'm, f, or mixed for a group' },
+  {
+    key: 'gender',
+    kind: 'gender',
+    target: 'catalog',
+    member: 'gender',
+    hint: 'm, f, or mixed for a duo, ensemble or any other collective',
+  },
   {
     key: 'country',
     kind: 'country',
@@ -112,8 +140,28 @@ export const CATALOG_FIELDS: readonly FlatField[] = [
     kind: 'latin',
     target: 'catalog',
     member: 'title',
-    hint: 'the full name in plain ASCII Latin letters, no accents ("Andres Segovia")',
+    hint: 'the subject\'s name in plain ASCII Latin letters, no accents ("Andres Segovia", "Amsterdam Guitar Trio")',
   },
+];
+
+/**
+ * Card keys that describe one human being and cannot apply to a collective.
+ *
+ * A quartet has no given name, no birth name and no date or place of birth, so
+ * a `requiredFields` list written for a soloist — `[forename, surname]` is the
+ * obvious one — rejects every ensemble in the corpus, retries it, escalates it
+ * to a paid model, and finally fails the document over a field that does not
+ * exist. That is exactly what happened to `eos_quartet` and `trio_de_cologne`
+ * on the first full run of this corpus: two of thirteen documents lost their
+ * dossier, their localization and their portrait to it.
+ */
+export const PERSON_ONLY_FIELDS: readonly string[] = [
+  'forename',
+  'birthname',
+  'born',
+  'died',
+  'birthplace',
+  'deathplace',
 ];
 
 /** Fields available but not in the default card, addressable by `tasks.extract.fields`. */

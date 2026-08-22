@@ -32,6 +32,17 @@ export interface WebValue {
   value: string;
   source?: string;
   confidence: number;
+  /**
+   * The value already on record that this one disagrees with.
+   *
+   * Set only for a date, and only when the disagreement is real — a sharper
+   * reading of the same date (`1893` → `21.02.1893`) is not a conflict and
+   * arrives without it. Carrying the value instead of dropping it here is the
+   * point: whether "born about 1950" or a cited `25.07.1949` wins is a question
+   * about which source to trust, and this module knows nothing about that.
+   * {@link WebSearchTaskConfig.onDateConflict} decides, and says so out loud.
+   */
+  conflictsWith?: string;
 }
 
 export interface WebAnswer {
@@ -168,13 +179,30 @@ function accept(field: WebField, entry: RawEntry, options: AnswerOptions): Verdi
   if (!value) return { reason: `"${entry.value}" is not a usable ${field}` };
 
   const current = options.current?.[field];
-  if (current && current !== value && !refines(field, current, value)) {
-    return { reason: `"${value}" contradicts the "${current}" already on record` };
+  const contradicts = Boolean(current && current !== value && !refines(field, current, value));
+
+  // A date that disagrees is reported, not discarded: an article that says
+  // "born about 1950" and a cited `25.07.1949` are a fact worth surfacing, and
+  // the caller is the only place that knows which one this deployment trusts.
+  // Every other field keeps the strict rule — a birthplace that contradicts the
+  // article is a different person far more often than it is a correction.
+  if (contradicts && !isDateField(field)) {
+    return { reason: `"${value}" contradicts the "${String(current)}" already on record` };
   }
 
   return {
-    value: { field, value, confidence, ...(source ? { source } : {}) },
+    value: {
+      field,
+      value,
+      confidence,
+      ...(source ? { source } : {}),
+      ...(contradicts && current ? { conflictsWith: current } : {}),
+    },
   };
+}
+
+function isDateField(field: WebField): boolean {
+  return field === 'born' || field === 'died';
 }
 
 function normalizeValue(field: WebField, raw: string, options: AnswerOptions): string | undefined {

@@ -18,12 +18,13 @@
  * a matching bucket letter would silently override every visual signal.
  */
 
-import { scoreIdentity, type IdentityVerdict } from './identity.js';
+import { articleImageRank, scoreIdentity, type IdentityVerdict } from './identity.js';
 import type { NameQuery } from './query.js';
 import { fuzzyThreshold, similarity } from './similarity.js';
+import type { SubjectShape } from './subject.js';
 import {
   band,
-  CLASS_RANK,
+  classRankFor,
   faceRank,
   scoreSuitability,
   type SuitabilityOptions,
@@ -46,7 +47,11 @@ export interface SelectOptions extends SuitabilityOptions {
   maxTier?: number;
   /** How many candidates to keep for diagnostics. */
   keep?: number;
-  /** Orientation preference, best first. Defaults to portrait > square > landscape. */
+  /**
+   * Orientation preference, best first. Defaults to portrait > square >
+   * landscape for one person, and the reverse for a collective — a line-up is a
+   * wide photograph.
+   */
   orientationOrder?: readonly Orientation[];
 }
 
@@ -59,18 +64,25 @@ export interface Selection {
   declined?: string;
 }
 
+/** How far down an article's gallery still counts as "earlier than the rest". */
+const EMBEDDED_RANKS = 20;
+
 const DEFAULTS = {
   minIdentity: 0.9,
   maxTier: 2,
   keep: 8,
   orientationOrder: ['portrait', 'square', 'landscape'] as const,
+  groupOrientationOrder: ['landscape', 'square', 'portrait'] as const,
 };
 
 export function selectPortrait(index: ImageIndex, query: NameQuery, options: SelectOptions = {}): Selection {
   const minIdentity = options.minIdentity ?? DEFAULTS.minIdentity;
   const maxTier = options.maxTier ?? DEFAULTS.maxTier;
   const keep = options.keep ?? DEFAULTS.keep;
-  const orientationOrder = options.orientationOrder ?? DEFAULTS.orientationOrder;
+  const subject = options.subject;
+  const orientationOrder =
+    options.orientationOrder ??
+    (subject?.kind === 'group' ? DEFAULTS.groupOrientationOrder : DEFAULTS.orientationOrder);
 
   const candidates: Candidate[] = [];
   for (const record of shortlist(index, query)) {
@@ -82,7 +94,7 @@ export function selectPortrait(index: ImageIndex, query: NameQuery, options: Sel
       record,
       identity,
       suitability,
-      key: sortKey(record, identity, suitability, orientationOrder),
+      key: sortKey(record, identity, suitability, orientationOrder, subject, articleImageRank(record, query)),
     });
   }
 
@@ -123,6 +135,16 @@ function shortlist(index: ImageIndex, query: NameQuery): ImageRecord[] {
   // they live outside the filename, so they get their own map.
   for (const name of query.all) take(index.byMetaName.get(name));
 
+  // The images the article embeds are candidates whatever they are called: this
+  // is the one lookup that survives a file the name index cannot spell.
+  for (const key of query.articleImages.keys()) {
+    if (key.startsWith('#')) take(index.byFileName.get(key.slice(1)));
+    else {
+      const record = index.byPath.get(key);
+      if (record) take([record]);
+    }
+  }
+
   if (found.size === 0) {
     for (const token of index.vocabulary) {
       const near = query.surnames.some(
@@ -157,6 +179,8 @@ function sortKey(
   identity: IdentityVerdict,
   suitability: SuitabilityVerdict,
   orientationOrder: readonly Orientation[],
+  subject?: SubjectShape,
+  embedded?: number,
 ): number[] {
   const orientationRank = orientationOrder.length - orientationOrder.indexOf(record.orientation);
 
@@ -168,8 +192,14 @@ function sortKey(
     // illustrations are the owner having already decided this picture is not
     // the one to show, which outranks any measurement we can make of it.
     shelved(record) ? 0 : 1,
-    CLASS_RANK[record.ai.class],
-    faceRank(record.ai.faceCount),
+    // The article's own choice, and its order in it. Whoever wrote the entry
+    // put one picture at the top of it; among candidates the matcher rates
+    // equally, that is a curated answer and the alternatives are guesses.
+    // It sits below the tier deliberately — a first image that is a magazine
+    // scan must not outrank a photograph of the subject.
+    embedded === undefined ? 0 : Math.max(1, EMBEDDED_RANKS - embedded),
+    classRankFor(record.ai.class, subject),
+    faceRank(record.ai.faceCount, subject),
     band(record.ai.faceCoverage, 0.05),
     orientationRank,
     band(suitability.score, 0.05),

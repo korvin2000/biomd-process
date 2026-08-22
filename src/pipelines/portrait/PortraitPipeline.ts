@@ -9,19 +9,42 @@ import {
   type TaskSeed,
   type WorkItem,
 } from '../../core/types.js';
+import { harvestMedia } from '../../documents/markdown/media.js';
+import { readTitle } from '../../documents/markdown/title.js';
 import { sanitizeDossier } from '../../domain/dossier.js';
 import type { CatalogHints, Dossier } from '../../domain/types.js';
 import { normalizeAssetPath } from '../../domain/values.js';
 import type { ImageIndexStore } from '../../images/ImageIndexStore.js';
 import { buildQuery, type NameQuery } from '../../images/query.js';
 import { selectPortrait, type Candidate, type Selection } from '../../images/select.js';
+import { describeSubject, detectSubject, type SubjectShape } from '../../images/subject.js';
 import type { Artifact } from '../../io/types.js';
 import { EMPTY_USAGE } from '../../llm/types.js';
+import type { NameRosterStore } from '../../roster/NameRosterStore.js';
+import type { RosterEntry } from '../../roster/types.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import { findDossierToLocalize } from '../shared/dossierSource.js';
+import { rosterEntryFor } from '../shared/roster.js';
 
 const PIPELINE_ID = 'portrait';
+/** Enough of the gallery to hold the entry's own picture; the rest is discography. */
+const ARTICLE_IMAGES = 12;
+
+/**
+ * One person, or how many.
+ *
+ * Read from the article's title and the roster's name — never from the prose,
+ * where "played in a duo with Meleshko" would file a soloist as a pair.
+ */
+function subjectOf(item: WorkItem, entry: RosterEntry | undefined): SubjectShape {
+  const title = readTitle(item.content);
+  return detectSubject({
+    titles: title.lines,
+    names: entry ? [entry.fullName, entry.displayName] : [],
+    slug: item.slug,
+  });
+}
 
 /**
  * Chooses the entry's portrait out of an existing image index — **without
@@ -51,16 +74,23 @@ export class PortraitPipeline implements DocumentPipeline {
   readonly usesLlm = false;
   readonly description = 'Choose an entry portrait from the image index, by name and picture suitability.';
 
-  constructor(private readonly images: ImageIndexStore) {}
+  constructor(
+    private readonly images: ImageIndexStore,
+    private readonly roster: NameRosterStore,
+  ) {}
 
   async plan(item: WorkItem, context: PlanContext): Promise<TaskSeed[]> {
     const config = context.config.tasks.portrait;
+    const roster = await rosterEntryFor(item, context.config, this.roster);
 
     return [
       {
         label: `${item.slug} → portrait`,
         contract: {
           indexFile: config.indexFile,
+          subject: subjectOf(item, roster),
+          // Extra name spellings change which files are even considered.
+          rosterNames: context.config.roster.nameHints ? (roster?.aliases.length ?? 0) : 0,
           assetPrefix: config.assetPrefix,
           minIdentity: config.minIdentity,
           maxTier: config.maxTier,
@@ -76,9 +106,13 @@ export class PortraitPipeline implements DocumentPipeline {
         // Cyrillic half of the index is matched against — and a birthplace the
         // web filled in is what keeps `segovia_linares.jpg` from reading as a
         // photograph of two people.
+        //
+        // The birthplace is a tie-breaker, not the query: a failed web search
+        // costs some confidence on a namesake, so it waits for it and proceeds
+        // either way.
         dependsOn: [
           ...(context.config.tasks.extract.enabled ? [{ pipeline: 'extract' }] : []),
-          ...(context.config.tasks.websearch.enabled ? [{ pipeline: 'websearch' }] : []),
+          ...(context.config.tasks.websearch.enabled ? [{ pipeline: 'websearch', optional: true }] : []),
         ],
       },
     ];
@@ -93,10 +127,23 @@ export class PortraitPipeline implements DocumentPipeline {
     if (index.skipped > 0) notes.push(`${index.skipped} image record(s) in the index were unreadable and ignored.`);
 
     const hints = await this.readHints(item, context);
+    const entry = await rosterEntryFor(item, context.config, this.roster);
+    const subject = subjectOf(item, entry);
+
+    // The article's own gallery, parsed rather than asked for. Its first image
+    // is the closest thing to a curated answer this corpus has.
+    const articleImages = harvestMedia(item.content, {
+      photos: true,
+      music: false,
+      maxItems: ARTICLE_IMAGES,
+    }).imageTargets;
+
     const query = buildQuery({
       slug: item.slug,
       ...(await this.readDossier(item, context)),
       ...(hints.title ? { latinTitle: hints.title } : {}),
+      ...(articleImages.length > 0 ? { articleImages } : {}),
+      ...(this.rosterNames(context, entry)),
     });
 
     const selection = selectPortrait(index, query, {
@@ -105,9 +152,13 @@ export class PortraitPipeline implements DocumentPipeline {
       minPixels: config.minPixels,
       excludeReleaseCovers: config.excludeReleaseCovers,
       keep: config.keepCandidates,
+      subject,
     });
 
-    const body = this.report(config, item, query, selection, hints, notes);
+    if (subject.kind === 'group') {
+      notes.push(`Treated ${item.slug} as ${describeSubject(subject)} — ${subject.evidence}.`);
+    }
+    const body = this.report(config, item, query, selection, hints, notes, subject, articleImages);
     return {
       artifacts: [
         {
@@ -134,11 +185,15 @@ export class PortraitPipeline implements DocumentPipeline {
     selection: Selection,
     hints: CatalogHints,
     notes: string[],
+    subject: SubjectShape,
+    articleImages: readonly string[],
   ): Record<string, unknown> {
     const candidates = selection.candidates.map((candidate) => describe(candidate));
     const searched = {
       surnames: query.surnames,
       forenames: query.forenames,
+      subject,
+      ...(articleImages.length > 0 ? { articleImages: [...articleImages] } : {}),
     };
 
     if (selection.chosen) {
@@ -184,6 +239,19 @@ export class PortraitPipeline implements DocumentPipeline {
     const gender = (hints.gender ?? 'mixed').toLowerCase();
     const table = config.defaultPortraits;
     return (gender === 'm' ? table.m : gender === 'f' ? table.f : table.mixed) || undefined;
+  }
+
+  /**
+   * The roster's spellings of the name, when it has any.
+   *
+   * The one source that can name a collective the slug abbreviates
+   * (`classicalag`) and the only place a pseudonym is written down.
+   */
+  private rosterNames(context: ExecutionContext, entry: RosterEntry | undefined): { extraNames?: string[] } {
+    if (!entry || !context.config.roster.nameHints) return {};
+
+    const names = [entry.displayName, entry.fullName, ...entry.aliases].filter(Boolean);
+    return names.length > 0 ? { extraNames: [...new Set(names)] } : {};
   }
 
   /** The dossier as this run knows it: the extraction output, else the authored file. */

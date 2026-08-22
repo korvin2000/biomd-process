@@ -12,7 +12,12 @@ export function createReportCommand(): Command {
     .argument('[runId]', 'run id; defaults to the most recent run')
     .option('-c, --config <file>', 'path to the config file')
     .option('--failed', 'list only the tasks that failed')
-    .action(async (runIdArg: string | undefined, options: { config?: string; failed?: boolean }) => {
+    .option('--notes [pattern]', 'print what the pipelines reported, optionally filtered by a regex')
+    .action(
+      async (
+        runIdArg: string | undefined,
+        options: { config?: string; failed?: boolean; notes?: string | boolean },
+      ) => {
       const loaded = await loadConfig({ file: options.config });
       const stateDir = loaded.paths.resolve(loaded.config.run.stateDir);
 
@@ -73,7 +78,47 @@ export function createReportCommand(): Command {
       if (records.length > 100) {
         process.stdout.write(pc.dim(`… and ${records.length - 100} more; read ${stateDir}/${runId}/events.jsonl\n`));
       }
-    });
+
+      if (options.notes) await printNotes(stateDir, runId, options.notes);
+    },
+  );
+}
+
+/**
+ * What the pipelines said, read back out of the journal.
+ *
+ * A note is the only account of a decision that produced *no* artifact: a web
+ * answer refused for want of a source, a date conflict recorded instead of
+ * published, an edition left undeclared because its dossier never landed. On a
+ * live terminal they scroll past behind a progress bar; here they can be
+ * grepped after the fact, which is when the question is actually asked.
+ */
+async function printNotes(stateDir: string, runId: string, filter: string | boolean): Promise<void> {
+  const pattern = typeof filter === 'string' ? new RegExp(filter, 'i') : undefined;
+  const byTask = new Map<string, { label: string; notes: string[] }>();
+  const labels = new Map<string, string>();
+
+  for await (const record of RunStore.readEvents(stateDir, runId)) {
+    if (record.type === 'task.started') {
+      labels.set(record.taskId, `${record.pipeline}${record.variant ? `:${record.variant}` : ''} ${record.workItemId}`);
+      continue;
+    }
+    if (record.type !== 'task.completed' || !record.notes?.length) continue;
+
+    const notes = pattern ? record.notes.filter((note) => pattern.test(note)) : record.notes;
+    if (notes.length > 0) byTask.set(record.taskId, { label: labels.get(record.taskId) ?? record.taskId, notes });
+  }
+
+  heading(pattern ? `Notes matching /${pattern.source}/` : 'Notes');
+  if (byTask.size === 0) {
+    process.stdout.write(pc.dim('Nothing was reported.\n'));
+    return;
+  }
+
+  for (const { label, notes } of byTask.values()) {
+    process.stdout.write(`${pc.bold(label)}\n`);
+    for (const note of notes) process.stdout.write(`  ${pc.dim('·')} ${note}\n`);
+  }
 }
 
 function statusColor(status: string): string {

@@ -113,6 +113,8 @@ function checkIndex(file: LoadedFile, supported: readonly string[], add: Emit): 
   const seenIds = new Set<string>();
   const seenSlugs = new Set<string>();
   const codes = countryCodes();
+  /** Portrait path -> the rows carrying it, for the shared-picture check below. */
+  const imgOwners = new Map<string, string[]>();
 
   for (const [position, entry] of file.value.entries()) {
     const at = `${where} [${position}]`;
@@ -202,9 +204,38 @@ function checkIndex(file: LoadedFile, supported: readonly string[], add: Emit): 
     if (img?.startsWith('/pages/')) {
       add('warning', 'INV-25', where, `${at}: img "${img}" resolves against the catalogue root, not the resource base.`);
     }
+    // A traversal segment is never a legitimate asset path — `VD-PATH-ASSET`
+    // has no `..` in it. It is what a mis-set `tasks.portrait.assetPrefix`
+    // leaves behind, and because the catalogue merge never overwrites an `img`
+    // that is already there, the wrong value survives every later run. Nothing
+    // else in the pipeline would ever mention it again.
+    if (img && /(^|\/)\.\.(\/|$)/.test(img)) {
+      add('error', 'INV-25', where, `${at}: img "${img}" contains a ".." segment; VD-PATH-ASSET has none.`);
+    }
+    if (img) {
+      const seen = imgOwners.get(img);
+      if (seen) seen.push(at);
+      else imgOwners.set(img, [at]);
+    }
 
     rows.push({ ...row, id, md });
   }
+
+  // The same photograph on two entries is nearly always a matcher error rather
+  // than a shared picture: `photo/a/abreu1.jpg` cannot be both Antonio Abreu
+  // and Zequinha de Abreu, and the identity score that put it on both was the
+  // family name doing all the work. Published, it is two people wearing one
+  // face — visible to every reader and invisible to every other check here.
+  for (const [path, owners] of imgOwners) {
+    if (owners.length < 2) continue;
+    add(
+      'warning',
+      'INV-24',
+      where,
+      `img "${path}" is shared by ${owners.length} rows (${owners.join(', ')}); at most one of them is right.`,
+    );
+  }
+
   return rows;
 }
 

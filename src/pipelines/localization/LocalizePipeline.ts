@@ -10,6 +10,7 @@ import {
   type WorkItem,
 } from '../../core/types.js';
 import { sanitizeDossier, type DossierOptions } from '../../domain/dossier.js';
+import { languageName } from '../../domain/vocabulary.js';
 import type { Dossier } from '../../domain/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
@@ -83,9 +84,14 @@ export class LocalizePipeline implements DocumentPipeline {
       expectedOutputs: [{ channel: config.outputChannel, pathVars: this.pathVars(item, targetLang) }],
       // Wait for this document's extraction and its web completion, when there
       // are any, so the dossier we localize is the finished one.
+      //
+      // Extraction is a real prerequisite — without its dossier there is nothing
+      // to localize. A failed web search is not: it only ever *adds* to the
+      // dossier `extract` already wrote, so its absence costs a birthplace, not
+      // the edition.
       dependsOn: [
         ...(extractEnabled ? [{ pipeline: 'extract' }] : []),
-        ...(websearchEnabled ? [{ pipeline: 'websearch' }] : []),
+        ...(websearchEnabled ? [{ pipeline: 'websearch', optional: true }] : []),
       ],
     }));
   }
@@ -130,6 +136,10 @@ export class LocalizePipeline implements DocumentPipeline {
         ...config.promptVariables,
         sourceLanguage: item.language,
         targetLanguage: targetLang,
+        // The names as well as the codes: `pt` is unambiguous to a program and
+        // merely probable to a model, and the word costs one token.
+        sourceLanguageName: languageName(item.language),
+        targetLanguageName: languageName(targetLang),
         count: part.length,
       }),
     });

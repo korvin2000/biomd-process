@@ -3,6 +3,7 @@ import { addUsage } from '../../llm/CostCalculator.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { MessageBuilder } from '../../prompts/MessageBuilder.js';
 import type { PromptVariables } from '../../prompts/types.js';
+import { isOutputTruncated } from '../../reliability/errors.js';
 import { PipelineError } from '../../shared/errors.js';
 import { extractJsonBlock, safeJsonParse, type JsonObject } from '../../shared/json.js';
 import type { LocalizationUnit } from '../localization/StringTable.js';
@@ -23,6 +24,25 @@ export interface StringBatchSpec {
    */
   repairAttempts: number;
   memory?: TranslationMemory;
+  /**
+   * Fragments to copy through unchanged instead of sending.
+   *
+   * Beyond the built-in "has no letters at all" rule: a caller that knows the
+   * source language can also recognize a fragment that is not written in it —
+   * a work title, a Latin name, a discography line. See
+   * {@link ./script.js#isTranslatable}.
+   */
+  keepVerbatim?: (unit: LocalizationUnit) => boolean;
+  /**
+   * One or two lines saying what the document is about, sent ahead of the
+   * strings.
+   *
+   * Twenty prose fragments with no subject between them are twenty guesses
+   * about register and terminology; the same twenty under "this is a biography
+   * of a flamenco guitarist" are a translation. It rides in a **volatile**
+   * section, after the instructions, so the prompt-cache prefix is untouched.
+   */
+  articleContext?: string;
   /** Per-batch template variables, on top of the task's own. */
   variables(batch: readonly LocalizationUnit[]): PromptVariables;
   /** Extra per-string validation, e.g. "every mask token survived". */
@@ -53,12 +73,16 @@ export async function translateUnits(spec: StringBatchSpec): Promise<StringBatch
   const translations = new Map<string, string>();
 
   // A fragment with no letters — a year span, a lone placeholder, a bare
-  // identifier — has no words to translate. Answering it locally removes both
-  // the tokens and the most common reason a model drops a key.
-  const [wordless, translatable] = partition(spec.units, (unit) => !hasLetters(unit.text));
+  // identifier — has no words to translate, and neither does one written in
+  // another language than the document. Answering both locally removes the
+  // tokens, removes the most common reason a model drops a key, and removes the
+  // chance of a model helpfully rendering `Allegro vivo` into German.
+  const keep = (unit: LocalizationUnit): boolean =>
+    !hasLetters(unit.text) || (spec.keepVerbatim?.(unit) ?? false);
+  const [wordless, translatable] = partition(spec.units, keep);
   for (const unit of wordless) translations.set(unit.key, unit.text);
   if (wordless.length > 0) {
-    notes.push(`${wordless.length} fragment(s) contained no words and were kept verbatim.`);
+    notes.push(`${wordless.length} fragment(s) had no words in the source language and were kept verbatim.`);
   }
 
   const { known, unknown } = spec.memory
@@ -121,7 +145,7 @@ async function callBatch(
       notes.push(`Re-asked for ${pending.length} of ${batch.length} fragment(s) the previous answer left out.`);
     }
 
-    const outcome = await callOnce(spec, pending, strict);
+    const outcome = await callNarrowing(spec, pending, strict, notes);
     usage = addUsage(usage, outcome.usage);
     costUsd += outcome.costUsd;
     for (const [key, value] of outcome.translations) translations.set(key, value);
@@ -137,6 +161,52 @@ async function callBatch(
   return { translations, usage, costUsd, notes };
 }
 
+/**
+ * One call, halved until its answer fits.
+ *
+ * A batch whose *answer* was cut off is neither a broken model nor a broken
+ * response: the payload was fine, the model was willing, and it ran out of room
+ * to finish. Retrying is useless — the cut is deterministic — and escalating to
+ * a wider model is the expensive fix for a problem the caller can solve for
+ * free, because half a table needs half the output. Splitting therefore keeps
+ * the work on the model already chosen, and converges in a round or two.
+ *
+ * This is the same principle as `callBatch`'s repair ladder one level down: move
+ * on the cheap axis (how much is asked at once) before the dear one (which model
+ * is asked). A single fragment that still does not fit has no cheaper axis left,
+ * so it propagates and inherits the gateway's fall-back-to-a-wider-model.
+ */
+async function callNarrowing(
+  spec: StringBatchSpec,
+  batch: readonly LocalizationUnit[],
+  strict: boolean,
+  notes: string[],
+): Promise<{ translations: Map<string, string>; usage: TokenUsage; costUsd: number }> {
+  try {
+    return await callOnce(spec, batch, strict);
+  } catch (error: unknown) {
+    if (batch.length < 2 || !isOutputTruncated(error)) throw error;
+
+    const half = Math.ceil(batch.length / 2);
+    notes.push(
+      `A batch of ${batch.length} fragment(s) exceeded the model's output limit; ` +
+        `re-asked as ${half} + ${batch.length - half}.`,
+    );
+
+    const translations = new Map<string, string>();
+    let usage: TokenUsage = { ...EMPTY_USAGE };
+    let costUsd = 0;
+
+    for (const part of [batch.slice(0, half), batch.slice(half)]) {
+      const outcome = await callNarrowing(spec, part, strict, notes);
+      usage = addUsage(usage, outcome.usage);
+      costUsd += outcome.costUsd;
+      for (const [key, value] of outcome.translations) translations.set(key, value);
+    }
+    return { translations, usage, costUsd };
+  }
+}
+
 async function callOnce(
   spec: StringBatchSpec,
   batch: readonly LocalizationUnit[],
@@ -148,6 +218,9 @@ async function callOnce(
 
   const prompt = await context.prompts.render(spec.promptId, spec.variables(batch));
   const messages = MessageBuilder.build(prompt, [
+    // Context first, strings last: both are volatile, and the model should know
+    // what it is reading before it reads it.
+    ...(spec.articleContext ? [{ title: 'About this article', body: spec.articleContext, volatile: true }] : []),
     { title: 'Strings', body: payload, volatile: true, fence: 'json' },
   ]);
 

@@ -53,6 +53,17 @@ export function createRunCommand(): Command {
     .option('--strategy <id>', 'routing strategy id')
     .option('-o, --out <dir>', 'output base directory')
     .option('--skip-existing', 'skip tasks whose output file already exists')
+    /**
+     * The negation, which had no way to be expressed.
+     *
+     * `run.skipExistingOutputs: true` is the right steady state and the wrong
+     * thing for the run that has to redo something — after a prompt edit, after
+     * fixing a bad extraction, after changing `tasks.catalog.refresh`. Without
+     * this the only way to re-run one document was to delete its files by hand
+     * or to edit the config, and the second is a change you then have to
+     * remember to undo.
+     */
+    .option('--no-skip-existing', 're-run tasks even when their output file exists')
     .option('--fail-fast', 'stop the run on the first task failure')
     .option('--budget-usd <amount>', 'stop the run once this much has been spent')
     .option('--max-requests <n>', 'stop the run after this many LLM requests')
@@ -61,10 +72,22 @@ export function createRunCommand(): Command {
     .action(runAction);
 }
 
+/**
+ * Did the user actually type this flag?
+ *
+ * Commander gives `--no-x` a default of `true`, which would make an absent flag
+ * indistinguishable from `--skip-existing` and silently override the config on
+ * every run. Only a value that came from the command line is a CLI override —
+ * which is the same rule `pruneUndefined` applies to every other flag here.
+ */
+function fromCommandLine<T>(command: Command, name: string, value: T): T | undefined {
+  return command.getOptionValueSource(name) === 'cli' ? value : undefined;
+}
+
 /** Every pipeline `--only` may name. A typo would otherwise disable all of them. */
 const PIPELINE_IDS = ['extract', 'websearch', 'translate', 'localize', 'portrait', 'catalog'] as const;
 
-async function runAction(options: RunOptions & { resumeRun?: string }): Promise<void> {
+async function runAction(options: RunOptions & { resumeRun?: string }, command: Command): Promise<void> {
   const unknown = splitList(options.only)?.filter((id) => !PIPELINE_IDS.includes(id as never)) ?? [];
   if (unknown.length > 0) {
     throw new PlanningError(
@@ -73,7 +96,13 @@ async function runAction(options: RunOptions & { resumeRun?: string }): Promise<
     );
   }
 
-  const loaded = await loadConfig({ file: options.config, overrides: buildOverrides(options) });
+  const loaded = await loadConfig({
+    file: options.config,
+    overrides: buildOverrides({
+      ...options,
+      skipExisting: fromCommandLine(command, 'skipExisting', options.skipExisting),
+    }),
+  });
   for (const warning of loaded.warnings) process.stderr.write(`warning: ${warning}\n`);
 
   const dryRun = options.dryRun ?? loaded.config.run.dryRun;
@@ -102,7 +131,7 @@ async function runAction(options: RunOptions & { resumeRun?: string }): Promise<
 
   try {
     const outcome = await runJob(app, { progress, signal: controller.signal });
-    printSummary(outcome.summary, app.metrics.snapshot(), outcome.runDir);
+    printSummary(outcome.summary, app.metrics.snapshot(), outcome.runDir, { targets: app.stats.snapshot() });
     process.exitCode = outcome.summary.status === 'completed' ? 0 : 1;
   } finally {
     process.off('SIGINT', onInterrupt);

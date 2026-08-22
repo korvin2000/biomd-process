@@ -241,6 +241,27 @@ export function refinesDate(current: string, candidate: string): boolean {
   return true;
 }
 
+/**
+ * True when `candidate` states **more** of the date than `current` does,
+ * whether or not the two agree about the part they share.
+ *
+ * This is deliberately not {@link refinesDate}, and the difference is the whole
+ * question a date conflict poses. `refinesDate` answers "is this the same fact,
+ * read more closely" and requires the year to match. This answers the weaker
+ * "does this answer carry more information", so `"1950"` against `"25.07.1949"`
+ * is true here and false there.
+ *
+ * Nothing in the domain acts on it by itself — a caller has to decide that a
+ * sourced day beats an unsourced year, which is a policy about *whose* claim
+ * to trust and belongs to the pipeline that has both provenances in hand.
+ */
+export function sharpensDate(current: string, candidate: string): boolean {
+  const from = parseDate(current);
+  const to = parseDate(candidate);
+  if (!from || !to) return false;
+  return PRECISION_RANK[to.precision] > PRECISION_RANK[from.precision];
+}
+
 /** The year of a canonical value, for the arithmetic an age check needs. */
 export function yearOf(value: string): number | undefined {
   return parseDate(value)?.year;

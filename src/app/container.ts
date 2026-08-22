@@ -21,6 +21,7 @@ import { RoutingStrategyRegistry } from '../routing/StrategyRegistry.js';
 import { TargetStatsRegistry } from '../routing/TargetStats.js';
 import { PipelineRegistry } from '../core/PipelineRegistry.js';
 import { ImageIndexStore } from '../images/ImageIndexStore.js';
+import { NameRosterStore } from '../roster/NameRosterStore.js';
 import { CatalogPipeline } from '../pipelines/catalog/CatalogPipeline.js';
 import { ExtractionPipeline } from '../pipelines/extraction/ExtractionPipeline.js';
 import { LocalizePipeline } from '../pipelines/localization/LocalizePipeline.js';
@@ -50,6 +51,8 @@ export interface App {
   writer: ArtifactWriter;
   /** The image index behind portrait selection; cached for the whole run. */
   images: ImageIndexStore;
+  /** The name roster — a second opinion on names; cached for the whole run. */
+  roster: NameRosterStore;
   memories: TranslationMemoryRegistry;
   pipelines: PipelineRegistry;
   metrics: MetricsCollector;
@@ -90,6 +93,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
     {
       reserveOutputTokens: config.context.reserveOutputTokens,
       safetyMarginRatio: config.context.safetyMarginRatio,
+      onOverflow: config.llm.routing.onOverflow,
     },
     config.llm.routing.options,
   );
@@ -110,6 +114,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
 
   const segmenter = new Segmenter(estimator);
   const images = new ImageIndexStore(paths);
+  const roster = new NameRosterStore(paths);
   const app: App = {
     config,
     configFile: loaded.file,
@@ -128,14 +133,15 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
     source: new FileSystemSource(config.input, paths, estimator),
     writer: new FileArtifactWriter(config.output, paths, dryRun),
     images,
+    roster,
     memories: new TranslationMemoryRegistry(paths.resolve(config.run.memoryDir), logger, dryRun),
     pipelines: new PipelineRegistry()
-      .register(new ExtractionPipeline())
+      .register(new ExtractionPipeline(roster))
       .register(new WebSearchPipeline())
       .register(new TranslationPipeline())
       .register(new LocalizePipeline())
-      .register(new PortraitPipeline(images))
-      .register(new CatalogPipeline()),
+      .register(new PortraitPipeline(images, roster))
+      .register(new CatalogPipeline(roster)),
     metrics,
     budget,
     stats,

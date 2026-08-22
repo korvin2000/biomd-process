@@ -122,6 +122,28 @@ describe('end-to-end run', () => {
     expect(plan.skipped.every((task) => task.reason === 'resume')).toBe(true);
   });
 
+  it('re-plans a task the previous run retired, rather than treating it as finished', async () => {
+    // A task retired behind a failed prerequisite never ran, so the checkpoint
+    // must not record it as settled — a resume that skips it is a run declining
+    // to do the work that would have fixed the corpus.
+    const failing = new FakeClient((call) => {
+      if (isStringBatch(call.request)) return respond(echoTable(call.request));
+      return new LlmCallError('invalid_request', 'no dossier for you');
+    });
+    const first = workspace.app({ tasks: { ...TASKS, localize: { enabled: true } } }, failing);
+    const firstOutcome = await runJob(first);
+    expect(firstOutcome.summary.status).toBe('failed');
+
+    const second = workspace.app(
+      { tasks: { ...TASKS, localize: { enabled: true } }, run: { resume: firstOutcome.runId } },
+      FakeClient.happyPath(),
+    );
+    const plan = await planJob(second);
+
+    expect(plan.tasks.map((task) => task.pipeline)).toContain('localize');
+    expect(plan.skipped.every((task) => task.reason === 'resume')).toBe(true);
+  });
+
   it('re-plans work whose prompt template changed', async () => {
     const first = workspace.app({ tasks: TASKS }, FakeClient.happyPath());
     const firstOutcome = await runJob(first);
@@ -216,8 +238,12 @@ describe('language editions and catalogue', () => {
       json: '/paco-de-lucia.bio.json',
     });
 
+    // `displayNameOrder: roster` files the roster's own language surname-first —
+    // the catalogue's order, and what a reader sees under the thumbnail. The
+    // other order is kept right behind it, so both stay searchable.
     const names = JSON.parse(await readFile(workspace.path('out/index-ru.json'), 'utf8'));
-    expect(names['1'][0]).toBe('Пако де Лусия');
+    expect(names['1'][0]).toBe('де Лусия Пако');
+    expect(names['1']).toContain('Пако де Лусия');
   });
 
   /**
@@ -507,7 +533,7 @@ describe('the catalogue is updated, not rebuilt', () => {
     const names = JSON.parse(await readFile(workspace.path('out/index-ru.json'), 'utf8'));
 
     expect(names['1'][0]).toBe('Пако де Лусия (исправлено)');
-    expect(names['1']).toContain('де Лусия');
+    expect(names['1']).toContain('де Лусия Пако');
     expect(names['99']).toEqual(['Другая запись']);
   });
 });
@@ -529,6 +555,63 @@ describe('failure handling', () => {
     const journal = await readJournal(outcome.runDir);
     expect(journal.some((record) => record.type === 'llm.fallback')).toBe(true);
     expect(journal.some((record) => record.type === 'llm.retry')).toBe(true);
+  });
+
+  it('moves straight to the next model when the answer is cut off, without retrying the same one', async () => {
+    // The cut is deterministic: the payload was fine and the model ran out of
+    // room, so re-asking it produces the identical truncation. Compare with the
+    // `server` case above, which does spend its retries first.
+    const client = new FakeClient((call) => {
+      if (call.target === 'primary') return respond('{"forename":"Пак', { finishReason: 'length' });
+      return respond(JSON.stringify({ forename: 'Пако' }));
+    });
+    const app = workspace.app({ tasks: { extract: TASKS.extract } }, client);
+
+    const outcome = await runJob(app);
+
+    expect(outcome.summary.status).toBe('completed');
+    expect(client.calls.map((call) => call.target)).toEqual(['primary', 'secondary']);
+    expect(app.metrics.snapshot().retries).toBe(0);
+  });
+
+  it('still writes the catalogue when one document failed, instead of retiring it', async () => {
+    await workspace.writeFile('corpus/ru/other.bio.md', '# Другой\n\nНепереводимый текст.\n');
+
+    // Everything about `other` fails hard; `paco-de-lucia` translates normally.
+    const client = new FakeClient((call) => {
+      const payload = call.request.messages.at(-1)?.content ?? '';
+      if (payload.includes('Непереводимый')) return new LlmCallError('invalid_request', 'no');
+      if (isStringBatch(call.request)) return respond(echoTable(call.request));
+      if (call.request.responseFormat?.type === 'json_object') return respond(JSON.stringify(DEFAULT_FACTS));
+      return respond('');
+    });
+
+    const app = workspace.app(
+      {
+        tasks: {
+          ...TASKS,
+          translate: { enabled: true, targetLanguages: ['en'] },
+          localize: { enabled: true, targetLanguages: ['en'] },
+          catalog: { enabled: true },
+        },
+      },
+      client,
+    );
+    const outcome = await runJob(app);
+
+    expect(outcome.summary.status).toBe('failed');
+
+    // The point: the surviving document still has a catalogue row. The index
+    // depends on the translations only for *ordering*, and reports what reached
+    // the disk — one document's bad luck is not the corpus's.
+    const index = JSON.parse(await readFile(workspace.path('out/index.json'), 'utf8'));
+    const survivor = index.find((row: { md: string }) => row.md === '/paco-de-lucia.bio.md');
+    expect(survivor?.lang).toBe('ru,en');
+
+    // And it ran rather than being retired behind the failure: the index is an
+    // artifact this run wrote, not one left over from a previous one.
+    const journal = await readJournal(outcome.runDir);
+    expect(journal.some((record) => record.type === 'artifact.written' && record.channel === 'catalogIndex')).toBe(true);
   });
 
   it('fails the task, not the process, when every target is exhausted', async () => {

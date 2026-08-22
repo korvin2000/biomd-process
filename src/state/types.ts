@@ -82,6 +82,17 @@ export type JournalEvent =
       usage: TokenUsage;
       costUsd: number;
       contextAttempt?: string;
+      /**
+       * What the pipeline decided along the way — a refused web answer, a
+       * conflict recorded rather than published, an edition not declared.
+       *
+       * These used to exist only as `warn` lines on a terminal that had already
+       * scrolled, which made the most interesting output of a run the only part
+       * of it that was not durable: `born: "25.07.1949" contradicts "1950"` is
+       * the answer to "why is this date still wrong", and it was gone by the
+       * time anybody asked. `biomd report --notes` reads them back.
+       */
+      notes?: string[];
     }
   | { type: 'task.failed'; taskId: string; durationMs: number; error: JsonObject }
   | { type: 'task.skipped'; taskId: string; reason: string }
@@ -100,6 +111,8 @@ export type JournalEvent =
     }
   | { type: 'llm.retry'; target: string; attempt: number; delayMs: number; kind: string; message: string }
   | { type: 'llm.fallback'; from: string; to: string; kind: string; message: string }
+  /** A target this run stopped using entirely — a config problem, not a call problem. */
+  | { type: 'llm.target_down'; target: string; pipeline: string; kind: string; message: string }
   | { type: 'artifact.written'; taskId: string; channel: string; path: string; bytes: number; skipped: boolean }
   | { type: 'budget.warning'; reason: string }
   | { type: 'log'; level: string; message: string; fields?: JsonObject };
@@ -107,15 +120,29 @@ export type JournalEvent =
 export type JournalRecord = JournalEvent & { ts: string; runId: string; seq: number };
 
 /**
+ * The skip reasons that mean the work exists, as opposed to the work never
+ * happened. Only the planner's two say anything about the output: a fingerprint
+ * already completed in an earlier run, or a file already on disk.
+ */
+const SETTLED_SKIP_REASONS = new Set(['resume', 'existing-output']);
+
+/**
  * Whether a checkpoint entry means "this fingerprint needs no further work".
  *
  * A task skipped *because it was already done* counts as done, so chained
  * resumes (run → resume → resume) do not slowly forget what was finished.
+ *
+ * Everything the orchestrator retires does **not** count, and the whitelist is
+ * the point: `dependency-failed`, `run stopped` and `aborted` all describe a
+ * task that never ran, and recording them as done made the next resume skip
+ * them permanently. That turned one document's failed translation into a
+ * catalogue that could never be built again — the run that would have fixed it
+ * quietly declined to try.
  */
 export function isTaskDone(record: TaskRecord | undefined): boolean {
   if (!record) return false;
   if (record.status === 'completed') return true;
-  return record.status === 'skipped' && record.skipReason !== 'aborted';
+  return record.status === 'skipped' && SETTLED_SKIP_REASONS.has(record.skipReason ?? '');
 }
 
 export function emptyTotals(): RunTotals {

@@ -149,8 +149,23 @@ function journalObserver(app: App, store: RunStore): GatewayObserver {
     },
     onFallback: (info) => {
       app.metrics.recordFallback();
-      app.logger.warn(`Falling back ${info.from} → ${info.to} (${info.kind})`, { message: info.message });
+      app.logger.warn(`Falling back ${info.from} → ${info.to} (${info.kind})`, { detail: info.message });
       void store.append({ type: 'llm.fallback', ...info });
+    },
+    /**
+     * The one gateway event that is about the *configuration* rather than about
+     * a call: this target is not going to work, and everything it was supposed
+     * to serve is being served by whatever stands behind it.
+     */
+    onTargetDown: (info) => {
+      app.metrics.recordTargetDown(info.target, info.kind, info.message);
+      app.logger.error(
+        `Model target "${info.target}" is being skipped for the rest of this run (${info.kind}). ` +
+          'Everything routed to it will be served by the next target in its pool — which may cost more. ' +
+          `Provider said: ${info.message}`,
+        { target: info.target, pipeline: info.pipeline, kind: info.kind },
+      );
+      void store.append({ type: 'llm.target_down', ...info });
     },
   };
 }

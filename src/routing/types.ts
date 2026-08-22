@@ -26,10 +26,21 @@ export interface RoutingContext {
   readonly request: RoutingRequest;
   /** Live per-target counters. */
   stats(key: string): TargetStats;
-  /** True when the request's estimated input fits the target's usable window. */
+  /**
+   * True when the target can both *hold* the request and *emit* the answer it
+   * expects.
+   *
+   * Both halves matter, and only the first used to be checked: a 64K window with
+   * an 8K output ceiling accepts a long article without complaint and then cuts
+   * its translation off mid-sentence. That failure looks nothing like an
+   * overflow — the prompt fit perfectly — so it has to be predicted from
+   * `maxOutputTokens` rather than discovered from the response.
+   */
   fits(target: ModelTarget): boolean;
   /** Usable input tokens left over after the request would be placed. Negative = overflow. */
   headroom(target: ModelTarget): number;
+  /** Output tokens left over after the expected answer. Negative = the answer gets cut off. */
+  outputHeadroom(target: ModelTarget): number;
   /** Estimated USD cost of this request on this target. */
   estimatedCost(target: ModelTarget): number;
   /** Monotonic per-run counter; the basis for round-robin. */
@@ -63,13 +74,23 @@ export function emptyStats(key: string): TargetStats {
 }
 
 /**
- * Shared final ordering rule: anything that cannot hold the request is pushed
+ * Shared final ordering rule: anything that cannot serve the request is pushed
  * behind everything that can, no matter what the strategy thinks — a call that
  * certainly overflows is never the best first choice.
  */
 export function fittingFirst(targets: ModelTarget[], context: RoutingContext): ModelTarget[] {
   const fitting = targets.filter((target) => context.fits(target));
   const overflowing = targets.filter((target) => !context.fits(target));
-  overflowing.sort((a, b) => context.headroom(b) - context.headroom(a));
+  overflowing.sort((a, b) => slackOf(context, b) - slackOf(context, a));
   return [...fitting, ...overflowing];
+}
+
+/**
+ * The binding constraint, in tokens: whichever of the two windows runs out
+ * first. Negative means the target cannot serve the request, and how negative
+ * says by how much — which is the only sensible order for a list of targets that
+ * all fail, and the basis for picking the least-bad one when none fit.
+ */
+export function slackOf(context: RoutingContext, target: ModelTarget): number {
+  return Math.min(context.headroom(target), context.outputHeadroom(target));
 }

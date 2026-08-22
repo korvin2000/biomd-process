@@ -28,6 +28,14 @@ export type LlmErrorKind =
   | 'model_unavailable'
   /** Call succeeded but the body could not be parsed or failed validation. */
   | 'response_format'
+  /**
+   * The answer hit the model's own output ceiling and stops mid-sentence.
+   *
+   * Distinct from `response_format` because the remedy is the opposite one:
+   * the payload was fine and the model was willing, so re-asking it produces the
+   * identical cut every time. Only a wider target — or less to say — helps.
+   */
+  | 'output_truncated'
   /** Local guard tripped (circuit open). */
   | 'circuit_open'
   | 'unknown';
@@ -51,6 +59,7 @@ const DISPOSITIONS: Record<LlmErrorKind, Disposition> = {
   quota: { retryable: false, fallbackable: true },
   model_unavailable: { retryable: false, fallbackable: true },
   response_format: { retryable: true, fallbackable: true },
+  output_truncated: { retryable: false, fallbackable: true },
   circuit_open: { retryable: false, fallbackable: true },
   unknown: { retryable: false, fallbackable: true },
 };
@@ -122,4 +131,21 @@ export class AllTargetsFailedError extends AppError {
   get primary(): LlmCallError | undefined {
     return this.failures.find((f) => f.kind !== 'network' && f.kind !== 'unknown') ?? this.failures.at(-1);
   }
+}
+
+/**
+ * True when a call died because the answer did not fit, at any point in the
+ * fallback chain.
+ *
+ * A caller that can make its request *smaller* — a batch it may split, a
+ * document it may chunk — wants to know this, because doing so is cheaper than
+ * the escalation the gateway has already tried. Everything else should leave the
+ * error alone.
+ */
+export function isOutputTruncated(error: unknown): boolean {
+  if (error instanceof LlmCallError) return error.kind === 'output_truncated';
+  if (error instanceof AllTargetsFailedError) {
+    return error.failures.some((failure) => failure.kind === 'output_truncated');
+  }
+  return false;
 }

@@ -114,10 +114,20 @@ export class Orchestrator {
     const done = new Set<string>();
     const broken = new Set<string>();
 
+    /**
+     * A dependency is *settled* once it can no longer change — completed or
+     * failed. Waves are gated on settlement rather than success, because an
+     * optional dependency's failure must release its dependents instead of
+     * stranding them behind a task that will never complete.
+     */
+    const settled = (id: string): boolean => done.has(id) || broken.has(id);
+
     while (pending.size > 0 && !controller.signal.aborted) {
-      // A task whose prerequisite failed can only fail too, and would do so
-      // after paying for its own LLM calls. Retire it instead.
-      const doomed = [...pending.values()].filter((task) => task.dependencies.some((id) => broken.has(id)));
+      // A task whose *prerequisite* failed can only fail too, and would do so
+      // after paying for its own LLM calls. Retire it instead. A failed optional
+      // dependency is not a prerequisite: it was an ordering barrier, and the
+      // dependent was written to degrade rather than to lie.
+      const doomed = [...pending.values()].filter((task) => task.requiredDependencies.some((id) => broken.has(id)));
       if (doomed.length > 0) {
         for (const task of doomed) {
           pending.delete(task.taskId);
@@ -127,7 +137,7 @@ export class Orchestrator {
         continue;
       }
 
-      const wave = [...pending.values()].filter((task) => task.dependencies.every((id) => done.has(id)));
+      const wave = [...pending.values()].filter((task) => task.dependencies.every(settled));
       if (wave.length === 0) {
         // Only reachable through a dependency cycle, which is a pipeline bug.
         await this.abandon([...pending.values()], 'unsatisfiable dependencies');
@@ -200,6 +210,7 @@ export class Orchestrator {
         usage: result.usage,
         costUsd: result.costUsd,
         contextAttempt: result.contextAttempt,
+        ...(result.notes?.length ? { notes: result.notes } : {}),
       });
       store.recordTask(this.record(task, 'completed', { outputs: written.map((a) => a.relativePath), result }));
       metrics.recordTask('completed');

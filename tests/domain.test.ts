@@ -22,7 +22,14 @@ import {
   normalizeId,
   isValidSlug,
 } from '../src/domain/values.js';
-import { resolveDocumentType, resolveEntryType, resolveGender, resolveLanguage } from '../src/domain/vocabulary.js';
+import {
+  languageName,
+  resolveDocumentType,
+  resolveEnsemble,
+  resolveEntryType,
+  resolveGender,
+  resolveLanguage,
+} from '../src/domain/vocabulary.js';
 
 const OPTIONS: DossierOptions = { supportedLanguages: ['ru', 'en', 'de', 'zh'] };
 
@@ -249,6 +256,65 @@ describe('the token vocabularies', () => {
     expect(resolveLanguage('ch')).toBe('zh');
     expect(resolveLanguage('EN')).toBe('en');
     expect(resolveLanguage('xx')).toBeUndefined();
+  });
+});
+
+describe('how many people the entry is about', () => {
+  it('reads the numbered words, in the languages this corpus is written in', () => {
+    expect(resolveEnsemble('Гитарный дуэт "Торнадо"')).toMatchObject({ group: true, size: 2 });
+    expect(resolveEnsemble('Трио гитаристов Урала')).toMatchObject({ group: true, size: 3 });
+    expect(resolveEnsemble('EOS квартет')).toMatchObject({ group: true, size: 4 });
+    expect(resolveEnsemble('Munich Guitar Quartet')).toMatchObject({ group: true, size: 4 });
+  });
+
+  it('handles a declined Russian word and a Germanic compound', () => {
+    // `\w` is ASCII-only in JavaScript, which is exactly how a table like this
+    // silently stops matching Cyrillic.
+    expect(resolveEnsemble('участники квартета')).toMatchObject({ group: true, size: 4 });
+    expect(resolveEnsemble('Amsterdams Gitaartrio')).toMatchObject({ group: true, size: 3 });
+    expect(resolveEnsemble('granduet')).toMatchObject({ group: true, size: 2 });
+  });
+
+  it('knows a collective without knowing its size', () => {
+    expect(resolveEnsemble('Классический ансамбль гитаристов')).toEqual({
+      group: true,
+      word: 'ансамбль',
+    });
+  });
+
+  it('prefers the more specific claim when a title makes two', () => {
+    expect(resolveEnsemble('Гитарный ансамбль, квартет «Киев»')).toMatchObject({ size: 4 });
+  });
+
+  it('says nothing about one person', () => {
+    expect(resolveEnsemble('Андрес Сеговия')).toEqual({ group: false });
+    expect(resolveEnsemble('Виктор Маркович Кривенко')).toEqual({ group: false });
+    // Suffix matching fires on a long compound and on nothing else: this is a
+    // corpus full of Spanish and Italian names that end the same way.
+    expect(resolveEnsemble('residuo')).toEqual({ group: false });
+    expect(resolveEnsemble('Ontario')).toEqual({ group: false });
+    expect(resolveEnsemble('Demetrio Ballesteros')).toEqual({ group: false });
+    expect(resolveEnsemble('individuo')).toEqual({ group: false });
+    // …and the Latin entries are whole words, or `band` would make a group of
+    // every Bandini and every bandurria in the corpus.
+    expect(resolveEnsemble('Bandini')).toEqual({ group: false });
+    expect(resolveEnsemble('bandurria')).toEqual({ group: false });
+    // …while a genuine compound still resolves, in either language.
+    expect(resolveEnsemble('Gitarrenquartett')).toMatchObject({ size: 4 });
+    expect(resolveEnsemble('Blockflötenduo')).toMatchObject({ size: 2 });
+  });
+});
+
+describe('language names', () => {
+  it('spells a code out, because a model reads a word better than a code', () => {
+    expect(languageName('ru')).toBe('Russian');
+    expect(languageName('pt')).toBe('Portuguese');
+    expect(languageName('ru', 'de')).toMatch(/Russisch/);
+  });
+
+  it('hands back anything it cannot name', () => {
+    expect(languageName('zzz')).toBe('zzz');
+    expect(languageName('')).toBe('');
   });
 });
 

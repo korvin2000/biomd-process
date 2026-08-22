@@ -32,6 +32,15 @@ export interface CatalogOptions {
   defaultPageType: string;
   /** Keep a craft outside the established vocabulary rather than dropping it. */
   allowUnknownTypes?: boolean;
+  /**
+   * Row members this run may **correct** rather than merely fill.
+   *
+   * The merge protects hand-edits by never overwriting a value that is already
+   * there — which also means a value this tool derived wrongly is permanent. A
+   * member named here inverts that for itself, and every replacement is
+   * reported. Empty (the default) is the protective behaviour.
+   */
+  refresh?: readonly string[];
 }
 
 /** What a run has learned about one entry. Everything but `slug`/`md` is advisory. */
@@ -169,6 +178,7 @@ export class CatalogIndex {
     const md = normalizeContentPath(update.md);
     if (md && row.md !== md) row.md = md;
 
+    const becameBiography = Boolean(update.json) && !text(row.json);
     if (update.json) {
       const json = normalizeContentPath(update.json);
       if (json && !row.json) row.json = json;
@@ -178,22 +188,62 @@ export class CatalogIndex {
     if (lang) row.lang = lang;
 
     // Classification: the index wins, then what this run derived. A row may
-    // have been hand-edited, so nothing derived overwrites it.
-    if (!text(row.title) && update.title) row.title = update.title;
-    if (!text(row.type)) row.type = this.resolveType(update, notes);
+    // have been hand-edited, so nothing derived overwrites it — unless the
+    // deployment has named the member in `refresh`, which says the opposite for
+    // that one field. See {@link CatalogOptions.refresh}.
+    this.put(row, 'title', update.title, notes, update.slug);
+    if (!text(row.type) || this.wasFiledAsAPage(row, becameBiography)) {
+      const before = text(row.type);
+      row.type = this.resolveType(update, notes);
+      if (before && before !== row.type) {
+        notes.push(
+          `${update.slug}: was filed as "${before}" while it had no dossier; it has one now, so its type is ` +
+            `"${row.type}".`,
+        );
+      }
+    } else if (this.refreshes('type') && update.type) {
+      this.put(row, 'type', this.resolveType(update, notes), notes, update.slug);
+    }
 
-    if (!text(row.gender) && update.gender) {
-      const gender = resolveGender(update.gender);
-      if (gender) row.gender = gender;
+    this.put(row, 'gender', update.gender ? resolveGender(update.gender) : undefined, notes, update.slug);
+    this.put(row, 'country', update.country ? resolveCountry(update.country) : undefined, notes, update.slug);
+    this.put(row, 'img', update.img ? normalizeAssetPath(update.img) : undefined, notes, update.slug);
+  }
+
+  /**
+   * Fill an empty member, or replace a filled one the deployment asked to have
+   * corrected.
+   *
+   * The merge exists to protect hand-edits, and the cost of that is that a
+   * value this tool derived *wrongly* survives every re-run. `img` is where it
+   * bites hardest: change `tasks.portrait.assetPrefix` and every row keeps a
+   * path built from the old one, silently, for ever. Naming a member in
+   * `refresh` says "the derived value is the authority here"; a replacement is
+   * always announced, because overwriting something a person may have typed is
+   * exactly the kind of change that must not be quiet.
+   */
+  private put(
+    row: EntryRow,
+    key: 'title' | 'type' | 'gender' | 'country' | 'img',
+    value: string | undefined,
+    notes: string[],
+    slug: string,
+  ): void {
+    if (!value) return;
+
+    const current = text(row[key]);
+    if (!current) {
+      row[key] = value;
+      return;
     }
-    if (!text(row.country) && update.country) {
-      const country = resolveCountry(update.country);
-      if (country) row.country = country;
-    }
-    if (!text(row.img) && update.img) {
-      const img = normalizeAssetPath(update.img);
-      if (img) row.img = img;
-    }
+    if (current === value || !this.refreshes(key)) return;
+
+    row[key] = value;
+    notes.push(`${slug}: refreshed ${key} from "${current}" to "${value}" (tasks.catalog.refresh).`);
+  }
+
+  private refreshes(key: string): boolean {
+    return this.options.refresh?.includes(key) ?? false;
   }
 
   /**
@@ -221,6 +271,25 @@ export class CatalogIndex {
       );
     }
     return [original, ...kept, ...added].join(',');
+  }
+
+  /**
+   * The one derived value that may be *corrected* rather than only filled.
+   *
+   * `defaultPageType` (`hidden` by default) is not a classification anybody
+   * chose — it is what an entry gets for having no dossier, and `hidden` keeps
+   * it out of the grid, the search and the facets. When a later run does
+   * produce a dossier, the reason for that value has gone: the entry is a
+   * biography, and leaving it hidden means one failed extraction removes an
+   * entry from the catalogue permanently, which is exactly the shape of bug
+   * `isTaskDone` was.
+   *
+   * Narrow on purpose. Any other value — including a `hidden` a person typed
+   * for a genuinely technical page that also has a dossier — is left alone,
+   * because only this one can be attributed to the absence that just ended.
+   */
+  private wasFiledAsAPage(row: EntryRow, becameBiography: boolean): boolean {
+    return becameBiography && text(row.type) === this.options.defaultPageType;
   }
 
   private resolveType(update: RowUpdate, notes: string[]): string {
@@ -359,6 +428,16 @@ export interface NameMergeOptions {
   titles: ReadonlyMap<string, string>;
   /** Ids that exist in `index.json`; a key outside it is kept but reported. */
   knownIds: ReadonlySet<string>;
+  /**
+   * Let a derived display name replace the existing `[0]`.
+   *
+   * Off by default, because `[0]` is the string a reader sees and the one an
+   * editor is most likely to have corrected by hand. On, it is the only way a
+   * *producer* fix — a new `displayNameOrder`, a roster that now knows the
+   * entry — ever reaches a file that already exists. Every replacement is
+   * reported, and the previous name is kept as an alias rather than discarded.
+   */
+  refreshDisplayNames?: boolean;
 }
 
 export interface NameMergeResult {
@@ -371,7 +450,8 @@ export interface NameMergeResult {
 /**
  * Merges derived display names into an existing `index-<lang>.json`.
  *
- * Element `[0]` of an existing entry is never replaced: it is the one string a
+ * Element `[0]` of an existing entry is not replaced unless
+ * {@link NameMergeOptions.refreshDisplayNames} says so: it is the one string a
  * reader actually sees, it is the field an editor is most likely to have
  * corrected by hand, and a machine-composed `forename + " " + surname` is a
  * weaker source than a person. Derived aliases are appended when they are new,
@@ -430,7 +510,27 @@ export function mergeNameIndex(
       continue;
     }
 
-    const merged = appendAliases(current, usable.slice(1));
+    const display = usable[0] ?? '';
+    const rename =
+      options.refreshDisplayNames === true &&
+      Boolean(display) &&
+      foldName(display) !== foldName(current[0] ?? '');
+
+    // The old display name is demoted, never dropped: whatever a reader used to
+    // see is exactly the string they are most likely to type next.
+    const base = rename ? [display, ...current] : current;
+    // The whole derived list, `[0]` included. When the display names agree the
+    // dedupe drops the repeat; when they differ — a hand-corrected `[0]`, or an
+    // order this deployment did not adopt — the derived display name is still a
+    // string a reader plausibly types, and dropping it loses reachability.
+    const merged = appendAliases(base, rename ? usable.slice(1) : usable);
+
+    if (rename) {
+      notes.push(`Entry "${id}": display name "${current[0] ?? ''}" replaced by "${display}"; the old one is now an alias.`);
+      index[id] = merged;
+      changed = true;
+      continue;
+    }
     if (merged.length !== current.length) {
       index[id] = merged;
       changed = true;
@@ -458,8 +558,19 @@ function usableNames(value: unknown): string[] {
 }
 
 function appendAliases(current: readonly string[], aliases: readonly string[]): string[] {
-  const seen = new Set(current.map(foldName));
-  const result = [...current];
+  // `current` is deduped rather than trusted: a promoted display name is
+  // prepended to a list that may already carry it as an alias, and publishing
+  // the same name twice is a tie in the consumer's ranking and a repeat in any
+  // list a reader sees.
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const name of current) {
+    const fold = foldName(name);
+    if (seen.has(fold)) continue;
+    seen.add(fold);
+    result.push(name);
+  }
+
   for (const alias of aliases) {
     const fold = foldName(alias);
     // An alias of one or two characters matches nearly everything and degrades

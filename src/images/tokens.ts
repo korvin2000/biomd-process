@@ -70,8 +70,8 @@ const NOISE = new Set([
   'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
 ]);
 
-/** A token that is a release marker in itself: `cd07`, `lp16`, `dvd38`. */
-const RELEASE_TOKEN = /^(?:cd|lp|ep|dvd|vhs|lcd|cdr|mc|track|side)\d+[a-z]?$/;
+/** A token that is a release marker in itself: `cd07`, `lp16`, `dvd38`, `disc03`. */
+const RELEASE_TOKEN = /^(?:cd|lp|ep|dvd|vhs|lcd|cdr|mc|track|side|disc|disk|album)\d+[a-z]?$/;
 
 /** Path segments that carry no name and must not be read as one. */
 const STRUCTURAL_SEGMENTS = new Set(['photo', 'photos', 'images', 'img', 'files', 'unused', 'thumbs', 'small']);
@@ -189,7 +189,12 @@ export function analysePath(relPath: string): PathAnalysis {
   if (/(?:^|[_\-/])(?:with|and|feat)[_\-]/i.test(lower)) markers.push('joint-photo');
   // `\b` is useless here: `_` is a word character, so it never fires between
   // `pena` and `_cd05`. Every release marker in this archive is written that way.
-  if (/(?:^|[^a-z])(?:cd|lp|ep|dvd|vhs|lcd)\d/i.test(base) || /(?:^|[_\-])(?:cover|obl)(?:[_\-]|$)/i.test(base)) {
+  // `disc03` belongs here for the same reason `cd05` does: it is a sleeve with
+  // the artist's name printed on it, and this archive numbers them both ways.
+  if (
+    /(?:^|[^a-z])(?:cd|lp|ep|dvd|vhs|lcd|disc|disk|album)\d/i.test(base) ||
+    /(?:^|[_\-])(?:cover|obl|sleeve)(?:[_\-]|$)/i.test(base)
+  ) {
     markers.push('release-cover');
   }
   if (/(?:tech|technique|shkola|school|book|notes?|scores?|tabs?)(?:$|[_\-/])/i.test(lower)) {

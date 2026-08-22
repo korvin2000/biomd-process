@@ -39,16 +39,37 @@ const cheap = target({ modelId: 'cheap', pricing: { inputPer1M: 0.1, outputPer1M
 const mid = target({ modelId: 'mid', pricing: { inputPer1M: 1, outputPer1M: 2 }, contextWindow: 32_000 });
 const wide = target({ modelId: 'wide', pricing: { inputPer1M: 5, outputPer1M: 10 }, contextWindow: 200_000 });
 
+/** A wide window with a low output ceiling — the shape that used to route wrong. */
+const narrow = target({
+  modelId: 'narrow',
+  pricing: { inputPer1M: 0.1, outputPer1M: 0.2 },
+  contextWindow: 64_000,
+  maxOutputTokens: 8_192,
+});
+const roomy = target({
+  modelId: 'roomy',
+  pricing: { inputPer1M: 5, outputPer1M: 10 },
+  contextWindow: 128_000,
+  maxOutputTokens: 16_384,
+});
+
 const fitting = { reserveOutputTokens: 1024, safetyMarginRatio: 0.9 };
-const request = (estimatedInputTokens: number, capabilities: ModelTarget['capabilities'] = []) => ({
+const request = (
+  estimatedInputTokens: number,
+  capabilities: ModelTarget['capabilities'] = [],
+  expectedOutputTokens = 512,
+) => ({
   pipeline: 'test',
   estimatedInputTokens,
-  expectedOutputTokens: 512,
+  expectedOutputTokens,
   requiredCapabilities: capabilities,
 });
 
-function router(strategyId: string): Router {
-  return new Router(new RoutingStrategyRegistry().get(strategyId), new TargetStatsRegistry(), fitting);
+function router(strategyId: string, onOverflow?: 'demote' | 'skip'): Router {
+  return new Router(new RoutingStrategyRegistry().get(strategyId), new TargetStatsRegistry(), {
+    ...fitting,
+    ...(onOverflow ? { onOverflow } : {}),
+  });
 }
 
 describe('routing strategies', () => {
@@ -105,5 +126,42 @@ describe('routing strategies', () => {
 
   it('reports unknown strategies with the available ones listed', () => {
     expect(() => new RoutingStrategyRegistry().get('nope')).toThrowError(/Available: /);
+  });
+});
+
+/**
+ * The `williams2` failure: a 64K window happily accepted a long article and then
+ * cut its translation off at the 8K output ceiling. Nothing about the prompt was
+ * too big, so the only way to see it coming is to route on what the model can
+ * *emit* as well as on what it can hold.
+ */
+describe('output capacity', () => {
+  it('demotes a target that cannot emit the expected answer, even though the prompt fits', () => {
+    const order = router('cost-optimized').select([narrow, roomy], request(3_000, [], 13_000));
+    expect(order.map((t) => t.modelId)).toEqual(['roomy', 'narrow']);
+  });
+
+  it('still prefers the cheap target when the answer does fit it', () => {
+    const order = router('cost-optimized').select([narrow, roomy], request(3_000, [], 4_000));
+    expect(order.map((t) => t.modelId)).toEqual(['narrow', 'roomy']);
+  });
+
+  it('onOverflow: skip drops it from the chain instead of calling it last', () => {
+    const order = router('cost-optimized', 'skip').select([narrow, roomy], request(3_000, [], 13_000));
+    expect(order.map((t) => t.modelId)).toEqual(['roomy']);
+  });
+
+  it('onOverflow: skip still routes somewhere when nothing in the pool fits', () => {
+    // A pool nobody sized for this corpus is a config mistake, and a real
+    // provider error names it better than an empty chain does.
+    const order = router('cost-optimized', 'skip').select([narrow, roomy], request(3_000, [], 99_999));
+    expect(order.map((t) => t.modelId)).toEqual(['roomy']);
+  });
+
+  it('reserves the output the request actually expects, not just the configured floor', () => {
+    // 56k input fits narrow's window against the 1024-token default reserve, and
+    // does not once the 8k answer it will generate is accounted for.
+    const order = router('cost-optimized', 'skip').select([narrow, roomy], request(56_000, [], 8_192));
+    expect(order.map((t) => t.modelId)).toEqual(['roomy']);
   });
 });

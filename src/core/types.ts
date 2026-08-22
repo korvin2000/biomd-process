@@ -42,6 +42,21 @@ export interface TaskDependency {
    * aggregation needs.
    */
   scope?: 'item' | 'all';
+  /**
+   * An ordering barrier rather than a prerequisite: wait for the other task,
+   * then run whether it succeeded or not.
+   *
+   * The case that needs it is an aggregation over whatever reached the disk. One
+   * document whose translation failed must not retire the index describing the
+   * other two hundred — and it would, because a corpus-scope dependency resolves
+   * to *every* task of that pipeline, so any single failure among them is a
+   * failure of the whole barrier.
+   *
+   * Only correct where the dependent genuinely degrades rather than lies. A
+   * pipeline that would silently publish a worse answer should stay required and
+   * be retired instead.
+   */
+  optional?: boolean;
 }
 
 /** What a pipeline asks the planner to schedule. */
@@ -59,6 +74,19 @@ export interface TaskSeed {
   promptVersion: string;
   /** Lets the planner skip a task whose output already exists. */
   expectedOutputs: Array<{ channel: string; pathVars: PathVars }>;
+  /**
+   * True when this task **updates** its output rather than producing it.
+   *
+   * `run.skipExistingOutputs` reads a file's existence as "this work is
+   * already done", which is right for a translation and exactly wrong for a
+   * merge: `catalog` reads `index.json` and writes it back with this run's rows
+   * in it, and `websearch` completes the dossier `extract` just wrote. Both
+   * declare an output that is *always* there after the first run, so both were
+   * skipped for ever — a catalogue that could never pick up a new article, and
+   * a web search that never ran twice. Neither failed; they simply stopped
+   * happening, which is the worst way for a batch tool to be wrong.
+   */
+  mergesOutput?: boolean;
   /** Tasks that must finish first. Unresolvable entries are dropped, not failed. */
   dependsOn?: TaskDependency[];
   /**
@@ -80,8 +108,14 @@ export interface PlannedTask {
   items: readonly WorkItem[];
   /** The item id for a document task, `*` for a corpus task. Used in records. */
   workItemId: string;
-  /** Task ids that must complete before this one may start. */
+  /** Task ids that must *finish* before this one may start, succeeded or not. */
   dependencies: readonly string[];
+  /**
+   * The subset of {@link dependencies} whose **failure** retires this task. An
+   * optional dependency is waited for and then ignored, so the two lists differ
+   * exactly where a pipeline declared `optional: true`.
+   */
+  requiredDependencies: readonly string[];
   /** False when this task will call no model. See {@link TaskSeed.usesLlm}. */
   usesLlm?: boolean;
 }

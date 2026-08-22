@@ -95,6 +95,74 @@ describe('websearch', () => {
     expect(hints.country).toBe('ru');
   });
 
+  /**
+   * The case that started this: an article that says "born about 1950" and a
+   * cited full date that disagrees about the year. Under the old rule the
+   * sourced date was refused as a contradiction and nothing said so, so the
+   * catalogue kept publishing the approximation and the run looked clean.
+   */
+  describe('a sourced date that disagrees with the record', () => {
+    const CONFLICT = { born: { value: '25.07.1939', source: 'https://example.org/ivanov', confidence: 0.9 } };
+
+    function answering(payload: unknown): FakeClient {
+      return new FakeClient((call) => {
+        const content = call.request.messages.at(-1)?.content ?? '';
+        if (!isWebSearch(content)) return respond(JSON.stringify({}));
+        return respond(JSON.stringify(payload));
+      });
+    }
+
+    const asking = {
+      ...TASKS,
+      websearch: { ...TASKS.websearch, upgradePrecision: true, fields: ['born' as const] },
+    };
+
+    it('prefers the more precise sourced date, and says that it did', async () => {
+      const outcome = await runJob(workspace.app({ tasks: asking }, answering(CONFLICT)));
+      expect(outcome.summary.failures).toEqual([]);
+
+      const dossier = await readDossier();
+      expect(dossier.metadata['dates']).toEqual({ born: '25.07.1939' });
+    });
+
+    it('records the conflict instead of publishing it under `report`', async () => {
+      const tasks = { ...asking, websearch: { ...asking.websearch, onDateConflict: 'report' as const } };
+      await runJob(workspace.app({ tasks }, answering(CONFLICT)));
+
+      // The record stands …
+      const dossier = await readDossier();
+      expect(dossier.metadata['dates']).toEqual({ born: '1940' });
+
+      // … and the disagreement is on disk with its source, which is the whole
+      // difference from the behaviour this replaced.
+      const hints = JSON.parse(await readFile(workspace.path('out/.hints/ivan-ivanov.web.json'), 'utf8')) as {
+        conflicts?: { field: string; recorded: string; found: string; source?: string }[];
+      };
+      expect(hints.conflicts).toEqual([
+        {
+          field: 'born',
+          recorded: '1940',
+          found: '25.07.1939',
+          source: 'https://example.org/ivanov',
+          confidence: 0.9,
+        },
+      ]);
+    });
+
+    it('never lets an equally precise disagreement overwrite the record', async () => {
+      // Two full dates that disagree are two claims about a person. Precision
+      // is the only thing that separates a correction from a coin toss.
+      await workspace.writeFile(
+        'corpus/ru/ivan-ivanov.bio.json',
+        JSON.stringify({ ...DOSSIER, metadata: { ...DOSSIER.metadata, dates: { born: '01.01.1940' } } }, null, 2),
+      );
+      await runJob(workspace.app({ tasks: asking }, answering(CONFLICT)));
+
+      const dossier = await readDossier();
+      expect(dossier.metadata['dates']).toEqual({ born: '01.01.1940' });
+    });
+  });
+
   it('writes a place as prose in the edition\'s language, not as a country code', async () => {
     const client = new FakeClient((call) => {
       const content = call.request.messages.at(-1)?.content ?? '';
