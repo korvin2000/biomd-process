@@ -445,6 +445,7 @@ llm:
         HTTP-Referer: https://www.abc-guitars.com
         X-Title: biomd-process
       requestsPerMinute: 60
+      maxConcurrent: 3
 
   models:
     - id: local-small
@@ -474,9 +475,22 @@ llm:
       # params: { temperature: 0.1 }
       tags: [local, cheap]
 
+    - id: or-luna
+      endpoint: omniroute
+      model: cx/gpt-5.6-luna
+      contextWindow: 127000
+      maxOutputTokens: 4096
+      capabilities: [json_object, tools]
+      pricing: { inputPer1M: 0, outputPer1M: 0 }
+      #params:
+      #  temperature: 0.1
+        # For option 3, keep the model as it is and add:
+        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      tags: [remote, search, cheap]
+
     - id: or-cheap
       endpoint: openrouter
-      model: deepseek/deepseek-v4-flash
+      model: deepseek/deepseek-v4-flash-0731
       contextWindow: 128000
       maxOutputTokens: 24576
       capabilities: [json_schema, json_object, tools, prompt_cache]
@@ -599,12 +613,12 @@ llm:
     # overload. A single-model pool has no chain at all: that is what
     # "All 1 model target(s) failed" means, and it is the one shape to avoid.
     pools:
-      default: [local-small, or-cheap]
+      default: [local-small, or-luna, or-cheap]
       # Extraction is mechanical: start cheap, escalate only on failure.
       extract: [local-small, or-cheap]
       # Translation is quality-sensitive, and the most likely to outgrow a small
       # model's output limit — a long article's prose has to come back in full.
-      translate: [local-small, or-cheap]
+      translate: [local-small, or-luna, or-cheap]
       # Only models that can search belong here; see tasks.websearch.
       #
       # The three free omniroute targets are genuinely different models and give
