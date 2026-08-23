@@ -442,7 +442,33 @@ llm:
       capabilities: [json_object, tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
       params:
-        temperature: 0
+        temperature: 0.1
+        # For option 3, keep the model as it is and add:
+        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      tags: [remote, search, cheap]
+
+    - id: or-search2
+      endpoint: omniroute
+      model: cx/gpt-5.6-luna-medium
+      contextWindow: 127000
+      maxOutputTokens: 4096
+      capabilities: [json_object, tools, web_search]
+      pricing: { inputPer1M: 0, outputPer1M: 0 }
+      params:
+        temperature: 0.2
+        # For option 3, keep the model as it is and add:
+        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      tags: [remote, search, cheap]
+
+    - id: or-search3
+      endpoint: omniroute
+      model: cx/gpt-5.6-terra-low
+      contextWindow: 127000
+      maxOutputTokens: 4096
+      capabilities: [json_object, tools, web_search]
+      pricing: { inputPer1M: 0, outputPer1M: 0 }
+      params:
+        temperature: 0.1
         # For option 3, keep the model as it is and add:
         # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search, cheap]
@@ -460,7 +486,7 @@ llm:
       capabilities: [json_object, tools, web_search]
       pricing: { inputPer1M: 0.1, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
       params:
-        temperature: 0
+        temperature: 0.1
         # The explicit form of the same thing, if you want to size the results:
         # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search]
@@ -468,13 +494,13 @@ llm:
     # `:batch` is reachable only through OpenRouter's Batch API, never through
     # /chat/completions — `biomd models --probe` answers 404 on it. It is in no
     # pool today, so nothing has failed yet; it would fail on first use.
-    - id: or-quality
+    - id: or-search-quality
       endpoint: openrouter
       model: google/gemini-3.7-flash
       contextWindow: 200000
       maxOutputTokens: 16384
       capabilities: [json_schema, tools, reasoning, prompt_cache]
-      pricing: { inputPer1M: 0.2, outputPer1M: 1, cachedInputPer1M: 0.3 }
+      pricing: { inputPer1M: 0.375, outputPer1M: 1.875, cachedInputPer1M: 0.038 }
       reasoning: { enabled: false, effort: medium, dialect: reasoning }
       params: { temperature: 0.1 }
       tags: [remote, quality]
