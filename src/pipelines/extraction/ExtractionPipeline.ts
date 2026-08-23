@@ -29,6 +29,7 @@ import type { RosterEntry } from '../../roster/types.js';
 import type { JsonValue } from '../../shared/json.js';
 import { findSourceDossier, type ExistingDossier } from '../shared/dossierSource.js';
 import { rosterEntryFor } from '../shared/roster.js';
+import { mixedScriptWords } from '../shared/script.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
 import {
   answeredKeys,
@@ -416,6 +417,7 @@ export class ExtractionPipeline implements DocumentPipeline {
     }
 
     if (isEmptyDossier(complete)) notes.push('The dossier is structurally valid but carries no facts.');
+    notes.push(...halfTransliterated(complete));
     return { artifacts, usage, costUsd, notes };
   }
 
@@ -563,4 +565,25 @@ function planFor(config: ExtractTaskConfig, existing: ExistingDossier | undefine
 
 function describePath(existing: ExistingDossier | undefined): string {
   return existing ? `${existing.path} (${existing.origin})` : 'nowhere';
+}
+
+/**
+ * Names the model transliterated halfway and then stopped.
+ *
+ * `"Авель Карлеvaro"` — one word, two alphabets — is what `abiton` published for
+ * Abel Carlevaro. It is always a machine's slip and never a spelling anything
+ * contains, and left unreported it reaches the catalogue as a name no reader can
+ * search for. Which half is correct is not knowable from here, so this reports
+ * rather than repairs: `biomd report --notes script` lists them.
+ */
+function halfTransliterated(dossier: Dossier): string[] {
+  const notes: string[] = [];
+  for (const [field, value] of Object.entries(dossier.metadata ?? {})) {
+    if (typeof value !== 'string') continue;
+    const mixed = mixedScriptWords(value);
+    if (mixed.length > 0) {
+      notes.push(`${field} contains ${mixed.length === 1 ? 'a word' : 'words'} written in two alphabets: ${mixed.join(', ')}. Half-transliterated by the model; check it.`);
+    }
+  }
+  return notes;
 }

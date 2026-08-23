@@ -50,6 +50,21 @@ describe('VD-DATE', () => {
     expect(normalizeDate('21 de marzo de 1893')).toBe('21.03.1893');
   });
 
+  it('reads a date printed in both calendars, keeping the first', () => {
+    // `aleksandrov.bio.md`: "род. 11(23).12.1818, ум. 24.12.1884 / 05.01.1885".
+    // Neither form parsed, so the entry published no dates at all.
+    expect(normalizeDate('11(23).12.1818')).toBe('11.12.1818');
+    expect(normalizeDate('11 (23).12.1818')).toBe('11.12.1818');
+    expect(normalizeDate('24.12.1884 / 05.01.1885')).toBe('24.12.1884');
+    expect(normalizeDate('24.12.1884 (05.01.1885)')).toBe('24.12.1884');
+  });
+
+  it('still refuses a range, which names two dates rather than one twice', () => {
+    expect(normalizeDate('1884 / 1885', 'year')).toBeUndefined();
+    expect(normalizeDate('01.01.1900 / 31.12.1900')).toBeUndefined();
+    expect(normalizeDate('1884–1885', 'year')).toBeUndefined();
+  });
+
   it('refuses a partial date at day precision, the specification default', () => {
     expect(normalizeDate('1885')).toBeUndefined();
     expect(normalizeDate('05.1885')).toBeUndefined();

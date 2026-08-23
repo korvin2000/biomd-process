@@ -213,7 +213,7 @@ tasks:
     enabled: true
     pool: translate
     outputChannel: translation
-    targetLanguages: [en]
+    targetLanguages: [en, fr, es, de, it]
     skipSourceLanguage: true
     # Copy the source article into the output tree as its original edition.
     # INV-8 wants a file for every code in a row's `lang`, the first one
@@ -238,6 +238,19 @@ tasks:
     # an instruction is obeyed on most calls, a fragment that was never sent on
     # all of them. A mixed fragment is always sent.
     foreignFragments: keep
+    # auto | code | text — what a ``` fence contains.
+    #
+    # These articles set poems and song lyrics in a bare fence, and the span
+    # extractor used to skip every fence on the assumption that fencing meant
+    # code. On garcia_lorca.bio.md that left 44% of the Russian text
+    # untranslated, and nothing caught it: the structure guard ignores fenced
+    # content, so the article passed every check with half of it in Russian.
+    #
+    # `auto` classifies each block by what is in it — an info string naming a
+    # language, tablature and ASCII rules are code; lines of words are verse —
+    # and lifts verse one span per line, so the shape of the poem is restored by
+    # the splice rather than asked of the model. `code` is the old behaviour.
+    fencedBlocks: auto
     # Characters of the article's title and lead sent with each batch, so the
     # fragments arrive with a subject. Rides in the volatile part of the message,
     # so the prompt-cache prefix is untouched. 0 sends nothing.
@@ -259,7 +272,22 @@ tasks:
     repairAttempts: 2
     # off | run | persistent. `persistent` keeps the cache in run.memoryDir, so a
     # re-run over a grown corpus pays only for the strings that are new.
-    useTranslationMemory: persistent
+    useTranslationMemory: run
+    # A house glossary, for the terms a model renders differently on different
+    # calls. `promptVariables` is free-form and merged into the template
+    # variables, and `glossary` is the key both translation user templates
+    # already look for — so this needs no code and costs a few tokens.
+    #
+    # It rides in the *stable* half of the message, before the document, so a
+    # constant glossary leaves the prompt-cache prefix intact. Keep it short:
+    # it is for the handful of terms the corpus argues about (a guitar
+    # publication is a "magazine", not a "journal"), not a dictionary.
+    #
+    # promptVariables:
+    #   glossary:
+    #     журнал: magazine
+    #     семиструнная гитара: seven-string guitar
+    #     заслуженный артист: Honoured Artist
 
   # Per-language edition of the dossier. Only the prose values are sent, keyed by
   # content hash; dates, ranking, url, every media target and every unknown field
@@ -268,7 +296,7 @@ tasks:
     enabled: true
     pool: translate
     outputChannel: metadata
-    targetLanguages: [en] # empty follows tasks.translate.targetLanguages
+    targetLanguages: [en, fr, es, de, it] # empty follows tasks.translate.targetLanguages
     maxStringsPerCall: 60
     repairAttempts: 2
     useTranslationMemory: run
@@ -393,6 +421,22 @@ llm:
       baseUrl: http://192.168.1.26:20129/v1
       apiKey: ${OMNIROUTE_API_KEY}
       requestsPerMinute: 60
+      # NOT a throughput setting — a correctness one, and the most important
+      # line in this file.
+      #
+      # This gateway coalesces requests that are in flight at the same moment:
+      # send three different bodies within a few milliseconds and all three come
+      # back with **one** answer, the first one's, byte for byte. Measured here
+      # on 2026-08-23 with `websearch` at concurrency 3 — Aguado's date of death
+      # and his Spanish Wikipedia URL were published into Anido's and Amigo's
+      # dossiers, at confidence 0.98, with a source URL naming the wrong person.
+      # Serialized (this line) the same four documents each got their own
+      # correct answer.
+      #
+      # Nothing downstream can catch it: the answer is well-formed, sourced and
+      # about a real guitarist, just not the one who was asked about. Raise this
+      # only after re-running that experiment against the gateway.
+      maxConcurrent: 1
 
     - id: openrouter
       baseUrl: https://openrouter.ai/api/v1
@@ -410,6 +454,24 @@ llm:
       maxOutputTokens: 18432
       capabilities: [json_schema, json_object, prompt_cache]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
+      # This was the only target in the file with no `params`, so it ran at
+      # whatever the server defaults to while every other target sat at 0.1 —
+      # and it is the target that does all the extraction and all the
+      # translation. Measured on 2026-08-23, the same eight fragments asked
+      # three times:
+      #
+      #   server default   3 distinct answers out of 3
+      #   temperature 0.2  2 distinct answers out of 3
+      #   temperature 0    1 distinct answer  out of 3
+      #
+      # That churn is what makes two runs of the *same* prompt differ on
+      # "very young age" vs "too-young age" and "Cambo-les-Bains" vs
+      # "Cambio-le-Ben" — differences easily mistaken for a prompt regression.
+      # A catalogue wants the reproducible end of that: `useTranslationMemory`
+      # assumes a stable rendering, and a re-run should not rewrite prose it
+      # already published. Use 0 when reproducibility matters more than the
+      # last few percent of fluency.
+      # params: { temperature: 0.1 }
       tags: [local, cheap]
 
     - id: or-cheap
@@ -483,7 +545,15 @@ llm:
       model: openai/gpt-5.6-luna:online
       contextWindow: 127000
       maxOutputTokens: 4096
-      capabilities: [json_object, tools, web_search]
+      # `json_object` is deliberately absent, and its absence is what makes this
+      # target work at all. OpenAI refuses the combination outright —
+      # "Web Search cannot be used with JSON mode" — so every `websearch` call,
+      # which always asks for `json_object`, came back 400 and this paid
+      # fallback served 0 of its requests while `or-search` carried the corpus
+      # alone. The transport now sends `response_format` only to a target that
+      # declares it, so leaving it off here degrades to asking for JSON in the
+      # prompt, which is what the prompt already does.
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0.1, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
       params:
         temperature: 0.1
@@ -491,17 +561,31 @@ llm:
         # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search]
 
-    # `:batch` is reachable only through OpenRouter's Batch API, never through
-    # /chat/completions — `biomd models --probe` answers 404 on it. It is in no
-    # pool today, so nothing has failed yet; it would fail on first use.
+    # A strong general model, and **not a search model** — note the absence of
+    # `web_search` below, which is the whole point of the entry.
+    #
+    # Put it in `websearch` and it answers every question fluently, with a
+    # citation, from memory. Measured here on 2026-08-23: asked for Gérard
+    # Abiton's date of birth it returned `18.06.1954`, confidence 0.95, sourced
+    # to `https://data.bnf.fr/fr/13934335/gerard_abiton/` — a URL that resolves
+    # to a BnF record for somebody else and carries no such date, while French
+    # Wikipedia states only the year. It "found" more fields than any real
+    # search model in the same test, because inventing is faster than searching.
+    # That is the failure `tasks.websearch.requireWebSearchCapability` exists to
+    # prevent, and it works only as long as this list stays honest.
+    #
+    # `reasoning.enabled: false` used to be here and made the target dead: this
+    # endpoint answers `400 Reasoning is mandatory for this endpoint and cannot
+    # be disabled`. Reasoning competes with the answer for the output budget, so
+    # keep `maxOutputTokens` generous when using it.
     - id: or-search-quality
       endpoint: openrouter
       model: google/gemini-3.7-flash
       contextWindow: 200000
       maxOutputTokens: 16384
-      capabilities: [json_schema, tools, reasoning, prompt_cache]
+      capabilities: [json_schema, json_object, tools, reasoning, prompt_cache]
       pricing: { inputPer1M: 0.375, outputPer1M: 1.875, cachedInputPer1M: 0.038 }
-      reasoning: { enabled: false, effort: medium, dialect: reasoning }
+      reasoning: { enabled: true, effort: low, dialect: reasoning }
       params: { temperature: 0.1 }
       tags: [remote, quality]
 
@@ -522,7 +606,15 @@ llm:
       # model's output limit — a long article's prose has to come back in full.
       translate: [local-small, or-cheap]
       # Only models that can search belong here; see tasks.websearch.
-      websearch: [or-search, or-osearch]
+      #
+      # The three free omniroute targets are genuinely different models and give
+      # genuinely different answers — measured over twelve documents they filled
+      # 7, 8 and 6 fields respectively, agreeing on the facts and differing on
+      # which page they cite. Three of them is a real fallback chain, and the
+      # paid `:online` model behind them is the one that survives omniroute
+      # being down. `or-search-quality` is deliberately absent: it cannot
+      # search, and what it does instead is worse than a gap.
+      websearch: [or-osearch, or-search2, or-search, or-search3]
     # demote | skip — what to do with a target that cannot serve a request,
     # either because the prompt exceeds its context window or because the answer
     # would exceed its `maxOutputTokens`.
@@ -540,8 +632,8 @@ llm:
 
   defaults:
     timeoutMs: 120000
-    params:
-      temperature: 0.2
+#    params:
+#      temperature: 0.2
 
 # --------------------------------------------------------------------------
 # Failure handling. `retry` = same model; `fallback` = next model in the pool.

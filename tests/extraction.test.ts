@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { reasoningFields } from '../src/llm/OpenAiCompatibleClient.js';
+import { reasoningFields, toWireResponseFormat } from '../src/llm/OpenAiCompatibleClient.js';
 import { reasoningSchema } from '../src/config/schema.js';
 import {
   answeredKeys,
@@ -228,5 +228,27 @@ describe('reasoning parameters', () => {
     expect(reasoningFields(reasoning({ enabled: false, dialect: 'thinking' }))).toEqual({
       thinking: { type: 'disabled' },
     });
+  });
+});
+
+describe('response_format is a capability, not a default', () => {
+  const target = (capabilities: string[]): any => ({ modelId: 't', capabilities });
+
+  it('sends json_object only to a target that declares it', () => {
+    expect(toWireResponseFormat({ type: 'json_object' }, target(['json_object']))).toEqual({ type: 'json_object' });
+    // `openai/*:online` answers "Web Search cannot be used with JSON mode" — a
+    // 400 on every websearch call, because that task always asks for JSON mode.
+    expect(toWireResponseFormat({ type: 'json_object' }, target(['tools', 'web_search']))).toBeUndefined();
+  });
+
+  it('sends json_schema only to a target that declares it', () => {
+    const format = { type: 'json_schema', name: 'x', schema: {} } as const;
+    expect(toWireResponseFormat(format, target(['json_schema']))).toMatchObject({ type: 'json_schema' });
+    expect(toWireResponseFormat(format, target(['json_object']))).toBeUndefined();
+  });
+
+  it('never sends anything for plain text', () => {
+    expect(toWireResponseFormat({ type: 'text' }, target(['json_object']))).toBeUndefined();
+    expect(toWireResponseFormat(undefined, target(['json_object']))).toBeUndefined();
   });
 });

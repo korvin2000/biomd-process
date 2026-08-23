@@ -123,6 +123,14 @@ export function findGaps(dossier: Dossier, options: GapOptions): GapAnalysis {
       // `died` is only asked about when the age says it is worth asking. For a
       // 40-year-old the absence is not a gap, it is the answer.
       if (field === 'died' && !checkLiveness) continue;
+      // And a place of death is the same question wearing a different hat. It
+      // used to be asked of everyone with an empty `deathplace`, which is every
+      // living guitarist in the corpus — and "where did Roberto Aussel die?" is
+      // a question a search model answers: `Сен-Эрблен, Франция`, confidence
+      // 0.95, published into the dossier of a man who is alive. Nothing after
+      // this point could have caught it, because the value is well-formed and
+      // the field it fills is the field that was asked for.
+      if (field === 'deathplace' && !died && !checkLiveness) continue;
       questions.push({ field, hint: HINTS[field] });
       continue;
     }

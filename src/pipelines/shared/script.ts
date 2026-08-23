@@ -76,3 +76,27 @@ function scriptOfLanguage(language: string): RegExp | undefined {
 export function hasOwnScript(language: string): boolean {
   return scriptOfLanguage(language) !== undefined;
 }
+
+/** A single word built out of two alphabets — always a machine's mistake. */
+const MIXED_WORD = /[\p{Script=Cyrillic}\p{Script=Greek}][\p{Script=Latin}]|[\p{Script=Latin}][\p{Script=Cyrillic}\p{Script=Greek}]/u;
+
+/**
+ * Words that changed alphabet halfway through.
+ *
+ * `"Авель Карлеvaro"` is what `abiton`'s dossier published for Abel Carlevaro:
+ * a model transliterating a name it half-recognized, stopping in the middle. A
+ * *sentence* mixing alphabets is ordinary here — "Играл на гитаре Pedro
+ * Maldonado" is Russian prose with a Spanish name in it — so the test is per
+ * word, and within one word the mixture is never intentional. No human writes
+ * it, no source contains it, and it survives into the published catalogue as a
+ * name no reader can search for.
+ *
+ * Reported rather than repaired: which half is right is not knowable from here,
+ * and dropping the field would lose a teacher the article really does name.
+ * `biomd report --notes alphabets` lists them.
+ */
+export function mixedScriptWords(text: string): string[] {
+  return [...text.matchAll(/\p{L}[\p{L}\p{M}'’-]*/gu)]
+    .map((match) => match[0])
+    .filter((word) => MIXED_WORD.test(word));
+}

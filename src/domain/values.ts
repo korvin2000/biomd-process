@@ -103,11 +103,13 @@ export interface ParsedDate {
 
 /** The reading of a date value, whatever its precision. */
 export function parseDate(raw: string): ParsedDate | undefined {
-  const value = raw.trim().replace(/[,;]+$/, '').replace(APPROXIMATE, '').trim();
-  if (!value) return undefined;
+  const trimmed = raw.trim().replace(/[,;]+$/, '').replace(APPROXIMATE, '').trim();
+  if (!trimmed) return undefined;
 
   // Ranges and open-ended forms name two dates; neither is *the* date.
-  if (/[–—]|\s-\s|\d{4}\s*[-–—/]\s*\d{4}/.test(value)) return undefined;
+  if (/[–—]|\s-\s|\d{4}\s*[-–—/]\s*\d{4}/.test(trimmed)) return undefined;
+
+  const value = singleCalendar(trimmed);
 
   const iso = /^(\d{4})[-.](\d{1,2})[-.](\d{1,2})$/.exec(value);
   if (iso) return assemble(iso[3], iso[2], iso[1]);
@@ -128,6 +130,36 @@ export function parseDate(raw: string): ParsedDate | undefined {
   if (year) return assemble(undefined, undefined, year[1]);
 
   return undefined;
+}
+
+/**
+ * The same day, printed twice.
+ *
+ * Russian reference writing dates the nineteenth century in both calendars, and
+ * this corpus does it in two shapes: `11(23).12.1818` puts the New Style day in
+ * brackets, and `24.12.1884 / 05.01.1885` writes the alternative out in full.
+ * Neither parses, so `aleksandrov` published **no dates at all** while the
+ * article states both his birth and his death — a fact lost to a punctuation
+ * convention, which is exactly what "wide on input" exists to prevent. The
+ * first form printed is the one kept: the article leads with it, and choosing
+ * it is reading rather than guessing.
+ *
+ * A genuine range is a different claim and must still be refused. A dash is
+ * already rejected before this runs; a slash survives it only when both sides
+ * are full dates within a fortnight of each other, which a range never is.
+ */
+function singleCalendar(value: string): string {
+  const bracketed = value.replace(/(\d{1,2})\s*[([]\s*\d{1,2}\s*[)\]]/g, '$1');
+
+  const alternates = /^(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})\s*[/(]\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})\)?$/.exec(bracketed);
+  if (!alternates) return bracketed;
+
+  const [first, second] = [alternates[1], alternates[2]].map((part) => {
+    const [day, month, year] = (part ?? '').split(/[.\-/]/).map(Number);
+    return Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1);
+  });
+  const apart = Math.abs((first ?? 0) - (second ?? 0)) / 86_400_000;
+  return apart <= 15 ? (alternates[1] ?? bracketed) : bracketed;
 }
 
 /** Grammar glue between the parts of a spelled-out date, in the corpus languages. */

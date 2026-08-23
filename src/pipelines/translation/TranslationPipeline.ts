@@ -9,7 +9,7 @@ import {
   type TaskSeed,
   type WorkItem,
 } from '../../core/types.js';
-import { applyTextSpans, extractTextSpans, missingMasks, type TextSpan } from '../../documents/markdown/textSpans.js';
+import { applyTextSpans, displacedMasks, extractTextSpans, missingMasks, type TextSpan } from '../../documents/markdown/textSpans.js';
 import { readTitle } from '../../documents/markdown/title.js';
 import { languageName } from '../../domain/vocabulary.js';
 import type { DocumentSegment } from '../../documents/types.js';
@@ -66,6 +66,7 @@ export class TranslationPipeline implements DocumentPipeline {
         // Both change what a correct output looks like, so both belong in the
         // fingerprint: turning either on or off must re-translate the corpus.
         foreignFragments: config.foreignFragments,
+        fencedBlocks: config.fencedBlocks,
         contextChars: config.contextChars,
         promptVariables: config.promptVariables,
       },
@@ -150,7 +151,7 @@ export class TranslationPipeline implements DocumentPipeline {
     targetLang: string,
     config: TranslateTaskConfig,
   ): Promise<Outcome> {
-    const spans = extractTextSpans(document.content);
+    const spans = extractTextSpans(document.content, { fencedBlocks: config.fencedBlocks });
     if (spans.length === 0) {
       return {
         markdown: document.content,
@@ -192,10 +193,15 @@ export class TranslationPipeline implements DocumentPipeline {
         targetLanguageName: languageName(targetLang),
         count: part.length,
       }),
-      // A dropped mask token means a lost URL — catch it while a retry is cheap.
+      // A dropped mask token means a lost URL, and a *displaced* one means a
+      // lost link — catch both while a retry is still one fragment cheap.
       verify: (unit, translation) => {
         const missing = missingMasks(unit.text, translation);
-        return missing.length > 0 ? `placeholder(s) ${missing.join(', ')} were not preserved` : undefined;
+        if (missing.length > 0) return `placeholder(s) ${missing.join(', ')} were not preserved`;
+        const displaced = displacedMasks(unit.text, translation);
+        return displaced.length > 0
+          ? `placeholder(s) ${displaced.join(', ')} are no longer the target of a link — keep "](" and the token together`
+          : undefined;
       },
     });
 

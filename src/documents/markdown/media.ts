@@ -1,5 +1,6 @@
 import { isAudioTarget, isImageTarget, isOpaque, targetExtension } from '../../domain/values.js';
 import type { MediaItem } from '../../domain/types.js';
+import { imagePattern, linkPattern } from './inline.js';
 
 /**
  * The gallery, read straight out of the article.
@@ -57,8 +58,7 @@ const FENCE = /^\s*(`{3,}|~{3,})/;
 const CONTAINER_OPEN = /^\s*:::\s*(\S+)\s*$/;
 const CONTAINER_CLOSE = /^\s*:::\s*$/;
 const ATTRIBUTE = /^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/;
-const INLINE_IMAGE = /!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
-const LINK = /(?<!!)\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
+
 
 export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT_HARVEST): HarvestResult {
   const photos = new Collector(options.maxItems);
@@ -108,7 +108,7 @@ export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT
     }
 
     if (options.photos) {
-      for (const match of line.matchAll(INLINE_IMAGE)) {
+      for (const match of line.matchAll(imagePattern())) {
         sawImage(match[2] ?? '');
         photos.add(match[1] ?? '', match[2] ?? '');
       }
@@ -159,7 +159,7 @@ function collectAudioLinks(line: string, music: Collector): void {
   const row = tableCells(line);
   const title = row ? stripMarkdown(row[0] ?? '') : '';
 
-  for (const match of line.matchAll(LINK)) {
+  for (const match of line.matchAll(linkPattern())) {
     const label = (match[1] ?? '').trim();
     const target = match[2] ?? '';
     if (!isPlayable(target)) continue;
@@ -185,7 +185,7 @@ function tableCells(line: string): string[] | undefined {
 /** Emphasis, links and escapes removed — a label is plain text, never markup. */
 function stripMarkdown(value: string): string {
   return value
-    .replace(LINK, '$1')
+    .replace(linkPattern(), '$1')
     .replace(/[*_`]/g, '')
     .replace(/\\([[\]])/g, '$1')
     .replace(/\s+/g, ' ')

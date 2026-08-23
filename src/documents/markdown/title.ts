@@ -1,3 +1,5 @@
+import { labelledPattern } from './inline.js';
+
 /**
  * What the article calls itself, and what it says first.
  *
@@ -129,7 +131,7 @@ function firstParagraph(lines: readonly string[]): string {
  */
 export function strip(text: string): string {
   return text
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(labelledPattern(), '$1')
     .replace(/[*_~=`]+/g, '')
     .replace(/\\$/, '')
     .replace(/\s+/g, ' ')

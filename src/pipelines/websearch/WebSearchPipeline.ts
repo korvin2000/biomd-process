@@ -445,28 +445,33 @@ export class WebSearchPipeline implements DocumentPipeline {
   }
 
   /**
-   * The death-date gate.
+   * The death gate.
    *
-   * A date of death is only written when the answer *states* the person has
-   * died. `alive` and `unknown` both mean no date, and they mean it for
-   * different reasons worth recording separately.
+   * A date **or a place** of death is only written when the answer *states* the
+   * person has died. `alive` and `unknown` both mean neither, and they mean it
+   * for different reasons worth recording separately.
+   *
+   * `deathplace` belongs here as much as `died` does: it is the same claim in
+   * another field, and a model that would not assert a date of death for a
+   * living guitarist will happily name the town.
    */
   private filterLiveness(answer: WebAnswer, gaps: GapAnalysis, notes: string[]): WebValue[] {
     if (!gaps.checkLiveness) return answer.values;
+    const isDeath = (value: WebValue): boolean => value.field === 'died' || value.field === 'deathplace';
 
     if (answer.status === 'alive') {
-      notes.push('The search reports this person is still living; no date of death recorded.');
-      return answer.values.filter((value) => value.field !== 'died');
+      notes.push('The search reports this person is still living; no date or place of death recorded.');
+      return answer.values.filter((value) => !isDeath(value));
     }
     if (answer.status !== 'dead') {
-      const died = answer.values.find((value) => value.field === 'died');
-      if (died) {
+      const claimed = answer.values.filter(isDeath);
+      if (claimed.length > 0) {
         notes.push(
-          `Ignored a date of death ("${died.value}") that came without an explicit "dead" status — ` +
-            'silence about a living person must not become a date.',
+          `Ignored ${claimed.map((value) => `${value.field} ("${value.value}")`).join(' and ')} — the answer ` +
+            'never said this person has died, and silence about a living person must not become a death.',
         );
       }
-      return answer.values.filter((value) => value.field !== 'died');
+      return answer.values.filter((value) => !isDeath(value));
     }
     return answer.values;
   }

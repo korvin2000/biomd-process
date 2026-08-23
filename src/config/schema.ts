@@ -576,6 +576,23 @@ export const translateTaskSchema = taskBase
      */
     foreignFragments: z.enum(['keep', 'translate']).default('keep'),
     /**
+     * What a ``` fence contains.
+     *
+     * The pipeline used to answer "code" and skip it, which is right for a
+     * program and wrong for this corpus: a bare fence is how these articles set
+     * *verse*. On `garcia_lorca.bio.md` that left 44% of the Russian text
+     * untranslated, silently — the structure guard ignores fenced content, so
+     * the article passed every check with half of it still in Russian.
+     *
+     *   auto  (default) classify each block by what is in it: an info string
+     *         naming a language, tablature and ASCII rules are code; lines of
+     *         words are verse, translated one span per line so the shape of the
+     *         poem is preserved by the splice rather than by the model
+     *   code  never translate a fence (the behaviour before this setting)
+     *   text  always translate one
+     */
+    fencedBlocks: z.enum(['auto', 'code', 'text']).default('auto'),
+    /**
      * Characters of the article's title and lead sent with each batch, so the
      * fragments arrive with a subject. `0` sends nothing.
      *

@@ -150,3 +150,8 @@ biomd.config.yaml.lastworking
 # scratch space for prompt A/B runs and one-off checks
 .scratch/
 out-*/
+translation/examples/
+translation/IMPROVE_SUGGESTIONS.md
+configs/good/
+configs/obsolete/
+docs/findings.md

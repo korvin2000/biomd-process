@@ -1,4 +1,19 @@
-export type SpanKind = 'heading' | 'paragraph' | 'listItem' | 'quote' | 'tableCell' | 'attribute';
+import { classifyFence } from './fences.js';
+import { linkTargetPattern } from './inline.js';
+
+export type SpanKind = 'heading' | 'paragraph' | 'listItem' | 'quote' | 'tableCell' | 'attribute' | 'verse';
+
+/** What to do with the contents of a fenced block. */
+export type FencePolicy = 'auto' | 'code' | 'text';
+
+export interface SpanOptions {
+  /**
+   * `auto` (default) classifies each fence by what is in it; `code` restores
+   * the old behaviour of never translating a fence; `text` translates every
+   * one. See {@link classifyFence} for why the default is not `code`.
+   */
+  fencedBlocks?: FencePolicy;
+}
 
 export interface TextSpan {
   /** Absolute character offsets into the source document. */
@@ -38,17 +53,19 @@ const QUOTE = /^(\s*>\s?)(.*\S)\s*$/;
 const TABLE_ROW = /^\s*\|.*\|\s*$/;
 const TABLE_DIVIDER = /^\s*\|[\s:|-]+\|\s*$/;
 const ATTRIBUTE = /^(\s*([A-Za-z][\w-]*)\s*:\s*)(\S.*?)\s*$/;
-/** `[text](target)` and `![alt](target)` — only the target is masked. */
-const LINK_TARGET = /(!?\[[^\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))/g;
 
 /** Container attributes whose value is displayed text rather than syntax. */
 const PROSE_ATTRIBUTES = new Set(['caption', 'title', 'alt', 'label', 'text']);
 
-export function extractTextSpans(markdown: string): TextSpan[] {
+export function extractTextSpans(markdown: string, options: SpanOptions = {}): TextSpan[] {
+  const policy = options.fencedBlocks ?? 'auto';
   const spans: TextSpan[] = [];
   const lines = markdown.split('\n');
   let offset = 0;
   let fenceMarker: string | undefined;
+  let fenceInfo = '';
+  /** The open fence's lines, held until its closing marker settles what it is. */
+  let fenced: Array<{ line: string; start: number }> = [];
 
   for (const line of lines) {
     const lineStart = offset;
@@ -57,12 +74,24 @@ export function extractTextSpans(markdown: string): TextSpan[] {
     const fence = FENCE.exec(line);
     if (fence) {
       const marker = fence[1] ?? '';
-      if (fenceMarker === undefined) fenceMarker = marker;
-      else if (marker.startsWith(fenceMarker[0] ?? '`')) fenceMarker = undefined;
+      if (fenceMarker === undefined) {
+        fenceMarker = marker;
+        fenceInfo = line.trim().slice(marker.length);
+        fenced = [];
+      } else if (marker.startsWith(fenceMarker[0] ?? '`')) {
+        spans.push(...fenceSpans(fenceInfo, fenced, policy));
+        fenceMarker = undefined;
+        fenceInfo = '';
+        fenced = [];
+      }
       continue;
     }
-    // Code is not prose: never sent, never touched.
-    if (fenceMarker !== undefined) continue;
+    // A fence's lines are held rather than skipped: whether they are code or a
+    // poem is not knowable until the block has been read whole.
+    if (fenceMarker !== undefined) {
+      fenced.push({ line, start: lineStart });
+      continue;
+    }
     if (line.trim() === '' || CONTAINER.test(line) || RULE.test(line)) continue;
 
     const span = spanOf(line, lineStart);
@@ -70,6 +99,32 @@ export function extractTextSpans(markdown: string): TextSpan[] {
     else if (TABLE_ROW.test(line) && !TABLE_DIVIDER.test(line)) spans.push(...tableCells(line, lineStart));
   }
 
+  // A fence left open at end of file was never a block; treat it as prose lines.
+  if (fenceMarker !== undefined) spans.push(...fenceSpans(fenceInfo, fenced, policy));
+  return spans;
+}
+
+/**
+ * The translatable lines of one fenced block, or none if it holds code.
+ *
+ * Verse is translated **line for line**: one source line is one span, so the
+ * splice puts every translation back on its own line and the poem's shape —
+ * which is half of what a poem is — survives without the model being asked to
+ * preserve it. A blank line inside a stanza is structure, not text, and is
+ * never sent.
+ */
+function fenceSpans(info: string, fenced: readonly { line: string; start: number }[], policy: FencePolicy): TextSpan[] {
+  if (policy === 'code') return [];
+  if (policy === 'auto' && classifyFence(info, fenced.map((entry) => entry.line)) === 'code') return [];
+
+  const spans: TextSpan[] = [];
+  for (const { line, start } of fenced) {
+    if (line.trim() === '') continue;
+    const trimmed = line.replace(/\s+$/, '');
+    const leading = trimmed.length - trimmed.trimStart().length;
+    const text = trimmed.slice(leading);
+    if (text) spans.push(makeSpan(trimmed.slice(0, leading), text, start, 'verse'));
+  }
   return spans;
 }
 
@@ -104,6 +159,29 @@ export function maskTokens(text: string): string[] {
  */
 export function missingMasks(text: string, translation: string): string[] {
   return maskTokens(text).filter((token) => !translation.includes(token));
+}
+
+/** A mask sitting where it belongs: as the target of the link it was lifted from. */
+const MASK_IN_TARGET = /\]\(\s*(⟦\d+⟧)(?:\s+"[^"]*")?\s*\)/g;
+
+/**
+ * Tokens that survived but stopped being a link.
+ *
+ * A mask is only ever created *inside* `[label](target)`, so in the translation
+ * it must still be a target. Present-but-displaced is a distinct failure from
+ * missing, and it is the one a model actually makes: asked to gloss a title
+ * that happens to be a link's label, `gemma4-31b-local` answered
+ * `["Istoriya gitary v litsakh"] (History of the Guitar in Faces) (⟦1⟧)` —
+ * every character accounted for, the token present, and the link destroyed. The
+ * URL came back as loose parentheses in the middle of a sentence.
+ *
+ * Checking it here is what makes the failure *repairable*: the batch re-asks
+ * for that one fragment instead of the document failing its structure guard
+ * after every call has been paid for.
+ */
+export function displacedMasks(text: string, translation: string): string[] {
+  const anchored = new Set([...translation.matchAll(MASK_IN_TARGET)].map((match) => match[1]));
+  return maskTokens(text).filter((token) => translation.includes(token) && !anchored.has(token));
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +248,7 @@ function maskSpan(text: string, start: number, kind: SpanKind): TextSpan {
   const masks = new Map<string, string>();
   let index = 0;
 
-  const masked = text.replace(LINK_TARGET, (_match, open: string, target: string, close: string) => {
+  const masked = text.replace(linkTargetPattern(), (_match, open: string, target: string, close: string) => {
     index += 1;
     const token = `⟦${index}⟧`;
     masks.set(token, target);

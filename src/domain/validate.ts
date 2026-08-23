@@ -104,6 +104,13 @@ function checkIndex(file: LoadedFile, supported: readonly string[], add: Emit): 
   const where = 'index.json';
   checkJsonHygiene(file, where, add);
 
+  // `CatalogueReader` represents an absent index as `{ value: undefined }`, and
+  // "root value is not an array" is a confusing way to say "there is no file" —
+  // it sends a reader looking for a malformed document that does not exist.
+  if (file.value === undefined) {
+    add('error', 'SCHEMA', where, 'No index.json in this directory — run the `catalog` task to build one.');
+    return [];
+  }
   if (!Array.isArray(file.value)) {
     add('error', 'SCHEMA', where, 'Root value is not an array — the catalogue cannot be built.');
     return [];

@@ -31,6 +31,29 @@ describe('gap analysis', () => {
     expect(gaps.checkLiveness).toBe(false);
   });
 
+  it('does not ask where a living person died', () => {
+    // Roberto Aussel, born 1954 and playing: asked anyway, `or-osearch`
+    // answered "Сен-Эрблен, Франция" at confidence 0.95 and it was published.
+    const living: Dossier = { metadata: { dates: { born: '13.07.1954' } } };
+    const gaps = findGaps(living, OPTIONS);
+
+    expect(gaps.questions.map((question) => question.field)).not.toContain('deathplace');
+    expect(gaps.questions.map((question) => question.field)).not.toContain('died');
+    expect(gaps.checkLiveness).toBe(false);
+  });
+
+  it('asks where someone died once there is reason to think they have', () => {
+    const recorded: Dossier = { metadata: { dates: { born: '1893', died: '02.06.1987' } } };
+    expect(findGaps(recorded, OPTIONS).questions.map((q) => q.field)).toContain('deathplace');
+
+    // Old enough that the article's silence is no longer evidence: both the
+    // date and the place are asked, and `filterLiveness` gates both answers.
+    const old: Dossier = { metadata: { dates: { born: '1900' } } };
+    const gaps = findGaps(old, OPTIONS);
+    expect(gaps.checkLiveness).toBe(true);
+    expect(gaps.questions.map((q) => q.field)).toEqual(expect.arrayContaining(['died', 'deathplace']));
+  });
+
   it('asks a collective nothing personal', () => {
     // A quartet has no date of birth, and a search model asked for one answers
     // it — with the founding year, or a member's.

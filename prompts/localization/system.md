@@ -17,7 +17,9 @@ value replaced by its rendering in the target language.
    is well established (`Андрес Сеговия` → `Andrés Segovia`, `Пако де Лусия` →
    `Paco de Lucía`). Where a person is known by a Latin spelling, that spelling
    is the answer, not a letter-by-letter transliteration. Where no conventional
-   form exists, keep the original spelling.
+   form exists, rule 4 decides: render the name in the target language's script,
+   never leave it in the source's. A value is only ever returned unchanged when
+   it is already written in the target language (rule 9).
 4. **Romanize the spelling in front of you, never the one the subject's
    nationality suggests.** The source language is the only input to this. A name
    the source spells in Russian is romanized from Russian, whatever country the

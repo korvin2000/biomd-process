@@ -28,7 +28,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "node -e \"0\""
+    "prepare": "node -e \"0\"",
+    "score": "tsx tools/score-translations.ts"
   },
   "dependencies": {
     "cli-progress": "^3.12.0",

@@ -85,7 +85,7 @@ export class OpenAiCompatibleClient implements LlmClient {
       user: request.correlationId,
     });
 
-    const responseFormat = toWireResponseFormat(request.responseFormat);
+    const responseFormat = toWireResponseFormat(request.responseFormat, target);
     if (responseFormat) body['response_format'] = responseFormat;
 
     Object.assign(body, reasoningFields(target), params.extra ?? {}, target.params.extra ?? {});
@@ -97,10 +97,30 @@ function toWireMessage(message: ChatMessage): { role: string; content: string } 
   return { role: message.role, content: message.content };
 }
 
-function toWireResponseFormat(format: ResponseFormat | undefined): Record<string, unknown> | undefined {
+/**
+ * `response_format`, but only for a target that says it understands one.
+ *
+ * The capability list used to be advisory here: every request carried its
+ * `response_format` to every target, whatever the target declared. A provider
+ * that merely ignores an unknown field survives that; one that rejects it does
+ * not, and `openai/gpt-5.6-luna:online` answers **"Web Search cannot be used
+ * with JSON mode"** — a 400 on every call. That target is the paid fallback of
+ * the `websearch` pool, and `websearch` sends `json_object` on every request,
+ * so it failed 100% of the time while looking like an ordinary provider error.
+ *
+ * Dropping the field is the right degradation rather than a workaround: JSON
+ * mode is a belt on top of a prompt that already says "JSON only", and every
+ * parser in this repo strips a code fence before reading. A model that cannot
+ * be *told* to answer JSON still answers JSON when asked; a model that 400s is
+ * simply not in the pool.
+ */
+export function toWireResponseFormat(format: ResponseFormat | undefined, target: ModelTarget): Record<string, unknown> | undefined {
   if (!format) return undefined;
   if (format.type === 'text') return undefined;
-  if (format.type === 'json_object') return { type: 'json_object' };
+  if (format.type === 'json_object') {
+    return target.capabilities.includes('json_object') ? { type: 'json_object' } : undefined;
+  }
+  if (!target.capabilities.includes('json_schema')) return undefined;
   return {
     type: 'json_schema',
     json_schema: { name: format.name, schema: format.schema, strict: format.strict ?? true },

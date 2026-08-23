@@ -101,3 +101,9 @@ follows.
 Which is also the rule for editing these files: anything document-specific in a
 template — a filename, a counter, a timestamp — silently costs the whole corpus
 its cache.
+
+`translateSegments` and `localize` do still receive `count`, and it earns its
+place: telling the model how many values it owes is what stops a batch coming
+back one key short. But it is a counter, so it goes in the **last** line rather
+than the first — every batch of the corpus then shares an identical prefix up to
+it, which is the whole of what the cache needs.

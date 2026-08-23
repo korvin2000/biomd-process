@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { applyTextSpans, extractTextSpans, missingMasks } from '../src/documents/markdown/textSpans.js';
+import { applyTextSpans, displacedMasks, extractTextSpans, missingMasks } from '../src/documents/markdown/textSpans.js';
 import { applyUnits, collectUnits, keyOf, type LocalizationOptions } from '../src/pipelines/localization/StringTable.js';
 import { TranslationMemory } from '../src/pipelines/localization/TranslationMemory.js';
 import { appConfigSchema } from '../src/config/schema.js';
@@ -110,6 +110,17 @@ describe('markdown text spans', () => {
     expect(missingMasks(link.text, '[Official biography](⟦1⟧)')).toEqual([]);
   });
 
+  it('reports a placeholder that survived but stopped being a link', () => {
+    const link = spans.find((span) => span.text.includes('Официальная биография'))!;
+    // What `gemma4-31b-local` actually returned when asked to gloss a title
+    // that was also a link label: nothing lost, and no link left either.
+    expect(displacedMasks(link.text, '["Ofitsialnaya biografiya"] (Official biography) (⟦1⟧)')).toEqual(['⟦1⟧']);
+    expect(displacedMasks(link.text, '[Official biography](⟦1⟧)')).toEqual([]);
+    expect(displacedMasks(link.text, '[Official biography](⟦1⟧ "title")')).toEqual([]);
+    // Missing is a different verdict from displaced, and only one applies.
+    expect(displacedMasks(link.text, '[Official biography]()')).toEqual([]);
+  });
+
   it('extracts table cells but not the divider row', () => {
     const cells = spans.filter((span) => span.kind === 'tableCell').map((span) => span.text);
     expect(cells).toContain('Альбом');
@@ -117,7 +128,37 @@ describe('markdown text spans', () => {
   });
 
   it('collapses to nothing for a document with no prose', () => {
-    expect(extractTextSpans('```\ncode only\n```\n')).toEqual([]);
+    expect(extractTextSpans('```js\nconst a = 1;\n```\n')).toEqual([]);
+  });
+
+  describe('fenced blocks', () => {
+    const POEM = '```\nКогда умру,\nСхороните меня с гитарой\n\nВ речном песке.\n```\n';
+
+    it('translates a bare fence holding verse, one span per line', () => {
+      const spans = extractTextSpans(POEM);
+      expect(spans.map((span) => span.text)).toEqual(['Когда умру,', 'Схороните меня с гитарой', 'В речном песке.']);
+      expect(spans.every((span) => span.kind === 'verse')).toBe(true);
+    });
+
+    it('puts a translated poem back line for line', () => {
+      const spans = extractTextSpans(POEM);
+      const translated = new Map(spans.map((span, index) => [span.text, `line ${index + 1}`]));
+      expect(applyTextSpans(POEM, spans, translated)).toBe('```\nline 1\nline 2\n\nline 3\n```\n');
+    });
+
+    it('leaves a fence alone when its info string names a language', () => {
+      expect(extractTextSpans('```python\nprint("Когда умру")\n```\n')).toEqual([]);
+    });
+
+    it('leaves tablature alone', () => {
+      const tab = '```\ne|---0---2---3---|\nB|---1---3---0---|\nG|---0---2---0---|\n```\n';
+      expect(extractTextSpans(tab)).toEqual([]);
+    });
+
+    it('honours an explicit policy in both directions', () => {
+      expect(extractTextSpans(POEM, { fencedBlocks: 'code' })).toEqual([]);
+      expect(extractTextSpans('```js\nconst a = 1;\n```\n', { fencedBlocks: 'text' })).toHaveLength(1);
+    });
   });
 });
 

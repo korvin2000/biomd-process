@@ -9,6 +9,8 @@
  * TODO(domain): footnote ids, once the corpus has any.
  */
 
+import { imagePattern, linkPattern } from './inline.js';
+
 const FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
 const CONTAINER = /^\s*:::\s*(\S*)\s*$/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
@@ -18,8 +20,6 @@ const UNORDERED = /^\s*[-*+]\s+/;
 const ORDERED = /^\s*\d+[.)]\s+/;
 const BLOCKQUOTE = /^\s*>\s?/;
 const TABLE_ROW = /^\s*\|.*\|\s*$/;
-const IMAGE = /!\[[^\]]*\]\(([^)\s]+)/g;
-const LINK = /(?<!!)\[[^\]]*\]\(([^)\s]+)/g;
 
 export interface SkeletonComparison {
   ok: boolean;
@@ -151,8 +151,8 @@ function collapse(tokens: readonly string[], mode: SkeletonMode): string[] {
 
 /** Targets of links and images must survive translation byte for byte. */
 function pushInline(tokens: string[], text: string): void {
-  for (const match of text.matchAll(IMAGE)) tokens.push(`img:${match[1]}`);
-  for (const match of text.matchAll(LINK)) tokens.push(`link:${match[1]}`);
+  for (const match of text.matchAll(imagePattern())) tokens.push(`img:${match[2]}`);
+  for (const match of text.matchAll(linkPattern())) tokens.push(`link:${match[2]}`);
 }
 
 const SYNTAX_KEYS = new Set(['src', 'position', 'size', 'align', 'width', 'height', 'target', 'type', 'id']);

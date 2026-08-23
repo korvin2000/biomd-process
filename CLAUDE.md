@@ -49,6 +49,17 @@ npx vitest run tests/catalog.test.ts -t "keeps the id an entry already had"
 
 There is no lint script or ESLint/Prettier config in this repo — `typecheck` + `test` are the whole gate.
 
+The translation regression suite is model-free and separate from `vitest`:
+
+```bash
+npm run score -- input/ru out          # compare a translated corpus against its source
+```
+
+It reports the invariants a structure guard cannot see — source-script text left
+in the prose, a substituted dash, punctuation pulled inside a quotation mark, a
+Latin title the translation replaced — and is what any prompt change should be
+measured against before and after.
+
 In development the CLI (`src/cli/main.ts`, bin name `biomd`) always runs through `tsx` via `npm run biomd -- <args>`; the built `dist/cli/main.js` (after `npm run build`) is what `bin.biomd` in `package.json` points at.
 
 Other CLI commands (all accept `-c/--config <file>`):
@@ -137,6 +148,29 @@ One transport (`src/llm/OpenAiCompatibleClient.ts`) covers every OpenAI-compatib
 
    Two related traps: a bad rendering is cached by `useTranslationMemory: persistent` and will be re-served verbatim until the prompt version changes (which is what namespaces the cache, so editing the prompt does start a fresh one — the stale file just lingers in `run.memoryDir`); and **a template must name a language once.** `<%= it.sourceLanguageName || it.sourceLanguage %>` is an Eta fallback that can never fire, because `languageName()` already falls back to the code — but it *reads* like two languages being offered, in a file whose entire job is to be unambiguous.
 
+   **A fenced block is not evidence of code.** These articles set poems and song
+   lyrics in a bare ``` fence, and `extractTextSpans` skipped every fence on the
+   assumption that fencing meant machinery. On `garcia_lorca.bio.md` that left
+   **44% of the Russian text untranslated** and nothing noticed: the skeleton
+   guard ignores fenced content, so the article passed every check with half of
+   it still in Russian. `src/documents/markdown/fences.ts` now classifies each
+   block — an info string naming a language, tablature and ASCII rules are code;
+   lines of words are verse — and verse is lifted **one span per line**, so the
+   poem's shape is restored by the splice rather than asked of the model.
+   `tasks.translate.fencedBlocks: code` restores the old behaviour.
+
+   **One definition of a link, or the masker and the guard disagree**
+   (`src/documents/markdown/inline.ts`). Five modules carried their own copy of
+   `\[[^\]]*\]\(…\)`, and the copies agreed until a label contained an
+   escaped bracket. `[\[ \* \]](#1)` — this corpus's footnote marker — is a
+   link that none of them matched, with asymmetric consequences: `textSpans` did
+   not mask its target, so the anchor was *sent to the model* in the one mode
+   whose premise is that a URL never reaches one; and `skeleton` did not count
+   it, so the source had no link there while the translation, where the model
+   had simplified the label to `[\*]`, did. One extra structural token, and
+   `albert → en` failed the strict guard and published no English edition at
+   all. The pattern lives in one file now, and reads an escape as one unit.
+
    **What the batch loses in context, it gets back in two lines** (`tasks.translate.contextChars`, 300 by default). Twenty fragments lifted out of their article are twenty sentences with no subject; the article's title and the opening of its lead tell the model it is translating a biography of a flamenco guitarist rather than a company report. It rides in the *volatile* half of the message, after the rendered instructions, so mechanism 1 is untouched — the cache prefix is the same for every document in the corpus.
 4. **Repair the gap, not the batch** (`callBatch` in `src/pipelines/shared/stringBatch.ts`). One missing key used to reject the whole `{hash: text}` table and re-send all of it — two identical billed calls for one dropped fragment. The first call now accepts a *partial* answer and only the missing/malformed keys are re-asked; the **last** repair round is strict, so a surviving gap still becomes a validation failure with the usual retry-then-stronger-model treatment, on a payload of the few keys that need it. `tasks.*.repairAttempts: 0` restores all-or-nothing. A response that is unusable as a whole (no JSON, not an object) skips the ladder — re-asking per key cannot repair it. Fragments with no letters are never sent at all.
 
@@ -154,6 +188,14 @@ One transport (`src/llm/OpenAiCompatibleClient.ts`) covers every OpenAI-compatib
 Every run writes `.biomd/runs/<runId>/`: `run.json` (manifest), `events.jsonl` (append-only — every request/retry/fallback/error/artifact write, plus each task's **notes**), `state.json` (checkpoint, fingerprint → status). `--resume`/`--resume-run` replays the checkpoint and skips completed fingerprints; `biomd report [runId]` reads the manifest + checkpoint back afterwards. **Only `resume` and `existing-output` count as done** (`isTaskDone`, `src/state/types.ts`) — those are the planner's two reasons and both say the output exists. Everything the orchestrator *retires* (`dependency-failed`, `run stopped`, `aborted`) describes a task that never ran, and counting it as done made the next resume skip it forever: one failed translation produced a catalogue that could never be built again, because the run that would have fixed it quietly declined to try. Add a skip reason to the whitelist only if it means the artifact is on disk. `.biomd/`, `out/` and `dist/` are all git-ignored.
 
 **A merge's output file is not evidence that the merge happened.** `run.skipExistingOutputs` reads a file's existence as "this work is done", which is right for a translation and exactly wrong for a task that *updates* what is already there: `catalog` reads `index.json` and writes it back, and `websearch` completes the dossier `extract` just wrote, so both declare an output that exists from the end of the first run onwards. Both were therefore skipped for ever — a catalogue that could never pick up a new article and a web search that ran once per corpus. Neither failed; they simply stopped happening, which is the worst way for a batch tool to be wrong. `TaskSeed.mergesOutput` marks them, and the planner leaves the fingerprint comparison (a claim about the *work*) to do the real deduplication. `--no-skip-existing` is the manual override for everything else.
+
+**Three ways a target can be declared and not work, all found on one afternoon.** The pool is a fallback chain, so each of these looked like an ordinary run:
+
+- **A gateway that coalesces concurrent requests.** The `omniroute` endpoint answers three requests issued in the same millisecond with **one** response — the first one's, byte for byte — whatever the other two asked. The minimal proof is four concurrent one-line questions with different answers: *Madrid → Spain, Paris → Spain, Rome → Spain, Tokyo → Spain.* OpenRouter answers the same four independently, so the fault is the gateway rather than the models or the transport. Measured with `websearch` at concurrency 3: Aguado's date of death and his Spanish Wikipedia URL were written into Anido's and Amigo's dossiers, at confidence 0.98, citing a page about the wrong man. Nothing downstream can catch that — the value is well-formed, sourced, and about a real guitarist — and `onDateConflict: prefer-precise` will let it *overwrite* a correct coarser date. `maxConcurrent: 1` on the endpoint is the fix, and it is a correctness setting, not a throughput one.
+- **A `response_format` the provider refuses.** `openai/gpt-5.6-luna:online` answers `400 Web Search cannot be used with JSON mode`, and `websearch` sends `json_object` on every call, so the pool's paid fallback failed 100% of the time. The transport now sends `response_format` only to a target that **declares** the matching capability (`json_object` / `json_schema`), which turns the capability list from documentation into behaviour: take `json_object` off `or-osearch` and it works, answering JSON because the prompt asks for it and every parser here strips a fence anyway.
+- **A model that answers a question it cannot research.** `google/gemini-3.7-flash` has no web search. Asked for Gérard Abiton's date of birth it returned `18.06.1954`, confidence 0.95, sourced to a `data.bnf.fr` URL that resolves to a record for somebody else and carries no date at all, while French Wikipedia states only the year. In the same twelve-document test it "found" more fields than any real search model, because inventing is faster than searching. `requireWebSearchCapability` prevents exactly this and is only as good as the capability list; keeping `web_search` off that entry is the whole defence.
+
+**A question nobody should be asked.** `findGaps` asked for `deathplace` whenever the field was empty — which is every living guitarist in the corpus. "Where did Roberto Aussel die?" is a question a search model answers (`Сен-Эрблен, Франция`, confidence 0.95), and the answer was published into the dossier of a man who is alive. `died` had a liveness gate from the start; `deathplace` is the same claim in another field and now shares it, on both sides: it is not asked unless a death is on record or the liveness check is running, and `filterLiveness` drops it along with `died` when the answer does not explicitly say `dead`.
 
 **Silence is a failure mode, and the reliability layer is built out of silence.** A pool is a fallback chain and its whole point is that one target dying is survivable — which also means a first choice that never works is invisible: the run completes, every document is produced, and the only trace is the bill from the model that was supposed to be the backup. That is exactly what happened on a real run here: `or-search` answered `404 No active credentials` eight times, the circuit opened, and the remaining 37 web searches went to the paid `or-osearch` without one line saying so. Three things now make it audible, and none of them changes what the run does:
 
@@ -176,6 +218,17 @@ Two sections sit at the root rather than under a task, for the same reason: seve
 ## Prompts
 
 `prompts/<task>/{system.md,user.md}` (Eta templates — see [prompts/README.md](prompts/README.md)), mapped by `prompts.templates` in config so a directory can be renamed without touching code. Both files hash into `promptVersion`, which feeds the task fingerprint, so editing a template is a tracked change that correctly invalidates already-completed work. `translateSegments`/`localize` templates answer a `{hash: text}` table and must return exactly the same keys; instructions that invite merging, splitting or reordering fragments will surface as validation failures and retries.
+
+**Names and titles: the four rules, in precedence order.** This is the part of the translation prompts that had to be got right rather than merely stated, because the corpus contains every combination and the wrong rule quietly destroys a fact.
+
+1. **A name or title already printed in another language is that name.** These discographies are bilingual — `"Craft Of Emptiness" (Магия Пустоты)` gives the released title first and a Russian gloss after it. Keep the printed form and translate the bracket. A rule that said only "romanize a source-script title" produced `"Magiya Pustoty. Muzikal'naya Meditatsiya" (Magic of Emptiness…)` and threw the album's real name away — on eleven of `krylov`'s thirteen records.
+2. **A personal or place name is rendered, never translated**, from the source spelling and never from the subject's nationality (this is the existing `Александр` → `Alexander`, not `Oleksandr` rule).
+3. **A title that appears only in the source script is romanized and glossed once**: `"Загадки на святки"` → `"Zagadki na svyatki" (Riddles for the Yuletide)`. This is ordinary bibliographic practice (CMOS 11.9) and it is what the reader needs: the romanized form is what a search finds, the gloss is what a reader understands. It applies to an ensemble too — `"Консонанс"` → `"Konsonans" (Consonance)` — and *not* to a name that merely describes, where "the state philharmonic" is words rather than a title.
+4. **The gloss never nests and never splits a link.** `["Название"](⟦1⟧)` → `["Nazvanie"](⟦1⟧) (The Title)`, because `[label] (gloss) (⟦1⟧)` is what a model does otherwise — every character preserved, the mask token present, and the link destroyed. `displacedMasks` catches that deterministically (`src/documents/markdown/textSpans.ts`), so it becomes one repaired fragment instead of a failed document.
+
+**Punctuation is a mark, not a style.** `«Золотые гитары мира», проходившем` becomes `"Golden Guitars of the World", held` — the comma stands where the source put it. Saying only "use the target language's punctuation" invites the American convention of pulling the comma inside the quote, which is a different sentence. The same rule keeps `–` from becoming `—`: measured over thirteen articles, stating it explicitly cut dash substitutions from 97 to 35.
+
+**What the prompt is *not* for.** The poems in `garcia_lorca.bio.md` are translated equally well by every prompt version tested, because getting them translated at all was a span-extraction fix. Before assuming a translation defect is a prompt defect, check whether the text reached the model: `extractTextSpans` plus a Cyrillic count over the result answers that for nothing.
 
 ## The domain layer — `src/domain`
 
@@ -202,6 +255,10 @@ Two behaviours that follow, and that are easy to break by accident:
 **Partial dates — the one place this deployment overrides `external/`.** The specification says a date not known to the day is not representable and must be omitted (`external/02`, `external/05` §5.11). That loses a real fact every time an article says only "born in 1885", so `catalogue.datePrecision` lowers the floor and the canonical form is published **truncated from the left**: `21.02.1893` → `02.1893` → `1893`. Setting it back to `day` restores the specification exactly.
 
 The trade-off is stated once, in the config: VD-DATE requires a consumer to treat anything outside `\d{1,2}\.\d{1,2}\.\d{4}` as **absent**, so a strict reader ignores `"1893"` and behaves as if the field had been dropped — nothing breaks, and a reader that wants the year can have it. `biomd validate` accepts whatever the setting allows and raises no per-value warning: the setting *is* the statement of intent, and warning on every deliberate value would make `--strict` unusable. The calendar is still checked — a producer that writes `31.02.1900` has published a date that does not exist — and `mergeDossier` performs the one overwrite in the codebase: a sharper reading of the *same* date (`1893` → `21.02.1893`) replaces the blunter one, because those are one fact known to two depths rather than two competing facts.
+
+**The same day printed twice is still one day.** Russian reference writing dates the nineteenth century in both calendars, and `aleksandrov.bio.md` does it twice in one line — `род. 11(23).12.1818, ум. 24.12.1884 / 05.01.1885`. Neither form parsed, so that entry published **no dates at all** while the article states both: a fact lost to a punctuation convention, which is precisely what "wide on input" exists to prevent. `parseDate` now reduces a bracketed or slashed alternative to the form printed first — reading, not guessing. A genuine *range* is a different claim and is still refused: a dash was already rejected, and a slash survives only when both sides are full dates within a fortnight of each other, which no range ever is.
+
+**A word written in two alphabets is always a machine's mistake.** `abiton`'s dossier published `Авель Карлеvaro` — a model transliterating Abel Carlevaro's name and stopping halfway. A *sentence* mixing alphabets is ordinary in this corpus ("Играл на гитаре Pedro Maldonado"), so `mixedScriptWords` tests per word, where the mixture is never intentional and the result is a name no reader can search for. It is reported (`biomd report --notes alphabets`) rather than repaired: which half is right is not knowable from here, and dropping the field would lose a teacher the article really does name.
 
 **A collective is a value, not a special case.** `resolveEnsemble` maps `дуэт`, `квартета`, `Gitaartrio`, `cuarteto`, `ансамбль` to `{group, size?}` — declined stems and Germanic compounds included, because a whole-word table misses most real titles. Two things read it and both would otherwise be guesses: `gender: mixed`, which `external/02` defines as *"a collective entry"* and which a model asked to choose between `m`, `f` and `mixed` gets wrong for four men often enough to matter; and how many faces belong in the entry's photograph (`src/images/subject.ts`).
 
@@ -345,5 +402,6 @@ Runs after `extract`, before `localize`/`portrait`/`catalog`, and **rewrites the
 | [external/07-authoring-and-validation.md](external/07-authoring-and-validation.md) | `INV-1 … INV-28`, the list `biomd validate` checks |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full layering, extension points, non-goals — the source this file summarizes |
 | [docs/PROGRESS_AND_TODO.md](docs/PROGRESS_AND_TODO.md) | Dev log: original spec, defaults chosen and why, what shipped when (RU/EN) |
+| [docs/findings-analysis.md](docs/findings-analysis.md) | The 2026-08-23 regression hunt: which search models actually search, why `albert` failed, why the poems were never translated, and the measured prompt A/B behind the current translation prompts |
 | ~~docs/MetaData.md~~, ~~docs/Catalog-Index.md~~ | **Superseded** by `external/`. Kept for history; do not implement against them |
 | [prompts/README.md](prompts/README.md) | Template conventions, Eta whitespace and ASI traps, variables per task |
