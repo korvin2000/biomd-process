@@ -34,12 +34,24 @@ export function createModelsCommand(): Command {
       );
 
       heading('Pools');
-      for (const [name, members] of Object.entries(loaded.config.llm.routing.pools)) {
-        process.stdout.write(`${name.padEnd(12)} ${members.join(' → ')}\n`);
+      for (const [name, spec] of Object.entries(loaded.config.llm.routing.pools)) {
+        const inherited = spec.strategy ? '' : pc.dim(' (inherited)');
+        const lanes = Object.entries(spec.maxConcurrent)
+          .filter(([, limit]) => limit > 0)
+          .map(([endpoint, limit]) => `${endpoint}×${limit}`);
+        const prefer = Object.entries(spec.prefer).map(([variant, ids]) => `${variant}→${ids.join('|')}`);
+
+        process.stdout.write(
+          `${name.padEnd(12)} ${spec.models.join(' → ') || pc.dim('(every enabled model)')}\n` +
+            `${' '.repeat(12)} ${pc.dim('strategy')} ${app.router.strategyIdFor(name)}${inherited}` +
+            (lanes.length > 0 ? `  ${pc.dim('lanes')} ${lanes.join(', ')}` : '') +
+            (prefer.length > 0 ? `  ${pc.dim('prefer')} ${prefer.join(', ')}` : '') +
+            '\n',
+        );
       }
 
       const estimatedInputTokens = Number.parseInt(options.tokens ?? '4000', 10) || 4000;
-      heading(`Routing preview (${loaded.config.llm.routing.strategy}, ${formatTokens(estimatedInputTokens)} input tokens)`);
+      heading(`Routing preview (${formatTokens(estimatedInputTokens)} input tokens)`);
 
       const pools = options.pool ? [options.pool] : Object.keys(loaded.config.llm.routing.pools);
       for (const pool of pools.length > 0 ? pools : [undefined]) {
@@ -58,7 +70,11 @@ export function createModelsCommand(): Command {
             return headroom >= estimatedInputTokens ? target.modelId : pc.dim(`${target.modelId} (overflows)`);
           })
           .join(' → ');
-        process.stdout.write(`${(pool ?? 'default').padEnd(12)} ${rendered || pc.red('(no targets)')}\n`);
+        process.stdout.write(
+          `${(pool ?? 'default').padEnd(12)} ${rendered || pc.red('(no targets)')} ` +
+            pc.dim(`[${app.router.strategyIdFor(pool)}]`) +
+            '\n',
+        );
       }
 
       heading('Available strategies');

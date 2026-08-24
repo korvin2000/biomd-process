@@ -94,6 +94,17 @@ export type JournalEvent =
        */
       notes?: string[];
     }
+  | {
+      /** The task failed and is being run again on a different model. */
+      type: 'task.retried';
+      taskId: string;
+      pipeline: string;
+      /** The attempt about to start, from 2. */
+      attempt: number;
+      /** Targets that already failed this task and are demoted for the rest of it. */
+      avoided: string[];
+      reason: string;
+    }
   | { type: 'task.failed'; taskId: string; durationMs: number; error: JsonObject }
   | { type: 'task.skipped'; taskId: string; reason: string }
   | {

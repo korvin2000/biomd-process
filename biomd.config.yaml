@@ -3,7 +3,7 @@
 # Everything here has a default (see src/config/schema.ts); this file shows the
 # knobs you are most likely to touch. Secrets come from the environment:
 # `${VAR}` is substituted at load time, `${VAR:-fallback}` supplies a default.
-#
+# minimax/minimax-m3: es, fr, it, de, pt, zh, ja
 #   biomd config check     validate this file and print the effective values
 #   biomd run --dry-run    plan the whole job without spending a token
 
@@ -77,7 +77,21 @@ output:
     portraitHints: '.hints/{slug}.portrait.json'
     # Classification a web search supplied that index.json owns (country).
     websearchHints: '.hints/{slug}.web.json'
-  onExisting: skip # skip | overwrite | fail
+  # skip | overwrite | fail — what the writer does when the file is already there.
+  #
+  # `skip` is also read by the **planner**, which is what makes it cheap: a task
+  # whose output exists and will not be replaced is retired before it is
+  # planned, so no model is called and nothing is billed. It used to be a
+  # write-time decision only — the model answered, the answer was paid for, and
+  # then discarded with a warning — which after a prompt edit (every fingerprint
+  # invalidated, so every task re-plans) cost the price of the whole corpus for
+  # nothing.
+  #
+  # `run.skipExistingOutputs` says the same thing from the other end and either
+  # one is enough. A task that *merges* into its output (`catalog`, `websearch`)
+  # is deliberately exempt from both: its file exists from the end of the first
+  # run onwards and says nothing about whether this run's work is in it.
+  onExisting: skip
   jsonIndent: 2
 
 # --------------------------------------------------------------------------
@@ -265,7 +279,7 @@ tasks:
     # Going over is no longer fatal (the batch is halved and re-asked, and the
     # router will not hand it to a model that cannot finish it), but every
     # oversized call is still one cut-off answer paid for before the correction.
-    maxSegmentsPerCall: 30
+    maxSegmentsPerCall: 45
     # Models routinely answer 39 of 40 keys. A repair call re-asks for just the
     # missing ones instead of re-sending (and re-paying for) the whole batch.
     # 0 restores all-or-nothing retries.
@@ -421,22 +435,41 @@ llm:
       baseUrl: http://192.168.1.26:20129/v1
       apiKey: ${OMNIROUTE_API_KEY}
       requestsPerMinute: 60
-      # NOT a throughput setting — a correctness one, and the most important
-      # line in this file.
+      # These two lines are one setting, and it is a correctness setting rather
+      # than a throughput one.
       #
-      # This gateway coalesces requests that are in flight at the same moment:
-      # send three different bodies within a few milliseconds and all three come
-      # back with **one** answer, the first one's, byte for byte. Measured here
-      # on 2026-08-23 with `websearch` at concurrency 3 — Aguado's date of death
-      # and his Spanish Wikipedia URL were published into Anido's and Amigo's
-      # dossiers, at confidence 0.98, with a source URL naming the wrong person.
-      # Serialized (this line) the same four documents each got their own
-      # correct answer.
+      # This gateway used to coalesce requests in flight at the same moment:
+      # three different bodies sent within a few milliseconds all came back with
+      # **one** answer, the first one's, byte for byte. Measured 2026-08-23 with
+      # `websearch` at concurrency 3, Aguado's date of death and his Spanish
+      # Wikipedia URL were published into Anido's and Amigo's dossiers, at
+      # confidence 0.98, citing a page about the wrong man — and nothing
+      # downstream can catch that, because the answer is well-formed, sourced
+      # and about a real guitarist, just not the one who was asked about.
       #
-      # Nothing downstream can catch it: the answer is well-formed, sourced and
-      # about a real guitarist, just not the one who was asked about. Raise this
-      # only after re-running that experiment against the gateway.
-      maxConcurrent: 1
+      # Re-measured 2026-08-24, and the finding is that **the trigger is
+      # `stream: false`, not the interval**. Two overlapping requests asking for
+      # a buffered answer: the second gets the first's completion, 5 rounds out
+      # of 5, and a 2000ms stagger changes nothing — what collides is the
+      # overlap, not the arrival. The same pairs streamed answer correctly 15
+      # times out of 15. So spacing them out is not a fix and never was; the
+      # earlier "100ms apart" rule of thumb describes when the collision is
+      # *likely*, not when it is possible.
+      #
+      # `stream: true` is therefore the setting that makes concurrency safe
+      # here, and `maxConcurrent: 2` is only safe because of it. Take the stream
+      # away and this must go back to 1.
+      #
+      # `minRequestSpacingMs` stays as cheap insurance and as the honest floor
+      # `requestsPerMinute` cannot express: a token bucket starts full, so
+      # 60/min permits sixty simultaneous requests and then a minute of silence.
+      #
+      # Note also that this gateway caches responses: an identical request body
+      # returns in ~15-50ms with no model attribution. That is free and correct,
+      # and worth knowing when a re-run looks implausibly fast.
+      maxConcurrent: 2
+      minRequestSpacingMs: 150
+      stream: true
 
     - id: openrouter
       baseUrl: https://openrouter.ai/api/v1
@@ -475,18 +508,46 @@ llm:
       # params: { temperature: 0.1 }
       tags: [local, cheap]
 
+    # The German/English translation model. Measured against four alternatives
+    # on this endpoint (2026-08-24, `omniroute-openai-report.md`): first on
+    # translation quality of the five, second overall, and the only family that
+    # transliterates into German rather than English — `Tschudinow`, not
+    # `Chudinov`, which is the difference between an entry a German reader finds
+    # and one they do not. 41s and ~2.1k output tokens per article.
     - id: or-luna
       endpoint: omniroute
       model: cx/gpt-5.6-luna
-      contextWindow: 127000
-      maxOutputTokens: 4096
-      capabilities: [json_object, tools]
+      # The gateway's own `/v1/models` record, not a guess: 272000 / 128000.
+      # The old 127000 / 4096 understated both, and the output figure is the one
+      # that cost something — `routing.onOverflow: skip` reads it as "this model
+      # cannot finish a long article" and drops the target from the chain.
+      # 32768 is generous for a whole-document translation and still low enough
+      # that a runaway answer surfaces as `output_truncated` rather than a bill.
+      contextWindow: 272000
+      maxOutputTokens: 32768
+      # All three verified by probe; `json_object` is what `mode: segments`
+      # sends, and `prompt_cache` is real here — 2816 of a 3704-token first call
+      # came back as `cached_tokens`, shared across runs and across models.
+      capabilities: [json_object, json_schema, prompt_cache, tools]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      #params:
-      #  temperature: 0.1
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
-      tags: [remote, search, cheap]
+      # This model reasons unless told not to: the bare id spends 184 reasoning
+      # tokens on a control question with no parameter at all, so "no reasoning"
+      # has to be asked for. It is worth asking for twice over. Reasoning did
+      # not resolve this corpus's ambiguities, it manufactured one — the typo
+      # `да и а строй` ("and the tuning held") became "die A-Saite" in 4 of 4
+      # runs at medium effort and 2 of 4 at high, published as fluent German
+      # about a string the article never mentions. The high-effort variant also
+      # spent 86% of its output on deliberation (15k tokens, 288s per article
+      # against 41s) and spelled the subject's surname two or three ways in one
+      # document in half its runs.
+      reasoning: { enabled: false, dialect: reasoning_effort }
+      # No `params.temperature`, deliberately. This gateway accepts the field
+      # and range-checks it (`3.5` -> "must be between 0 and 2") and then
+      # ignores it: at `temperature: 0` the same prompt returns three different
+      # texts, `temperature: 2` still writes clean prose, and across 20 runs the
+      # samples show no similarity ordering by temperature distance. Setting it
+      # would record an intention the endpoint does not honour.
+      tags: [remote, cheap]
 
     - id: or-cheap
       endpoint: openrouter
@@ -494,14 +555,55 @@ llm:
       contextWindow: 128000
       maxOutputTokens: 24576
       capabilities: [json_schema, json_object, tools, prompt_cache]
-      pricing: { inputPer1M: 0.07, outputPer1M: 0.17, cachedInputPer1M: 0.075 }
+      # Priced for the providers named below rather than for the model page:
+      # `deepinfra/fp8` and `ambient/fp4` are both 0.08 / 0.18 with cache reads
+      # at 0.016. Pinning changes the bill, so the bill is written where the pin
+      # is.
+      pricing: { inputPer1M: 0.08, outputPer1M: 0.18, cachedInputPer1M: 0.016 }
+      # WHICH providers may serve this model, because on OpenRouter that is a
+      # correctness question and not a price one.
+      #
+      # This one model id is served by 29 hosts, and **their sampling support
+      # differs**. Measured 2026-08-24 from
+      # `/api/v1/models/deepseek/deepseek-v4-flash-0731/endpoints`: only nine of
+      # the 29 implement `top_k` *and* `min_p` *and* `response_format`. The other
+      # twenty accept the request and drop what they do not implement — DeepSeek's
+      # own host answers 200 to a `top_k: 1, min_p: 0.5` request and samples as if
+      # neither had been sent. Nothing downstream can see that: same status, same
+      # German, same cost, and which of the two happened depends on who had
+      # capacity that second.
+      #
+      # `requireParameters: true` is what makes the drop audible. It restricts
+      # routing to a provider that supports every field in the request, so an
+      # unhonoured `min_p` arrives as `404 No endpoints found that can handle the
+      # requested parameters` — verified against `only: [deepseek]`, which 200s
+      # without it and 404s with it. Any target carrying more than `temperature`
+      # wants this on.
+      #
+      # `allowFallbacks` is deliberately left unset (i.e. true): `order` is then a
+      # preference with the rest of the qualifying market behind it, which is what
+      # a thousand-article batch wants. Set it to false to pin an experiment.
+      #
+      # The order is measured, cheapest-that-is-good-enough first:
+      #   deepinfra/fp8   0.08/0.18  42 tok/s  p50 602ms   cache, seed
+      #   ambient/fp4     0.08/0.18  46 tok/s  p50 458ms   cache, seed   (fp4)
+      #   together        0.14/0.28  33 tok/s  p50 1473ms  cache
+      #   phala           0.20/0.40  49 tok/s  p50 1632ms  cache, seed
+      #   morph/bf16      0.079/0.278 7 tok/s  p50 1902ms  cache, seed   (bf16,
+      #     the only unquantized host — highest fidelity, six times slower, so it
+      #     is the tail of the list rather than the head)
+      # `wafer/fast` also qualifies and is left out: status -2, 85.8% uptime.
+      # Add `quantizations: [bf16, fp8]` to exclude the fp4 hosts outright.
+      provider:
+        order: [deepinfra/fp8, ambient/fp4, together, phala, morph/bf16]
+        requireParameters: true
       # This model reasons unless told not to, and reasoning tokens bill at the
       # output rate — they were 78% of the output on a measured run here.
       # `dialect` says how to phrase it; `enabled: false` is the instruction.
       # Drop the whole block (or set dialect: none) to leave the model's default
       # alone; set enabled: true when a task genuinely needs the deliberation.
       reasoning: { enabled: false, dialect: reasoning }
-      tags: [remote]
+      tags: [remote, cheap]
 
     # A model that actually searches. Three ways to get one on OpenRouter, in
     # descending order of how little has to be true for it to work:
@@ -604,7 +706,16 @@ llm:
       tags: [remote, quality]
 
   routing:
-    # cost-optimized | context-optimized | sequential | round-robin
+    # The default for every pool that does not name its own. See below: a pool
+    # may override it, because the three stages of this tool are scarce in
+    # different resources.
+    #
+    #   cost-optimized    cheapest target that fits         (money)
+    #   least-busy        emptiest endpoint, cheapest tie   (wall-clock)
+    #   context-optimized most headroom first               (long documents)
+    #   sequential        declaration order                 (explicit preference)
+    #   round-robin       rotate                            (equivalent workers)
+    #   least-failures    fewest consecutive failures       (flaky providers)
     strategy: cost-optimized
     # A pool is the fallback chain. `cost-optimized` always ranks the free local
     # model first among the targets that can serve the request, so the paid
@@ -612,13 +723,82 @@ llm:
     # document too large for its 8K output ceiling, a restart, a temporary
     # overload. A single-model pool has no chain at all: that is what
     # "All 1 model target(s) failed" means, and it is the one shape to avoid.
+    #
+    # A pool is written either as a bare list of model ids — which is all most
+    # pools need — or as an object with `models` plus any of:
+    #
+    #   strategy      how to rank this pool; falls back to `strategy` above
+    #   maxConcurrent this pool's share of an endpoint's concurrent slots
+    #   prefer        target language -> the model to try first for it
+    #   options       strategy knobs, merged over `options` below
     pools:
-      default: [local-small, or-luna, or-cheap]
+      default:
+        models: [local-small, or-luna, or-cheap]
+        strategy: round-robin
       # Extraction is mechanical: start cheap, escalate only on failure.
-      extract: [local-small, or-cheap]
-      # Translation is quality-sensitive, and the most likely to outgrow a small
-      # model's output limit — a long article's prose has to come back in full.
-      translate: [local-small, or-luna, or-cheap]
+
+      extract:
+        models: [local-small, or-cheap, or-luna]
+        strategy: cost-optimized
+
+      # Translation is the only stage whose real cost is **time**.
+      #
+      # Measured here on 2026-08-23, the same three articles into English at
+      # run.concurrency 3:
+      #
+      #   cost-optimized, no lanes    1m 43s   all 3 calls on `local`, one after another
+      #   least-busy + lanes             34s   one call per endpoint, at the same time
+      #
+      # Same output, same corpus, $0.00012 of it paid. The three-fold difference
+      # is not the models being faster; it is three of them working instead of
+      # one.
+      #
+      # Under `cost-optimized` every translation ranks the free local model
+      # first, which is correct about price and disastrous about throughput:
+      # `local` serves one request at a time, so three concurrent tasks become
+      # one, and `omniroute` and `openrouter` sit idle for the whole run.
+      # `least-busy` ranks the *emptiest* endpoint first instead — as a
+      # fraction of what each can hold, so an endpoint is not rewarded merely
+      # for allowing more parallelism — and breaks the tie on cost, which means
+      # an idle pool still behaves exactly like `cost-optimized`.
+      #
+      # `maxConcurrent` is this pool's lane on an endpoint. `openrouter` allows
+      # three parallel requests and the other two allow one each; without a lane
+      # it would take the majority of the corpus simply because it says yes more
+      # often, and it is also the only paid endpoint here. One slot each keeps
+      # all three busy and the bill on the free two. The lanes across all pools
+      # may not exceed an endpoint's own `maxConcurrent` — `config check` says
+      # so if they do.
+      #
+      # Raise `run.concurrency` to at least the number of lanes, or the
+      # orchestrator runs out of tasks before the endpoints run out of slots.
+      translate:
+        models: [local-small, or-luna, or-cheap]
+        strategy: least-busy
+        maxConcurrent:
+          local: 1
+          omniroute: 2
+          openrouter: 1
+        # Which model renders which language best, by target language code.
+        # A reordering of the pool and never an addition to it: the models
+        # behind the preferred one are still its fallback chain, so a preference
+        # can slow a language down but can never make it unroutable.
+        #
+        # Chinese and Japanese are the case that motivates it — a Chinese
+        # open-weights model renders them better than a Western one, and the
+        # reverse holds for European languages. Nothing here declares one yet;
+        # add the model to `models` first, then name it:
+        #
+        # prefer:
+        #   zh: [or-deepseek]
+        #   ja: [or-deepseek]
+        prefer:
+          zh: [or-cheap]
+          ja: [or-cheap]
+          ko: [or-cheap]
+          es: [or-cheap]
+          de: [or-luna]
+          en: [or-luna]
       # Only models that can search belong here; see tasks.websearch.
       #
       # The three free omniroute targets are genuinely different models and give
@@ -628,7 +808,29 @@ llm:
       # paid `:online` model behind them is the one that survives omniroute
       # being down. `or-search-quality` is deliberately absent: it cannot
       # search, and what it does instead is worse than a gap.
-      websearch: [or-osearch, or-search2, or-search, or-search3]
+      #
+      # `sequential`, and the list re-ordered to say what it means.
+      #
+      # Three of these four are priced at zero, so `cost-optimized` could only
+      # order them by leaving them in declaration order and pushing the paid one
+      # last — the right answer arrived at through a tie. Written out, the order
+      # is the decision: the free searchers first, the paid `:online` model last
+      # as the one that survives omniroute being down. Same chain as before,
+      # now robust to any of these prices changing.
+      #
+      # Careful here: under `sequential` the first entry is what gets called.
+      # Leaving `or-osearch` at the front of this list — where `cost-optimized`
+      # had been quietly demoting it — would send every web search to the only
+      # target that bills.
+      #
+      # Note also that `reliability.fallback.maxTargets: 3` cuts this chain to
+      # its first three, so the fourth entry is unreachable as configured. That
+      # has always been true here (cost sorted the paid one last, and the
+      # cut removed it); raise maxTargets to 4 if the `:online` model is meant
+      # to be a real fallback rather than documentation.
+      websearch:
+        models: [or-search2, or-search, or-search3, or-osearch]
+        strategy: cost-optimized
     # demote | skip — what to do with a target that cannot serve a request,
     # either because the prompt exceeds its context window or because the answer
     # would exceed its `maxOutputTokens`.
@@ -661,8 +863,31 @@ reliability:
     jitter: full
     respectRetryAfter: true
   fallback:
-    maxTargets: 3
+    maxTargets: 4
     onValidationFailure: true
+  # Fallback one level up: re-run a whole **task** on a different model.
+  #
+  # `fallback` above answers "this call failed" and moves down the chain. It
+  # cannot answer "every call returned 200 and the document they add up to is
+  # broken" — a translation whose spliced result no longer matches the source
+  # skeleton, an extraction that parsed and made no sense. Only the task that
+  # assembled the answer knows that, and it used to die on the spot with two
+  # untried models sitting in the pool. Measured on this corpus, 2026-08-24:
+  # belousov -> es, bitetti -> en and blackmore -> de each failed a structure
+  # check after every one of their calls had succeeded, and no other model was
+  # ever asked.
+  #
+  # Between attempts the targets that already failed this task are demoted, so
+  # a fresh one leads; a task that never called a model is not retried at all.
+  taskFallback:
+    maxAttempts: 3 # total attempts per task; 1 disables this entirely
+    # The last attempt, once every model in the pool has already failed the
+    # task. There is no fresh model left, so the only thing left to vary is how
+    # one is asked: the steadiest target this run, and a temperature low enough
+    # to buy literalness with the flair a translation would otherwise want.
+    lastAttempt:
+      strategy: least-failures
+      temperature: 0.1
   circuitBreaker:
     enabled: true
     failureThreshold: 5
@@ -739,7 +964,10 @@ prompts:
 
 # --------------------------------------------------------------------------
 run:
-  concurrency: 3
+  # At least the number of translate lanes (1 local + 2 omniroute + 1
+  # openrouter), or the orchestrator runs out of tasks before the endpoints run
+  # out of slots and the lanes are a promise nothing keeps.
+  concurrency: 4
   stateDir: .biomd/runs
   memoryDir: .biomd/memory # only used by useTranslationMemory: persistent
   resume: auto # auto | off | <runId>
@@ -751,3 +979,35 @@ logging:
   level: info
   console: pretty # pretty | json | off
   file: .biomd/logs/biomd.jsonl
+
+  # A plain-text account of the run, in the project root. `tail -f progress.log`
+  # is the intended way to read it.
+  #
+  # Everything else this tool records is written for a machine to read back
+  # afterwards — `events.jsonl` is an audit trail and `state.json` a checkpoint,
+  # both complete and both unreadable while you are waiting. This answers the
+  # question a four-hour batch actually prompts: what is it doing, who is doing
+  # it, and what went wrong.
+  #
+  #   [22:40:01] [extract]   '/ru/abiton.bio.json' : local-small:gemma4-31b-local (35.0s)
+  #   [22:40:36] [translate] ! 'abiton → de' fallback local:local-small → omniroute:or-luna
+  #                            — output_truncated: Response was cut off by the output token limit
+  #   [22:41:38] [translate] '/de/abiton.bio.md' : or-luna:cx/gpt-5.6-luna (32.4s)
+  #
+  # (The path is relative to output.baseDir, written with the platform's own
+  # separator — backslashes on Windows.)
+  #
+  # A line with `!` in it is an incident — a retry, a fallback, or a target
+  # written off for the rest of the run — and it is there so the line under it
+  # is explicable: the file above says `or-luna` because the line above *that*
+  # says why. `grep ' ! ' progress.log` is the incident report.
+  #
+  # It appends rather than truncating, one header per run: "which model produced
+  # this file last time" is as real a question as "what is it doing now".
+  # null disables it. `--dry-run` never writes it — nothing was processed, so a
+  # log of what processed it would be fiction.
+  progressFile: progress.log
+  # Floor on how often it is written, and equally a ceiling: a line that arrives
+  # just after a write is flushed when the interval elapses rather than waiting
+  # for the next task, so a slow document never leaves the file looking stalled.
+  progressIntervalMs: 30000

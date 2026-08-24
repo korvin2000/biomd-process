@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 
-import type { EndpointConfig } from '../config/schema.js';
+import type { EndpointConfig, ProviderRouting } from '../config/schema.js';
 import type {
   ChatMessage,
   CompletionRequest,
@@ -27,9 +27,11 @@ import { EMPTY_USAGE } from './types.js';
 export class OpenAiCompatibleClient implements LlmClient {
   readonly endpointId: string;
   private readonly client: OpenAI;
+  private readonly stream: boolean;
 
   constructor(endpoint: EndpointConfig) {
     this.endpointId = endpoint.id;
+    this.stream = endpoint.stream;
     this.client = new OpenAI({
       baseURL: endpoint.baseUrl,
       // Local gateways often accept any non-empty key; the SDK requires one.
@@ -47,12 +49,15 @@ export class OpenAiCompatibleClient implements LlmClient {
     options: { signal?: AbortSignal; timeoutMs: number },
   ): Promise<CompletionResponse> {
     const startedAt = Date.now();
-    const body = this.buildBody(target, request);
+    const body = buildRequestBody(target, request, this.stream);
 
-    const completion = (await this.client.chat.completions.create(body as never, {
+    const raw = await this.client.chat.completions.create(body as never, {
       signal: options.signal,
       timeout: options.timeoutMs,
-    })) as ChatCompletionLike;
+    });
+    const completion = this.stream
+      ? await collectStream(raw as unknown as AsyncIterable<ChatCompletionChunkLike>)
+      : (raw as ChatCompletionLike);
 
     return {
       text: extractText(completion),
@@ -64,33 +69,80 @@ export class OpenAiCompatibleClient implements LlmClient {
     };
   }
 
-  private buildBody(target: ModelTarget, request: CompletionRequest): Record<string, unknown> {
-    const params = request.params ?? {};
-    const body: Record<string, unknown> = {
-      model: target.modelName,
-      messages: request.messages.map(toWireMessage),
-      stream: false,
-    };
+}
 
-    const maxOutput = Math.min(params.maxOutputTokens ?? target.maxOutputTokens, target.maxOutputTokens);
-    body[target.maxTokensParam] = maxOutput;
 
-    assignDefined(body, {
-      temperature: params.temperature,
-      top_p: params.topP,
-      frequency_penalty: params.frequencyPenalty,
-      presence_penalty: params.presencePenalty,
-      seed: params.seed,
-      stop: params.stop,
-      user: request.correlationId,
-    });
+/**
+ * The request body, as a pure function of the target and the request.
+ *
+ * Module-level rather than a method so a test can assert what goes on the wire
+ * without a socket — which is the only way to tell a parameter that was
+ * *configured* from one that was *sent*.
+ */
+export function buildRequestBody(
+  target: ModelTarget,
+  request: CompletionRequest,
+  stream: boolean,
+): Record<string, unknown> {
+  const params = request.params ?? {};
+  const body: Record<string, unknown> = {
+    model: target.modelName,
+    messages: request.messages.map(toWireMessage),
+    stream,
+    // Streaming otherwise drops the usage block, and with it every token
+    // count, the cost of the run and the budget guard. Overridable through
+    // `params.extra` for a gateway that rejects the field.
+    ...(stream ? { stream_options: { include_usage: true } } : {}),
+  };
 
-    const responseFormat = toWireResponseFormat(request.responseFormat, target);
-    if (responseFormat) body['response_format'] = responseFormat;
+  const maxOutput = Math.min(params.maxOutputTokens ?? target.maxOutputTokens, target.maxOutputTokens);
+  body[target.maxTokensParam] = maxOutput;
 
-    Object.assign(body, reasoningFields(target), params.extra ?? {}, target.params.extra ?? {});
-    return body;
-  }
+  assignDefined(body, {
+    temperature: params.temperature,
+    top_p: params.topP,
+    // Not OpenAI fields, and every gateway in this repo's world takes them
+    // anyway. They are first-class rather than `extra` because they are the
+    // two most often accepted-and-ignored, which is what `provider` is for.
+    top_k: params.topK,
+    min_p: params.minP,
+    frequency_penalty: params.frequencyPenalty,
+    presence_penalty: params.presencePenalty,
+    seed: params.seed,
+    stop: params.stop,
+    user: request.correlationId,
+  });
+
+  const responseFormat = toWireResponseFormat(request.responseFormat, target);
+  if (responseFormat) body['response_format'] = responseFormat;
+
+  const provider = toWireProvider(target.provider);
+  if (provider) body['provider'] = provider;
+
+  Object.assign(body, reasoningFields(target), params.extra ?? {}, target.params.extra ?? {});
+  return body;
+}
+
+/**
+ * The gateway's provider-preference block, or nothing at all.
+ *
+ * Nothing at all is the important half: an endpoint that has never heard of
+ * `provider` must not be sent an empty object, so every field is dropped when
+ * it is empty and the whole block disappears when they all are. Config stays
+ * camelCase like the rest of the file; the wire is snake_case because that is
+ * what OpenRouter reads.
+ */
+export function toWireProvider(provider: ProviderRouting | undefined): Record<string, unknown> | undefined {
+  if (!provider) return undefined;
+  const wire: Record<string, unknown> = {};
+  if (provider.order.length) wire['order'] = [...provider.order];
+  if (provider.only.length) wire['only'] = [...provider.only];
+  if (provider.ignore.length) wire['ignore'] = [...provider.ignore];
+  if (provider.quantizations.length) wire['quantizations'] = [...provider.quantizations];
+  if (provider.allowFallbacks !== undefined) wire['allow_fallbacks'] = provider.allowFallbacks;
+  if (provider.requireParameters !== undefined) wire['require_parameters'] = provider.requireParameters;
+  if (provider.sort !== undefined) wire['sort'] = provider.sort;
+  return Object.keys(wire).length ? wire : undefined;
 }
 
 function toWireMessage(message: ChatMessage): { role: string; content: string } {
@@ -198,6 +250,53 @@ interface ChatCompletionLike {
     finish_reason?: string | null;
     message?: { content?: string | Array<{ type?: string; text?: string }> | null };
   }>;
+}
+
+interface ChatCompletionChunkLike {
+  model?: string;
+  usage?: UsageLike | null;
+  choices?: Array<{
+    finish_reason?: string | null;
+    delta?: { content?: string | null };
+    /** Some gateways emit a whole message on the final chunk instead of a delta. */
+    message?: { content?: string | null };
+  }>;
+}
+
+/**
+ * Reassembles a streamed completion into the shape the non-streamed path
+ * returns, so everything downstream — text extraction, usage, finish reason,
+ * cost — stays identical whichever transport the endpoint asked for.
+ *
+ * Deltas win over a whole `message` when both appear: a gateway that emits the
+ * accumulated message on its final chunk would otherwise have every token
+ * counted twice.
+ */
+export async function collectStream(
+  stream: AsyncIterable<ChatCompletionChunkLike>,
+): Promise<ChatCompletionLike> {
+  let delta = '';
+  let whole = '';
+  let finishReason: string | null | undefined;
+  let usage: UsageLike | undefined;
+  let model: string | undefined;
+
+  for await (const chunk of stream) {
+    if (chunk.model) model = chunk.model;
+    if (chunk.usage) usage = chunk.usage;
+
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    if (choice.delta?.content) delta += choice.delta.content;
+    else if (choice.message?.content) whole += choice.message.content;
+  }
+
+  return {
+    model,
+    usage,
+    choices: [{ finish_reason: finishReason ?? null, message: { content: delta || whole } }],
+  };
 }
 
 function extractText(completion: ChatCompletionLike): string {

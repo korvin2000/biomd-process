@@ -1,4 +1,4 @@
-export type { RoutingStrategy, RoutingContext, RoutingRequest, TargetStats } from './types.js';
+export type { OccupancyView, RoutingStrategy, RoutingContext, RoutingRequest, TargetStats } from './types.js';
 export { emptyStats, fittingFirst } from './types.js';
 export { RoutingStrategyRegistry } from './StrategyRegistry.js';
 export { TargetStatsRegistry } from './TargetStats.js';
@@ -11,5 +11,6 @@ export {
   sequential,
   roundRobin,
   leastFailures,
+  leastBusy,
   defineStrategy,
 } from './strategies/builtin.js';

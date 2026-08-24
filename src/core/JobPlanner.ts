@@ -220,18 +220,40 @@ export class JobPlanner {
     if (isTaskDone(this.deps.resumeIndex.get(fingerprint))) return 'resume';
 
     // A merge's output file exists from the moment the first run ends, and says
-    // nothing about whether *this* run's work is in it. Resume still applies:
-    // that compares fingerprints, which is a claim about the work rather than
-    // about a filename.
+    // nothing about whether *this* run's work is in it. It also writes with
+    // `overwrite`, so `output.onExisting` never applies to it either. Resume
+    // still does: that compares fingerprints, which is a claim about the work
+    // rather than about a filename.
     if (mergesOutput) return undefined;
+    if (!this.checksExistingOutputs() || expectedOutputs.length === 0) return undefined;
 
-    if (this.deps.config.run.skipExistingOutputs && expectedOutputs.length > 0) {
-      const paths = expectedOutputs.map((output) =>
-        this.deps.writer.resolvePath({ channel: output.channel, format: 'text', body: '', pathVars: output.pathVars }),
-      );
-      const existence = await Promise.all(paths.map((path) => pathExists(path)));
-      if (existence.every(Boolean)) return 'existing-output';
-    }
-    return undefined;
+    const paths = expectedOutputs.map((output) =>
+      this.deps.writer.resolvePath({ channel: output.channel, format: 'text', body: '', pathVars: output.pathVars }),
+    );
+    const existence = await Promise.all(paths.map((path) => pathExists(path)));
+    return existence.every(Boolean) ? 'existing-output' : undefined;
+  }
+
+  /**
+   * Whether an output that is already on disk means "do not run this task".
+   *
+   * Two settings say so, and only one of them used to be read here.
+   *
+   * `run.skipExistingOutputs` is the explicit request, and it is a *choice*:
+   * the file is there, leave it alone. `output.onExisting: skip` is the same
+   * decision arrived at from the other end — the writer will refuse to replace
+   * that file whatever this run produces — and it used to be discovered only
+   * after the model had been called and billed. The task ran, the answer was
+   * paid for, and `writeArtifacts` threw it away with a warning. Nothing about
+   * the files on disk differs between the two orders; only the invoice does,
+   * and after a prompt edit (which invalidates every fingerprint, so *every*
+   * task re-plans) it differs by the price of the whole corpus.
+   *
+   * `overwrite` and `fail` are left alone deliberately: one intends to replace
+   * the file, and the other intends to stop the run loudly rather than to
+   * quietly do nothing.
+   */
+  private checksExistingOutputs(): boolean {
+    return this.deps.config.run.skipExistingOutputs || this.deps.config.output.onExisting === 'skip';
   }
 }

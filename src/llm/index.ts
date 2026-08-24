@@ -20,6 +20,7 @@ export type { TokenEstimator } from './TokenEstimator.js';
 export { estimateCost, resolveCost, addUsage } from './CostCalculator.js';
 export { BudgetGuard } from './Budget.js';
 export type { BudgetSnapshot } from './Budget.js';
+export { LaneRegistry } from './Lanes.js';
 export { LlmGateway } from './LlmGateway.js';
 export type {
   AttemptRecord,

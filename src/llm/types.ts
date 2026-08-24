@@ -1,4 +1,11 @@
-import type { Capability, EndpointConfig, ModelConfig, Pricing, Reasoning } from '../config/schema.js';
+import type {
+  Capability,
+  EndpointConfig,
+  ModelConfig,
+  Pricing,
+  ProviderRouting,
+  Reasoning,
+} from '../config/schema.js';
 import type { JsonObject } from '../shared/json.js';
 
 export type ChatRole = 'system' | 'user' | 'assistant';
@@ -22,6 +29,8 @@ export type ResponseFormat =
 export interface CompletionParams {
   temperature?: number;
   topP?: number;
+  topK?: number;
+  minP?: number;
   frequencyPenalty?: number;
   presencePenalty?: number;
   seed?: number;
@@ -89,6 +98,8 @@ export interface ModelTarget {
   readonly tags: readonly string[];
   readonly weight: number;
   readonly params: ModelConfig['params'];
+  /** Which of the endpoint's providers may serve this model, and on what terms. */
+  readonly provider: ProviderRouting;
   readonly timeoutMs: number;
   readonly endpoint: EndpointConfig;
 }

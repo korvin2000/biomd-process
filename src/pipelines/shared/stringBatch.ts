@@ -231,6 +231,7 @@ async function callOnce(
     {
       pipeline: task.pipeline,
       pool: spec.pool,
+      variant: task.variant,
       estimatedInputTokens: context.estimator.estimateMessages(messages),
       // The answer repeats every key and runs longer than the source.
       expectedOutputTokens: Math.ceil(context.estimator.estimateText(payload) * 1.6) + 128,

@@ -192,6 +192,7 @@ export class WebSearchPipeline implements DocumentPipeline {
       {
         pipeline: task.pipeline,
         pool: config.pool,
+        variant: task.variant,
         requiredCapabilities: config.requireWebSearchCapability ? ['web_search'] : [],
         estimatedInputTokens: context.estimator.estimateMessages(messages),
         expectedOutputTokens: EXPECTED_OUTPUT_TOKENS,

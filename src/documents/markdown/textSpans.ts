@@ -1,5 +1,6 @@
 import { classifyFence } from './fences.js';
 import { linkTargetPattern } from './inline.js';
+import { blockTokenOf } from './skeleton.js';
 
 export type SpanKind = 'heading' | 'paragraph' | 'listItem' | 'quote' | 'tableCell' | 'attribute' | 'verse';
 
@@ -140,7 +141,8 @@ export function applyTextSpans(markdown: string, spans: readonly TextSpan[], tra
   for (const span of [...spans].sort((a, b) => b.start - a.start)) {
     const translated = translations.get(span.text);
     if (translated === undefined) continue;
-    result = result.slice(0, span.start) + unmask(translated, span.masks) + result.slice(span.end);
+    const safe = escapeBlockMarker(span, translated);
+    result = result.slice(0, span.start) + unmask(safe, span.masks) + result.slice(span.end);
   }
   return result;
 }
@@ -182,6 +184,73 @@ const MASK_IN_TARGET = /\]\(\s*(⟦\d+⟧)(?:\s+"[^"]*")?\s*\)/g;
 export function displacedMasks(text: string, translation: string): string[] {
   const anchored = new Set([...translation.matchAll(MASK_IN_TARGET)].map((match) => match[1]));
   return maskTokens(text).filter((token) => translation.includes(token) && !anchored.has(token));
+}
+
+/**
+ * A translation that changes what *kind of block* its line is.
+ *
+ * The premise of segment mode is that the model never sees the markup, so it
+ * cannot damage it — and the premise is very nearly true. What survives it is
+ * the replacement text itself: a paragraph answered as `1. Estudió guitarra…`
+ * is an ordered list item the moment it is spliced back, and a fragment
+ * answered on two lines splits one block into two. Neither is visible to the
+ * `{hash: text}` contract, and both were being caught only by the whole-document
+ * guard — after every call in the batch had been paid for, as a failed article.
+ *
+ * Measured on the corpus that prompted this: `bitetti → en` (a paragraph
+ * returned as a list item), `blackmore → de` (three of them), `belousov → es`
+ * (a lead paragraph split in two). Three articles that produced no edition at
+ * all, for three fragments that cost a few hundred tokens to re-ask.
+ *
+ * Only the block token is compared, and only for a span that *is* its own line:
+ * a list item's marker stays on this side of the wire, so its text may begin
+ * however it likes.
+ */
+export function structuralDrift(span: TextSpan, translation: string): string | undefined {
+  if (/\r?\n/.test(translation.trim())) {
+    return 'the answer must stay on one line — a line break splits the block it belongs to';
+  }
+  if (span.kind !== 'paragraph') return undefined;
+
+  const before = blockTokenOf(span.text);
+  // What a leading escape can settle is not drift: see `escapeBlockMarker`.
+  const after = blockTokenOf(escapeBlockMarker(span, translation));
+  return before === after
+    ? undefined
+    : `the answer reads as "${after}" where the source is "${before}" — do not add a heading, a quote or a "key:" prefix`;
+}
+
+/** A list marker at the very start of a line: `- `, `* `, `1. `, `27) `. */
+const LEADING_MARKER = /^(\s*)([-*+]|\d{1,9}[.)])(\s)/;
+
+/**
+ * Escapes a leading list marker so a translated line stays the prose it was.
+ *
+ * `27 марта 2002 г.` is one paragraph. Its German is `27. März 2002`, which is
+ * correct, is what every model in the pool answers, and is *also* an ordered
+ * list item the moment it starts a line. That is a collision between an
+ * ordinal date and CommonMark, not a mistake, and no amount of re-asking gets
+ * out of it: the three models were asked nine times between them and all
+ * answered the same right answer. Measured on `blackmore → de`, which failed
+ * on this one fragment while its other eleven editions were published.
+ *
+ * CommonMark already has the answer — a backslash — so this takes it rather
+ * than asking. Applied at the splice, where the span's kind is still known and
+ * where "safe to put back on a line of its own" is the actual question.
+ *
+ * Only list markers. A translation that opens with `#`, `>` or `position:` is
+ * a model inventing structure rather than a language colliding with syntax,
+ * and {@link structuralDrift} still rejects those so they can be re-asked.
+ */
+export function escapeBlockMarker(span: TextSpan, translation: string): string {
+  if (span.kind !== 'paragraph') return translation;
+  if (blockTokenOf(span.text) === blockTokenOf(translation)) return translation;
+
+  return translation.replace(
+    LEADING_MARKER,
+    (_match, indent: string, marker: string, space: string) =>
+      `${indent}${marker.slice(0, -1)}\\${marker.slice(-1)}${space}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,9 @@
-import type { AppConfig } from '../config/schema.js';
+import type { AppConfig, PoolConfig } from '../config/schema.js';
 import { ConfigError } from '../shared/errors.js';
 import type { ModelTarget } from './types.js';
+
+/** What a pool without its own entry looks like: no members, no overrides. */
+const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {} };
 
 /**
  * Turns the declarative `llm` config into resolved {@link ModelTarget}s and
@@ -33,6 +36,7 @@ export class ModelRegistry {
         tags: model.tags,
         weight: model.weight,
         params: model.params,
+        provider: model.provider,
         timeoutMs: endpoint.timeoutMs ?? config.llm.defaults.timeoutMs,
         endpoint,
       };
@@ -59,12 +63,23 @@ export class ModelRegistry {
    * minimal config needs no pools at all.
    */
   pool(name: string | undefined): ModelTarget[] {
-    const pools = this.config.llm.routing.pools;
-    const members = (name ? pools[name] : undefined) ?? pools['default'] ?? [];
+    const members = this.poolConfig(name).models;
     if (members.length === 0) return this.all();
 
     return members
       .map((modelId) => this.byModelId.get(modelId))
       .filter((target): target is ModelTarget => target !== undefined);
+  }
+
+  /**
+   * The pool's own settings — strategy, lanes, language preferences.
+   *
+   * Resolved through exactly the same fallback as {@link pool}, so "which
+   * models" and "how to choose between them" can never disagree about which
+   * pool is being talked about.
+   */
+  poolConfig(name: string | undefined): PoolConfig {
+    const pools = this.config.llm.routing.pools;
+    return (name ? pools[name] : undefined) ?? pools['default'] ?? EMPTY_POOL;
   }
 }

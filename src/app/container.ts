@@ -4,6 +4,7 @@ import type { ProjectPaths } from '../config/paths.js';
 import { ContextStrategyRegistry } from '../documents/context/ContextStrategyRegistry.js';
 import { Segmenter } from '../documents/Segmenter.js';
 import { BudgetGuard } from '../llm/Budget.js';
+import { LaneRegistry } from '../llm/Lanes.js';
 import { LlmClientFactory } from '../llm/LlmClientFactory.js';
 import { LlmGateway } from '../llm/LlmGateway.js';
 import { ModelRegistry } from '../llm/ModelRegistry.js';
@@ -13,6 +14,7 @@ import { FileSystemSource } from '../io/FileSystemSource.js';
 import type { ArtifactWriter, SourceProvider } from '../io/types.js';
 import { AppLogger, type Logger } from '../observability/Logger.js';
 import { MetricsCollector } from '../observability/Metrics.js';
+import { ProgressLog } from '../observability/ProgressLog.js';
 import { PromptRepository } from '../prompts/PromptRepository.js';
 import { CircuitBreakerRegistry } from '../reliability/CircuitBreaker.js';
 import { RateLimiterRegistry } from '../reliability/RateLimiter.js';
@@ -41,6 +43,8 @@ export interface App {
   models: ModelRegistry;
   strategies: RoutingStrategyRegistry;
   router: Router;
+  /** Endpoint concurrency: who is busy, and how a pool's share of it is capped. */
+  lanes: LaneRegistry;
   /** Exposed so a host or a test can swap the transport for an endpoint. */
   clients: LlmClientFactory;
   gateway: LlmGateway;
@@ -56,6 +60,8 @@ export interface App {
   memories: TranslationMemoryRegistry;
   pipelines: PipelineRegistry;
   metrics: MetricsCollector;
+  /** The plain-text account of the run, for a person watching it happen. */
+  progressLog: ProgressLog;
   budget: BudgetGuard;
   stats: TargetStatsRegistry;
   observers: ObserverHub;
@@ -80,6 +86,12 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
   const dryRun = options.dryRun ?? config.run.dryRun;
 
   const logger = AppLogger.create(config.logging, (file) => paths.resolve(file));
+  // Silent under --dry-run: nothing was processed, so a log of what processed
+  // it would be fiction.
+  const progressLog = new ProgressLog({
+    file: config.logging.progressFile && !dryRun ? paths.resolve(config.logging.progressFile) : null,
+    intervalMs: config.logging.progressIntervalMs,
+  });
   const estimator = HeuristicTokenEstimator.fromConfig(config.context);
   const metrics = new MetricsCollector();
   const observers = new ObserverHub();
@@ -87,16 +99,27 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
   const models = new ModelRegistry(config);
   const strategies = new RoutingStrategyRegistry();
   const stats = new TargetStatsRegistry();
+  // One object answers "who is busy" for both halves of the decision: the
+  // strategy reads it to rank, the gateway claims against it to make the
+  // ranking real. Two would drift.
+  const lanes = new LaneRegistry(config.llm.routing, config.llm.endpoints, new RateLimiterRegistry());
   const router = new Router(
-    strategies.get(config.llm.routing.strategy),
+    strategies,
+    config.llm.routing,
     stats,
     {
       reserveOutputTokens: config.context.reserveOutputTokens,
       safetyMarginRatio: config.context.safetyMarginRatio,
       onOverflow: config.llm.routing.onOverflow,
     },
-    config.llm.routing.options,
+    lanes,
   );
+  // The one strategy id the Router cannot check for itself, because it lives
+  // under `reliability` rather than `llm.routing`. Same rule as every other:
+  // a name that does not resolve is a config error, and the honest time to say
+  // so is now — not on the one task unlucky enough to reach its last attempt.
+  const lastAttemptStrategy = config.reliability.taskFallback.lastAttempt.strategy;
+  if (lastAttemptStrategy) strategies.get(lastAttemptStrategy);
 
   const budget = new BudgetGuard(config.cost, (reason) => logger.warn(`Budget threshold reached: ${reason}`));
   const clients = new LlmClientFactory(config.llm.endpoints);
@@ -105,7 +128,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
     router,
     clients,
     new CircuitBreakerRegistry(config.reliability.circuitBreaker),
-    new RateLimiterRegistry(),
+    lanes,
     stats,
     budget,
     config.reliability,
@@ -125,6 +148,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
     models,
     strategies,
     router,
+    lanes,
     clients,
     gateway,
     prompts: new PromptRepository(config.prompts, paths),
@@ -143,6 +167,7 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
       .register(new PortraitPipeline(images, roster))
       .register(new CatalogPipeline(roster)),
     metrics,
+    progressLog,
     budget,
     stats,
     observers,

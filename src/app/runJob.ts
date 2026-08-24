@@ -45,6 +45,7 @@ export async function runJob(app: App, options: RunJobOptions = {}): Promise<Run
     config: redactConfig(app.config) as unknown as JsonObject,
   };
 
+  const startedAt = Date.now();
   const store = await RunStore.create(stateDir, manifest);
   const detach = app.observers.add(journalObserver(app, store));
 
@@ -59,6 +60,8 @@ export async function runJob(app: App, options: RunJobOptions = {}): Promise<Run
       resumeIndex: resume.index,
     }).plan();
 
+    app.progressLog.runStarted({ runId: store.runId, tasks: plan.tasks.length, skipped: plan.skipped.length });
+
     const summary = await new Orchestrator({
       config: app.config,
       pipelines: app.pipelines,
@@ -71,12 +74,22 @@ export async function runJob(app: App, options: RunJobOptions = {}): Promise<Run
       store,
       metrics: app.metrics,
       progress: options.progress ?? nullProgressReporter,
+      progressLog: app.progressLog,
       logger: app.logger,
     }).run(plan, options.signal);
+
+    app.progressLog.runFinished({
+      status: summary.status,
+      durationMs: Date.now() - startedAt,
+      completed: summary.totals.tasksCompleted,
+      failed: summary.totals.tasksFailed,
+      costUsd: summary.totals.costUsd,
+    });
 
     return { runId: store.runId, runDir: store.dir, plan, summary };
   } finally {
     await app.memories.close();
+    await app.progressLog.close();
     detach();
   }
 }
@@ -129,6 +142,7 @@ function journalObserver(app: App, store: RunStore): GatewayObserver {
   return {
     onAttempt: (record, options) => {
       app.metrics.recordAttempt(record);
+      app.progressLog.noteAttempt(record);
       void store.append({
         type: 'llm.attempt',
         pipeline: options.pipeline,
@@ -144,11 +158,13 @@ function journalObserver(app: App, store: RunStore): GatewayObserver {
     },
     onRetry: (info) => {
       app.metrics.recordRetry();
+      app.progressLog.noteRetry(info);
       app.logger.warn(`Retrying ${info.target} in ${info.delayMs}ms (${info.kind})`, { message: info.message });
       void store.append({ type: 'llm.retry', ...info });
     },
     onFallback: (info) => {
       app.metrics.recordFallback();
+      app.progressLog.noteFallback(info);
       app.logger.warn(`Falling back ${info.from} → ${info.to} (${info.kind})`, { detail: info.message });
       void store.append({ type: 'llm.fallback', ...info });
     },
@@ -159,6 +175,7 @@ function journalObserver(app: App, store: RunStore): GatewayObserver {
      */
     onTargetDown: (info) => {
       app.metrics.recordTargetDown(info.target, info.kind, info.message);
+      app.progressLog.noteTargetDown(info);
       app.logger.error(
         `Model target "${info.target}" is being skipped for the rest of this run (${info.kind}). ` +
           'Everything routed to it will be served by the next target in its pool — which may cost more. ' +

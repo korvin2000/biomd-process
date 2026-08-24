@@ -84,6 +84,68 @@ describe('config schema', () => {
     expect(result.error?.issues[0]?.message).toContain('no path template');
   });
 
+  it('accepts a pool as a bare model list and as an expanded object alike', () => {
+    const input = minimalConfig();
+    input.llm.routing = {
+      pools: {
+        default: ['small'],
+        translate: { models: ['small'], strategy: 'least-busy', maxConcurrent: { local: 1 }, prefer: { zh: ['small'] } },
+      },
+    } as never;
+
+    const config = appConfigSchema.parse(input);
+    expect(config.llm.routing.pools['default']?.models).toEqual(['small']);
+    expect(config.llm.routing.pools['default']?.strategy).toBeUndefined();
+    expect(config.llm.routing.pools['translate']?.strategy).toBe('least-busy');
+    expect(config.llm.routing.pools['translate']?.maxConcurrent).toEqual({ local: 1 });
+  });
+
+  it('rejects a preference naming a model the pool does not contain', () => {
+    const input = minimalConfig();
+    input.llm.routing = { pools: { default: { models: ['small'], prefer: { zh: ['ghost'] } } } } as never;
+    const result = appConfigSchema.safeParse(input);
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toContain('is not in pool');
+  });
+
+  it('rejects a lane naming an undeclared endpoint', () => {
+    const input = minimalConfig();
+    input.llm.routing = { pools: { default: { models: ['small'], maxConcurrent: { ghost: 1 } } } } as never;
+    const result = appConfigSchema.safeParse(input);
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toContain('Unknown endpoint');
+  });
+
+  /**
+   * A lane divides an endpoint's concurrency; it never raises it. Lanes adding
+   * up to more than the endpoint allows would have every pool believing it had
+   * a free slot and all of them queueing on the same one.
+   */
+  it('rejects lanes that add up to more than the endpoint allows', () => {
+    const input = minimalConfig();
+    input.llm.endpoints[0]!.maxConcurrent = 2;
+    input.llm.routing = {
+      pools: {
+        default: { models: ['small'], maxConcurrent: { local: 1 } },
+        translate: { models: ['small'], maxConcurrent: { local: 2 } },
+      },
+    } as never;
+    const result = appConfigSchema.safeParse(input);
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toContain('add up to 3');
+  });
+
+  it('leaves lanes alone when the endpoint itself is uncapped', () => {
+    const input = minimalConfig();
+    input.llm.routing = {
+      pools: { default: { models: ['small'], maxConcurrent: { local: 9 } } },
+    } as never;
+    expect(appConfigSchema.safeParse(input).success).toBe(true);
+  });
+
   it('rejects unknown top-level keys instead of ignoring a typo', () => {
     const input = { ...minimalConfig(), tsaks: {} };
     expect(appConfigSchema.safeParse(input).success).toBe(false);

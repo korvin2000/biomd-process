@@ -1,7 +1,7 @@
 import type { AppConfig } from '../config/schema.js';
 import type { ContextStrategyRegistry } from '../documents/context/ContextStrategyRegistry.js';
 import type { SourceDocument } from '../documents/types.js';
-import type { LlmGateway } from '../llm/LlmGateway.js';
+import type { LlmPort } from '../llm/LlmGateway.js';
 import type { TokenEstimator } from '../llm/TokenEstimator.js';
 import type { TokenUsage } from '../llm/types.js';
 import type { Artifact, ArtifactWriter } from '../io/types.js';
@@ -156,7 +156,13 @@ export interface PlanContext {
 
 export interface ExecutionContext {
   config: AppConfig;
-  llm: LlmGateway;
+  /**
+   * The gateway, scoped to this attempt at this task.
+   *
+   * Not the gateway itself: the orchestrator wraps it so that a retried task
+   * routes past the models that already failed it. See `AttemptScope`.
+   */
+  llm: LlmPort;
   prompts: PromptRepository;
   contexts: ContextStrategyRegistry;
   estimator: TokenEstimator;
@@ -166,6 +172,13 @@ export interface ExecutionContext {
   memories: TranslationMemoryRegistry;
   logger: Logger;
   signal: AbortSignal;
+  /**
+   * Which attempt at this task this is, from 1.
+   *
+   * Only a pipeline holding a cache needs it: on a retry the previous attempt's
+   * answers are precisely what failed, so they must not be served again.
+   */
+  attempt: number;
 }
 
 interface PipelineBase {

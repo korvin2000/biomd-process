@@ -100,8 +100,102 @@ export const endpointSchema = z.object({
   maxConcurrent: z.number().int().nonnegative().default(0),
   /** Client-side throttle; 0 = unlimited. */
   requestsPerMinute: z.number().int().nonnegative().default(0),
+  /**
+   * Floor on the gap between two requests to this endpoint; 0 = none.
+   *
+   * `requestsPerMinute` is a budget and this is an interval, and only the
+   * interval says what a gateway that mishandles simultaneous arrivals needs
+   * to hear: a token bucket starts full, so `requestsPerMinute: 60` lets sixty
+   * requests leave in the same millisecond. Applies across concurrent slots,
+   * so `maxConcurrent: 2` with a 100ms spacing dispatches at t=0 and t=100.
+   */
+  minRequestSpacingMs: z.number().int().nonnegative().default(0),
+  /**
+   * Ask for the answer as a stream and reassemble it here.
+   *
+   * A transport detail everywhere except on a gateway whose buffered path is
+   * broken, where it is the difference between correct output and another
+   * request's answer. `omniroute` returns the *other* in-flight request's
+   * completion when two overlap and `stream: false` — measured 2026-08-24, 5 of
+   * 5 rounds, and unaffected by how far apart the requests are sent, because
+   * what collides is the overlap rather than the arrival. Streamed, the same
+   * pairs answer correctly 15 of 15.
+   *
+   * Costs nothing on a healthy endpoint: the response is reassembled into the
+   * same shape, usage and finish reason included.
+   */
+  stream: z.boolean().default(false),
   enabled: z.boolean().default(true),
 });
+
+/**
+ * Provider preference, for a gateway that serves one model name from many
+ * hosts.
+ *
+ * This is not a throughput setting, it is a *correctness* one, and OpenRouter
+ * is where it bites. `deepseek/deepseek-v4-flash-0731` is one model id served
+ * by twenty-nine providers, and **their sampling support differs**: measured
+ * 2026-08-24, nine of the twenty-nine honour `top_k` *and* `min_p` *and*
+ * `response_format`, and the other twenty accept the request and quietly drop
+ * whichever field they do not implement. A run therefore looks identical
+ * whether the parameters were applied or ignored — the same 200, the same
+ * German, the same bill — and which of the two happened is decided by which
+ * host had capacity that second.
+ *
+ * So the providers that can honour the sampling are named here, in preference
+ * order, and:
+ *
+ *  - **`requireParameters: true`** is the setting that makes a dropped
+ *    parameter *audible*. It tells the gateway to route only to a provider
+ *    supporting every field in the request, so an unsupported `min_p` comes
+ *    back as `404 No endpoints found that can handle the requested
+ *    parameters` instead of as a silently different sampler. Turn it on for
+ *    any target whose `params` carry something beyond `temperature`.
+ *  - **`allowFallbacks: false`** pins the run to `order`/`only` and nothing
+ *    else. Leave it unset for a batch — the list is then a preference with the
+ *    rest of the market behind it, which is what a thousand articles want —
+ *    and set it when an experiment must not silently change hosts mid-run.
+ *
+ * Slugs are the gateway's own (`deepinfra/fp8`, `ambient/fp4`, `together`);
+ * `GET /api/v1/models/<author>/<slug>/endpoints` lists them with the
+ * `supported_parameters` each one actually implements. Every field is omitted
+ * from the wire when empty, so this whole block costs nothing on an endpoint
+ * that has never heard of it.
+ */
+export const providerRoutingSchema = z
+  .object({
+    /** Preferred providers, best first; others may still serve unless `allowFallbacks: false`. */
+    order: z.array(z.string().min(1)).default([]),
+    /** Hard whitelist: only these providers, ever. */
+    only: z.array(z.string().min(1)).default([]),
+    /** Never route here. */
+    ignore: z.array(z.string().min(1)).default([]),
+    /** `false` pins routing to `order`/`only`; a failure there fails the call. */
+    allowFallbacks: z.boolean().optional(),
+    /** Route only to providers that support every parameter in the request. */
+    requireParameters: z.boolean().optional(),
+    /** Order the remaining candidates by one axis instead of the gateway default. */
+    sort: z.enum(['price', 'throughput', 'latency']).optional(),
+    /** Accept only these weight quantizations, e.g. `[bf16, fp8]`. */
+    quantizations: z.array(z.string().min(1)).default([]),
+  })
+  .default({})
+  .superRefine((provider, ctx) => {
+    // A slug that is both required and forbidden is a typo with a silent
+    // outcome: the gateway resolves it one way and the file says the other.
+    const ignored = new Set(provider.ignore);
+    for (const list of ['order', 'only'] as const) {
+      for (const [index, slug] of provider[list].entries()) {
+        if (ignored.has(slug)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [list, index],
+            message: `Provider "${slug}" is listed in both "${list}" and "ignore".`,
+          });
+        }
+      }
+    }
+  });
 
 export const modelSchema = z.object({
   /** Local alias used by pools and logs. */
@@ -119,11 +213,20 @@ export const modelSchema = z.object({
   capabilities: z.array(capabilitySchema).default([]),
   /** Free-form labels usable by custom routing strategies. */
   tags: z.array(z.string()).default([]),
+  /** Which of the endpoint's providers may serve this model. */
+  provider: providerRoutingSchema,
   /** Sampling and friends, merged over `llm.defaults.params`. */
   params: z
     .object({
       temperature: z.number().min(0).max(2).optional(),
       topP: z.number().min(0).max(1).optional(),
+      /**
+       * Nucleus's two companions, first-class because they are the two a
+       * gateway is most likely to accept and not apply — see
+       * {@link providerRoutingSchema}. `topK: 0` disables the cutoff.
+       */
+      topK: z.number().int().min(0).optional(),
+      minP: z.number().min(0).max(1).optional(),
       frequencyPenalty: z.number().min(-2).max(2).optional(),
       presencePenalty: z.number().min(-2).max(2).optional(),
       seed: z.number().int().optional(),
@@ -137,14 +240,71 @@ export const modelSchema = z.object({
   enabled: z.boolean().default(true),
 });
 
+/**
+ * One routing pool: the models a task may use, plus the three things that are
+ * genuinely per-pool rather than per-run.
+ *
+ * The shorthand — a bare list of model ids — is still the whole story for most
+ * pools and is what every existing config file contains. The expanded form adds
+ * only what a *global* setting cannot express:
+ *
+ *  - **`strategy`** — extraction wants the cheapest model that can do the job;
+ *    a web search wants the declared order (the free searchers first, the paid
+ *    one behind them); translation wants the load spread. One global strategy
+ *    forces all three to agree, and they have no reason to.
+ *  - **`maxConcurrent`** — a *lane*: how many of this endpoint's concurrent
+ *    slots this pool may hold at once. The endpoint's own `maxConcurrent` is a
+ *    hard cap on the provider; this is how that cap is shared out, so one
+ *    endpoint that happens to allow three parallel requests cannot swallow the
+ *    whole corpus while two other endpoints sit idle.
+ *  - **`prefer`** — the model to try first for a given task variant, which for
+ *    `translate` and `localize` is the **target language**. A Chinese
+ *    open-weights model renders Chinese and Japanese better than a Western one
+ *    does, and the reverse is true for European languages; that is a fact about
+ *    the language, not about the run.
+ */
+const poolSchema = z.object({
+  /** Candidate models, in declaration order. Empty = every enabled model. */
+  models: z.array(identifier).default([]),
+  /** Registered strategy id; falls back to `llm.routing.strategy`. */
+  strategy: identifier.optional(),
+  /** Strategy-specific knobs, merged over `llm.routing.options`. */
+  options: z.record(z.unknown()).default({}),
+  /**
+   * Concurrent requests this pool may have in flight on a given endpoint, by
+   * endpoint id. 0 or absent = only the endpoint's own limit applies.
+   *
+   * The sum across pools may not exceed the endpoint's `maxConcurrent`: a lane
+   * divides a cap, it never raises one.
+   */
+  maxConcurrent: z.record(z.number().int().nonnegative()).default({}),
+  /**
+   * Task variant → the models to try first for it. For `translate` and
+   * `localize` the variant is the target language code.
+   *
+   * A reordering of this pool, never an addition to it: every id named here
+   * must also be in `models`, so a preference can never route somewhere the
+   * pool does not allow, and the rest of the pool remains the fallback chain.
+   */
+  prefer: z.record(z.array(identifier)).default({}),
+});
+
+/** A pool is either a bare model list (the shorthand) or the expanded object. */
+const poolEntrySchema = z
+  .union([z.array(identifier), poolSchema])
+  .transform((value) => (Array.isArray(value) ? poolSchema.parse({ models: value }) : value));
+
 export const routingSchema = z.object({
-  /** Registered strategy id: cost-optimized | context-optimized | sequential | round-robin | … */
+  /** Registered strategy id: cost-optimized | context-optimized | sequential | round-robin | least-busy | … */
   strategy: identifier.default('cost-optimized'),
   /**
    * Named candidate pools. `default` is used by any task without its own pool.
    * An empty pool list means "every enabled model".
+   *
+   * Each value is either `[model, model, …]` or the expanded object described
+   * on {@link poolSchema}.
    */
-  pools: z.record(z.array(identifier)).default({}),
+  pools: z.record(poolEntrySchema).default({}),
   /**
    * What to do with a target that cannot serve a request — either the prompt
    * does not fit its context window, or the expected answer does not fit its
@@ -163,6 +323,8 @@ export const routingSchema = z.object({
   /** Strategy-specific knobs, validated by the strategy itself. */
   options: z.record(z.unknown()).default({}),
 });
+
+export type PoolConfig = z.infer<typeof poolSchema>;
 
 export const llmSchema = z.object({
   endpoints: z.array(endpointSchema).min(1),
@@ -205,6 +367,40 @@ export const reliabilitySchema = z
         maxTargets: z.number().int().min(1).max(10).default(3),
         /** Try the next target when the response fails domain validation. */
         onValidationFailure: z.boolean().default(true),
+      })
+      .default({}),
+    /**
+     * Fallback one level up from a call: re-run a whole **task** on a different
+     * model when it failed.
+     *
+     * The gateway's chain answers "this call failed". It cannot answer "every
+     * call succeeded and the document they add up to is broken" — a translation
+     * whose spliced result no longer matches the source skeleton, an extraction
+     * that parsed and made no sense. Those arrive as a pipeline error long after
+     * the last HTTP 200, and used to end the task then and there while two
+     * perfectly good models sat unasked.
+     *
+     * A task is retried only when it actually called a model: a failure with no
+     * call behind it is deterministic, and re-running it three times only
+     * spends wall-clock to reach the same place.
+     */
+    taskFallback: z
+      .object({
+        /** Attempts per task, in total. `1` disables task-level fallback. */
+        maxAttempts: z.number().int().min(1).max(5).default(3),
+        /**
+         * The last attempt, when every model in the pool has already failed the
+         * task. There is no fresh model left to try, so the only thing left to
+         * vary is *how* one is asked: `least-failures` picks whichever has been
+         * steadiest this run, and a low temperature trades the flair that a
+         * translation wants for the literalness that a structural guard wants.
+         */
+        lastAttempt: z
+          .object({
+            strategy: identifier.optional(),
+            temperature: z.number().min(0).max(2).optional(),
+          })
+          .default({}),
       })
       .default({}),
     circuitBreaker: z
@@ -955,6 +1151,23 @@ export const loggingSchema = z
     console: z.enum(['pretty', 'json', 'off']).default('pretty'),
     /** Path to a JSONL log file; null disables file logging. */
     file: z.string().nullable().default('.biomd/logs/biomd.jsonl'),
+    /**
+     * A plain-text progress log in the project root; null disables it.
+     *
+     * One line per finished task — time, task, file, and the model that
+     * produced it. Everything else this tool records is written for a machine
+     * to read back afterwards; this is the one surface meant to be read *while
+     * the run is going*, with `tail -f` or an editor that reloads.
+     */
+    progressFile: z.string().nullable().default('progress.log'),
+    /**
+     * Floor on how often it is written, in milliseconds.
+     *
+     * Also a ceiling: a line that arrives just after a write is flushed when
+     * the interval elapses rather than waiting for the next task, so a slow
+     * document cannot leave the file looking stalled.
+     */
+    progressIntervalMs: z.number().int().min(0).default(30_000),
   })
   .default({});
 
@@ -992,6 +1205,7 @@ export type AppConfig = z.infer<typeof appConfigSchema>;
 export type AppConfigInput = z.input<typeof appConfigSchema>;
 export type EndpointConfig = z.infer<typeof endpointSchema>;
 export type ModelConfig = z.infer<typeof modelSchema>;
+export type ProviderRouting = z.infer<typeof providerRoutingSchema>;
 export type RoutingConfig = z.infer<typeof routingSchema>;
 export type ReliabilityConfig = z.infer<typeof reliabilitySchema>;
 export type CostConfig = z.infer<typeof costSchema>;
@@ -1034,16 +1248,68 @@ function crossFieldChecks(config: z.infer<typeof rawShape>, ctx: z.RefinementCtx
   });
 
   const routing = config.llm.routing;
-  for (const [pool, members] of Object.entries(routing.pools)) {
-    members.forEach((memberId, index) => {
+  /** Lane totals per endpoint, so a divided cap can be checked against the real one. */
+  const laneTotals = new Map<string, number>();
+
+  for (const [pool, spec] of Object.entries(routing.pools)) {
+    const members = new Set(spec.models);
+
+    spec.models.forEach((memberId, index) => {
       if (!modelIds.has(memberId)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['llm', 'routing', 'pools', pool, index],
+          path: ['llm', 'routing', 'pools', pool, 'models', index],
           message: `Unknown model "${memberId}". Declared: ${[...modelIds].join(', ') || '(none)'}`,
         });
       }
     });
+
+    // A preference reorders the pool; it can never route outside it. Naming a
+    // model the pool does not contain is the mistake that would otherwise look
+    // like it worked — the entry is simply ignored and the language quietly
+    // keeps the default ordering.
+    for (const [variant, preferred] of Object.entries(spec.prefer)) {
+      preferred.forEach((memberId, index) => {
+        if (members.size > 0 && !members.has(memberId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['llm', 'routing', 'pools', pool, 'prefer', variant, index],
+            message:
+              `Model "${memberId}" is preferred for "${variant}" but is not in pool "${pool}". ` +
+              'A preference reorders a pool; add the model to `models` first.',
+          });
+        }
+      });
+    }
+
+    for (const [endpointId, limit] of Object.entries(spec.maxConcurrent)) {
+      if (!endpointIds.has(endpointId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['llm', 'routing', 'pools', pool, 'maxConcurrent', endpointId],
+          message: `Unknown endpoint "${endpointId}". Declared: ${[...endpointIds].join(', ') || '(none)'}`,
+        });
+        continue;
+      }
+      laneTotals.set(endpointId, (laneTotals.get(endpointId) ?? 0) + limit);
+    }
+  }
+
+  // A lane divides an endpoint's concurrency; it never raises it. Letting the
+  // lanes add up to more than the endpoint allows would publish a promise the
+  // endpoint semaphore then breaks — every pool believing it has a free slot
+  // and all of them queueing on the same one.
+  for (const endpoint of config.llm.endpoints) {
+    const total = laneTotals.get(endpoint.id) ?? 0;
+    if (endpoint.maxConcurrent > 0 && total > endpoint.maxConcurrent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'routing', 'pools'],
+        message:
+          `Routing lanes for endpoint "${endpoint.id}" add up to ${total} concurrent requests, ` +
+          `but the endpoint allows ${endpoint.maxConcurrent}. Lower a pool's maxConcurrent.${''}`,
+      });
+    }
   }
 
   const requireChannel = (taskId: string, channel: string): void => {

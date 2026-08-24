@@ -1,4 +1,11 @@
-import type { AttemptRecord, GatewayCallOptions, GatewayObserver } from '../llm/LlmGateway.js';
+import type {
+  AttemptRecord,
+  FallbackInfo,
+  GatewayCallOptions,
+  GatewayObserver,
+  RetryInfo,
+  TargetDownInfo,
+} from '../llm/LlmGateway.js';
 
 /**
  * Fan-out point for gateway events.
@@ -22,11 +29,20 @@ export class ObserverHub implements GatewayObserver {
     for (const listener of this.listeners) listener.onAttempt?.(record, options);
   }
 
-  onRetry(info: { target: string; attempt: number; delayMs: number; kind: string; message: string }): void {
+  onRetry(info: RetryInfo): void {
     for (const listener of this.listeners) listener.onRetry?.(info);
   }
 
-  onFallback(info: { from: string; to: string; kind: string; message: string }): void {
+  onFallback(info: FallbackInfo): void {
     for (const listener of this.listeners) listener.onFallback?.(info);
+  }
+
+  /**
+   * Was missing, and its absence was invisible: the hub is what the gateway
+   * actually talks to, so an event it does not forward reaches no listener at
+   * all. `onTargetDown` was therefore announced to nobody.
+   */
+  onTargetDown(info: TargetDownInfo): void {
+    for (const listener of this.listeners) listener.onTargetDown?.(info);
   }
 }

@@ -4,7 +4,6 @@ import {
   CircuitBreakerRegistry,
   ErrorClassifier,
   LlmCallError,
-  RateLimiterRegistry,
   RetryPolicy,
 } from '../reliability/index.js';
 import type { Router } from '../routing/Router.js';
@@ -12,17 +11,42 @@ import type { TargetStatsRegistry } from '../routing/TargetStats.js';
 import { withTimeout } from '../shared/async.js';
 import type { BudgetGuard } from './Budget.js';
 import { addUsage, resolveCost } from './CostCalculator.js';
+import type { LaneRegistry } from './Lanes.js';
 import type { LlmClientFactory } from './LlmClientFactory.js';
 import type { ModelRegistry } from './ModelRegistry.js';
 import { EMPTY_USAGE, type CompletionRequest, type CompletionResponse, type ModelTarget, type TokenUsage } from './types.js';
 
 export type ValidationVerdict = { ok: true } | { ok: false; reason: string; retryable?: boolean };
 
+/**
+ * How one *attempt at a task* differs from the attempt before it.
+ *
+ * Set by the orchestrator's task-level fallback and by no pipeline: a pipeline
+ * knows how to do its job, not how many times it has already tried. Everything
+ * here is deliberately a nudge to the existing machinery rather than a new
+ * path through it — a different head to the same fallback chain, the same
+ * chain, the same retries.
+ */
+export interface AttemptTuning {
+  /** Targets an earlier attempt already used; demoted, never removed. */
+  avoid?: ReadonlySet<string>;
+  /** Routing strategy for this attempt, overriding the pool's own. */
+  strategy?: string;
+  /** Temperature for this attempt, overriding both model config and caller. */
+  temperature?: number;
+}
+
 export interface GatewayCallOptions {
   /** Which pipeline is asking — used for routing and journalling. */
   pipeline: string;
   /** Routing pool name; `default` when omitted. */
   pool?: string;
+  /**
+   * The task's variant — the target language for `translate` and `localize`.
+   * Read by `llm.routing.pools.<pool>.prefer`, which is how a language gets the
+   * model that renders it best.
+   */
+  variant?: string;
   requiredCapabilities?: readonly Capability[];
   /** Drives routing decisions; the caller already knows its prompt size. */
   estimatedInputTokens: number;
@@ -34,12 +58,36 @@ export interface GatewayCallOptions {
    */
   validate?: (response: CompletionResponse) => ValidationVerdict;
   correlation?: Record<string, string>;
+  /** Set by the orchestrator between task attempts; absent on a first attempt. */
+  tuning?: AttemptTuning;
+}
+
+/**
+ * What a pipeline is allowed to ask of the gateway.
+ *
+ * Narrow on purpose: it is the seam the orchestrator wraps to carry
+ * {@link AttemptTuning} into every call a task makes, without any pipeline
+ * having to know that task-level fallback exists.
+ */
+export interface LlmPort {
+  complete(request: CompletionRequest, options: GatewayCallOptions): Promise<GatewayResult>;
+  plan(options: GatewayCallOptions): ModelTarget[];
 }
 
 export interface AttemptRecord {
   target: string;
   modelId: string;
+  /** The name the endpoint knows the model by — what the provider actually served. */
+  modelName: string;
   endpointId: string;
+  /**
+   * The task this call belongs to, taken from the request's `correlationId`.
+   *
+   * The gateway is the only place that knows which target answered and the
+   * orchestrator is the only place that knows a task is finished; this is the
+   * key that joins the two, and every pipeline already sets it.
+   */
+  correlationId?: string;
   attempt: number;
   outcome: 'success' | 'error';
   latencyMs: number;
@@ -60,10 +108,35 @@ export interface GatewayResult {
   attempts: AttemptRecord[];
 }
 
+/** What every incident says: who was asking, about what, and what went wrong. */
+export interface IncidentInfo {
+  pipeline: string;
+  /** The task, from the request's `correlationId` — what makes an incident traceable to a file. */
+  correlationId?: string;
+  kind: string;
+  message: string;
+}
+
+export interface RetryInfo extends IncidentInfo {
+  target: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
+export interface FallbackInfo extends IncidentInfo {
+  from: string;
+  to: string;
+}
+
+export interface TargetDownInfo extends IncidentInfo {
+  target: string;
+}
+
 export interface GatewayObserver {
   onAttempt?(record: AttemptRecord, options: GatewayCallOptions): void;
-  onRetry?(info: { target: string; attempt: number; delayMs: number; kind: string; message: string }): void;
-  onFallback?(info: { from: string; to: string; kind: string; message: string }): void;
+  onRetry?(info: RetryInfo): void;
+  onFallback?(info: FallbackInfo): void;
   /**
    * A target this run has given up on, reported **once** per target.
    *
@@ -73,7 +146,7 @@ export interface GatewayObserver {
    * run on the paid second choice, with nothing in the output saying so. A
    * fallback is a normal event and a target that never works is not.
    */
-  onTargetDown?(info: { target: string; pipeline: string; kind: string; message: string }): void;
+  onTargetDown?(info: TargetDownInfo): void;
 }
 
 /**
@@ -84,7 +157,7 @@ export interface GatewayObserver {
  * codebase talks to a provider, which is what makes cost, reliability and
  * observability uniform rather than sprinkled across pipelines.
  */
-export class LlmGateway {
+export class LlmGateway implements LlmPort {
   private readonly classifier = new ErrorClassifier();
   private readonly retry: RetryPolicy;
   /** Targets already announced as down, so the warning is one line and not one per call. */
@@ -95,7 +168,7 @@ export class LlmGateway {
     private readonly router: Router,
     private readonly clients: LlmClientFactory,
     private readonly breakers: CircuitBreakerRegistry,
-    private readonly limiters: RateLimiterRegistry,
+    private readonly lanes: LaneRegistry,
     private readonly stats: TargetStatsRegistry,
     private readonly budget: BudgetGuard,
     private readonly reliability: ReliabilityConfig,
@@ -125,10 +198,19 @@ export class LlmGateway {
         // Skipping a target with an open breaker is correct and used to be
         // completely silent — which is how a whole run can be served by the
         // fallback without anyone noticing. Say it once.
-        this.announceDown(target.key, options.pipeline, 'circuit_open', `Circuit open for ${target.key}`);
+        this.announceDown(target, options, request, 'circuit_open', `Circuit open for ${target.key}`);
         failures.push(new LlmCallError('circuit_open', `Circuit open for ${target.key}`, { target: target.key }));
         continue;
       }
+
+      /**
+       * Claimed here, and *here* specifically: the first iteration of this loop
+       * runs in the same tick as the ranking that produced the chain, so no
+       * other caller can slip between "this endpoint looks free" and "this
+       * endpoint is mine". Falling back moves the claim with the call, which is
+       * what keeps the count honest when a target dies mid-run.
+       */
+      const claim = this.lanes.claim(options.pool, target);
 
       try {
         const response = await this.callTarget(target, request, options, attempts);
@@ -145,7 +227,7 @@ export class LlmGateway {
         // it is written off is what turns "the run was slower and dearer than
         // expected" into a line the user can act on.
         if (!failure.disposition.retryable || failure.kind === 'model_unavailable') {
-          this.announceDown(target.key, options.pipeline, failure.kind, failure.message);
+          this.announceDown(target, options, request, failure.kind, failure.message);
         }
 
         if (!this.shouldFallback(failure)) break;
@@ -153,12 +235,16 @@ export class LlmGateway {
         const next = chain[index + 1];
         if (next) {
           this.observer.onFallback?.({
+            pipeline: options.pipeline,
+            ...(request.correlationId ? { correlationId: request.correlationId } : {}),
             from: target.key,
             to: next.key,
             kind: failure.kind,
             message: failure.message,
           });
         }
+      } finally {
+        claim();
       }
     }
 
@@ -173,19 +259,35 @@ export class LlmGateway {
     );
   }
 
-  private announceDown(target: string, pipeline: string, kind: string, message: string): void {
-    if (this.reportedDown.has(target)) return;
-    this.reportedDown.add(target);
-    this.observer.onTargetDown?.({ target, pipeline, kind, message });
+  private announceDown(
+    target: ModelTarget,
+    options: GatewayCallOptions,
+    request: CompletionRequest,
+    kind: string,
+    message: string,
+  ): void {
+    if (this.reportedDown.has(target.key)) return;
+    this.reportedDown.add(target.key);
+    this.observer.onTargetDown?.({
+      target: target.key,
+      pipeline: options.pipeline,
+      ...(request.correlationId ? { correlationId: request.correlationId } : {}),
+      kind,
+      message,
+    });
   }
 
   private chainFor(options: GatewayCallOptions): ModelTarget[] {
     const candidates = this.registry.pool(options.pool);
     const ranked = this.router.select(candidates, {
       pipeline: options.pipeline,
+      pool: options.pool,
+      variant: options.variant,
       estimatedInputTokens: options.estimatedInputTokens,
       expectedOutputTokens: options.expectedOutputTokens,
       requiredCapabilities: options.requiredCapabilities ?? [],
+      ...(options.tuning?.avoid ? { avoid: options.tuning.avoid } : {}),
+      ...(options.tuning?.strategy ? { strategy: options.tuning.strategy } : {}),
     });
     return ranked.slice(0, this.reliability.fallback.maxTargets);
   }
@@ -202,11 +304,6 @@ export class LlmGateway {
     options: GatewayCallOptions,
     attempts: AttemptRecord[],
   ): Promise<CompletionResponse> {
-    const limiter = this.limiters.for(target.endpointId, {
-      requestsPerMinute: target.endpoint.requestsPerMinute,
-      maxConcurrent: target.endpoint.maxConcurrent,
-    });
-
     return this.retry.run(
       async (attempt) => {
         this.budget.assertAvailable();
@@ -214,7 +311,9 @@ export class LlmGateway {
         const record: AttemptRecord = {
           target: target.key,
           modelId: target.modelId,
+          modelName: target.modelName,
           endpointId: target.endpointId,
+          ...(request.correlationId ? { correlationId: request.correlationId } : {}),
           attempt,
           outcome: 'error',
           latencyMs: 0,
@@ -222,7 +321,10 @@ export class LlmGateway {
           costUsd: 0,
         };
         const startedAt = Date.now();
-        const release = await limiter.acquire(options.signal);
+        // The pool's lane first, then the endpoint. Acquired per attempt rather
+        // than per target, so a backoff sleep frees the slot for somebody else
+        // instead of holding an endpoint idle while nobody talks to it.
+        const release = await this.lanes.acquire(options.pool, target, options.signal);
 
         try {
           const response = await withTimeout(
@@ -230,7 +332,10 @@ export class LlmGateway {
             (signal) =>
               this.clients
                 .for(target.endpointId)
-                .complete(target, this.withTargetParams(target, request), { signal, timeoutMs: target.timeoutMs }),
+                .complete(target, this.withTargetParams(target, request, options), {
+                  signal,
+                  timeoutMs: target.timeoutMs,
+                }),
             { signal: options.signal, label: `${options.pipeline} → ${target.key}` },
           );
 
@@ -274,8 +379,11 @@ export class LlmGateway {
         signal: options.signal,
         onRetry: (info) =>
           this.observer.onRetry?.({
+            pipeline: options.pipeline,
+            ...(request.correlationId ? { correlationId: request.correlationId } : {}),
             target: target.key,
             attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
             delayMs: Math.round(info.delayMs),
             kind: info.error.kind,
             message: info.error.message,
@@ -284,14 +392,23 @@ export class LlmGateway {
     );
   }
 
-  /** Model-level params from config, with the caller's request winning. */
-  private withTargetParams(target: ModelTarget, request: CompletionRequest): CompletionRequest {
+  /**
+   * Model-level params from config, with the caller's request winning — and the
+   * attempt's own tuning winning over both, because it is the deliberate last
+   * word of a task that has already failed with everyone else's settings.
+   */
+  private withTargetParams(
+    target: ModelTarget,
+    request: CompletionRequest,
+    options: GatewayCallOptions,
+  ): CompletionRequest {
     return {
       ...request,
       params: {
         ...target.params,
         maxOutputTokens: target.maxOutputTokens,
         ...request.params,
+        ...(options.tuning?.temperature !== undefined ? { temperature: options.tuning.temperature } : {}),
       },
     };
   }

@@ -2,7 +2,10 @@ import type { AppConfigInput } from '../../src/config/schema.js';
 
 /** Smallest config the schema accepts — everything else comes from defaults. */
 export function minimalConfig(): AppConfigInput & {
-  llm: { endpoints: Array<{ id: string; baseUrl: string }>; models: Array<{ id: string; endpoint: string; model: string }> };
+  llm: {
+    endpoints: Array<{ id: string; baseUrl: string; maxConcurrent?: number }>;
+    models: Array<{ id: string; endpoint: string; model: string }>;
+  };
 } {
   return {
     llm: {

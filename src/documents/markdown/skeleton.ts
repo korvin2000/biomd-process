@@ -111,6 +111,35 @@ export function markdownSkeleton(content: string): string[] {
 }
 
 /**
+ * The one structural token a single line contributes.
+ *
+ * `markdownSkeleton` answers "what shape is this document"; this answers "what
+ * shape is this line", off the same regexes, and exists so a *fragment* can be
+ * checked before it is spliced into a document. A paragraph whose translation
+ * comes back opening with `1. ` is an ordered list item once it lands, and
+ * catching that here costs one re-asked fragment instead of one failed article.
+ *
+ * Fences are not considered: a caller holds a lifted span, never a fence line.
+ */
+export function blockTokenOf(line: string): string {
+  const container = CONTAINER.exec(line);
+  if (container) return (container[1] ?? '') === '' ? 'container:end' : `container:${container[1]}`;
+
+  const heading = HEADING.exec(line);
+  if (heading) return `h${(heading[1] ?? '#').length}`;
+
+  if (RULE.test(line)) return 'rule';
+  if (TABLE_ROW.test(line)) return `tr:${(line.match(/\|/g)?.length ?? 1) - 1}`;
+  if (BLOCKQUOTE.test(line)) return 'quote';
+  if (UNORDERED.test(line)) return 'li';
+  if (ORDERED.test(line)) return 'oli';
+
+  const keyValue = KEY_VALUE.exec(line);
+  if (keyValue && isSyntaxKey(keyValue[1] ?? '')) return `kv:${keyValue[1]}`;
+  return 'p';
+}
+
+/**
  * Compares two skeletons and reports where they first diverge.
  * Reported positions are token indices, which map to "the Nth structural
  * element" — precise enough to point a human at the paragraph.

@@ -292,19 +292,127 @@ interface RoutingStrategy {
 ```
 
 `RoutingContext` carries the candidate pool (from `llm.routing.pools`), the request
-shape (estimated input tokens, expected output tokens, required capabilities), live
-endpoint stats, and the attempt index.
+shape (estimated input tokens, expected output tokens, required capabilities, the
+pool name and the task variant), live endpoint stats, live endpoint **occupancy**,
+and the attempt index.
 
 Built-ins: `cost-optimized` (cheapest that fits), `context-optimized` (largest
 usable window / best fit), `sequential` (declared order — classic primary→fallback),
-`round-robin` (spread load). Custom strategies register by id:
+`round-robin` (rotate), `least-failures` (health-aware), `least-busy` (emptiest
+endpoint first, as a fraction of its capacity, cheapest as the tie-break). Custom
+strategies register by id:
 
 ```ts
 routingRegistry.register({ id: 'my-strategy', select: ctx => [...] });
 ```
 
-A strategy only ranks; it never calls anything. All of them get filtering for
-capability and context fit for free from `RoutingContext.candidates`.
+A strategy only ranks; it never calls anything, and it never *changes* occupancy —
+it only reads it. All of them get filtering for capability and context fit for free
+from `RoutingContext.candidates`.
+
+### 5.1 Pools
+
+A pool is either a list of model ids or an object:
+
+```yaml
+pools:
+  extract: [local-small, or-cheap]           # shorthand: models only
+  translate:
+    models: [local-small, or-luna, or-cheap]
+    strategy: least-busy                      # falls back to llm.routing.strategy
+    options: {}                               # merged over llm.routing.options
+    maxConcurrent: { local: 1, openrouter: 1 }# this pool's lane on each endpoint
+    prefer: { zh: [or-deepseek] }             # task variant -> try these first
+```
+
+The Router composes them in a fixed order, and the order is the design:
+
+```
+capability filter → pool strategy ranks → prefer floats a variant's models up
+                  → onOverflow policy → the gateway's fallback chain
+```
+
+`prefer` sits *after* the strategy because it is a statement about quality, and
+quality outranks both price and queue depth. It is a stable reordering and never a
+filter, so the rest of the pool remains the fallback chain.
+
+### 5.2 Concurrency: endpoints, lanes, claims
+
+`src/llm/Lanes.ts` owns everything about who may talk to whom, and it separates two
+things a single number would confuse:
+
+| | what it is | who enforces it |
+|---|---|---|
+| `llm.endpoints[].maxConcurrent` | what the provider tolerates | endpoint semaphore |
+| `pools.<pool>.maxConcurrent.<endpoint>` | this pool's share of it | lane semaphore |
+
+The schema refuses lanes that sum to more than the endpoint allows: a lane divides a
+cap, it never raises one. A pool's free capacity is whichever runs out first, so an
+endpoint saturated by another pool reads as full rather than as available.
+
+**Claims** are the routing input and **semaphores** are the enforcement. The gateway
+claims a lane synchronously, in the same tick as the ranking that produced the chain,
+which closes the race that would otherwise make `least-busy` advisory: three tasks
+starting together would all read "the local model is free", all choose it, and two
+would then block on a semaphore they could have avoided. The claim moves with the
+call on fallback and is released when the logical call ends. The lane semaphore is
+acquired *before* the endpoint's — never after, or a pool whose lane is full would
+hold an endpoint slot while waiting for one.
+
+### 5.3 Watching a run happen
+
+`src/observability/ProgressLog.ts` writes `progress.log` in the project root: one
+plain line per finished task, plus a line for every retry, fallback and
+written-off target. It is the only output of this tool meant to be read *during*
+a run rather than replayed after one.
+
+```
+[22:40:01] [extract]   '\ru\abiton.bio.json' : local-small:gemma4-31b-local (35.0s)
+[22:40:36] [translate] ! 'abiton -> de' fallback local:local-small -> omniroute:or-luna - output_truncated: ...
+[22:41:38] [translate] '\de\abiton.bio.md' : or-luna:cx/gpt-5.6-luna (32.4s)
+```
+
+Two seams make it possible, and both were widened rather than worked around:
+
+| question | who knows | how it gets there |
+|---|---|---|
+| which model answered | `LlmGateway` | `AttemptRecord.correlationId` + `.modelName` |
+| which task is finished | `Orchestrator` | `progressLog.taskFinished(...)` |
+
+The join key is the task id, which every pipeline already sets as the
+request's `correlationId`. Incidents arrive through `GatewayObserver`
+(`RetryInfo` / `FallbackInfo` / `TargetDownInfo`, all now carrying `pipeline`
+and `correlationId`), so an incident can name the task it interrupted.
+
+Writes are buffered and flushed at most once per `logging.progressIntervalMs`,
+and at least once per interval while anything is pending - a timer, unref'd, so
+it never holds the process open.
+
+### 5.4 Fallback for a wrong answer
+
+`LlmGateway` falls back when a **call** fails. `Orchestrator.executeTask` falls
+back when a **task** fails — which is a different event, and the one that
+produces no file:
+
+| what failed | who notices | what happens |
+|---|---|---|
+| the request | `LlmGateway` | retry, then the next target in the chain |
+| one fragment of a batch | `stringBatch` `verify`, inside `validate` | re-ask that key, then the chain |
+| the assembled document | the pipeline, after every call succeeded | `taskFallback`: run the task again elsewhere |
+
+`ExecutionContext.llm` is an `LlmPort`, so the orchestrator can hand each attempt
+an `AttemptScope` — a wrapper that carries `AttemptTuning` (`avoid`, `strategy`,
+`temperature`) into every call and records which targets answered. No pipeline
+knows any of this exists.
+
+Composition inside the router is then:
+
+```
+capability filter → pool strategy ranks → prefer floats → avoid demotes → onOverflow policy
+```
+
+`avoid` sits after `prefer` on purpose: a preference is a claim about quality, a
+target that just failed this task is evidence.
 
 ## 6. Token & cost optimization
 

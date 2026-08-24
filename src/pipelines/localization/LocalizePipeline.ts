@@ -128,10 +128,14 @@ export class LocalizePipeline implements DocumentPipeline {
       units,
       maxPerCall: config.maxStringsPerCall,
       repairAttempts: config.repairAttempts,
-      memory: await context.memories.acquire(
+      // A retry is not served the previous attempt's answers: they are what
+      // failed. Without this the cache makes task-level fallback a no-op here —
+      // every fragment would be a hit, no model would be called, and the second
+      // attempt would rebuild the identical broken document for free.
+      ...(context.attempt > 1 ? {} : { memory: await context.memories.acquire(
         `${PIPELINE_ID}-${await context.prompts.versionOf(PIPELINE_ID)}`,
         config.useTranslationMemory,
-      ),
+      ) }),
       variables: (part) => ({
         ...config.promptVariables,
         sourceLanguage: item.language,

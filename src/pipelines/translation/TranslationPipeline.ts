@@ -9,7 +9,14 @@ import {
   type TaskSeed,
   type WorkItem,
 } from '../../core/types.js';
-import { applyTextSpans, displacedMasks, extractTextSpans, missingMasks, type TextSpan } from '../../documents/markdown/textSpans.js';
+import {
+  applyTextSpans,
+  displacedMasks,
+  extractTextSpans,
+  missingMasks,
+  structuralDrift,
+  type TextSpan,
+} from '../../documents/markdown/textSpans.js';
 import { readTitle } from '../../documents/markdown/title.js';
 import { languageName } from '../../domain/vocabulary.js';
 import type { DocumentSegment } from '../../documents/types.js';
@@ -163,6 +170,14 @@ export class TranslationPipeline implements DocumentPipeline {
     }
 
     const units = dedupe(spans);
+    // The same sentence can be a paragraph in one place and a list item in
+    // another. The paragraph is the occurrence with something to lose, so it
+    // is the one that decides what the answer is allowed to look like.
+    const spanOf = new Map<string, TextSpan>();
+    for (const span of spans) {
+      const chosen = spanOf.get(keyOf(span.text));
+      if (!chosen || (chosen.kind !== 'paragraph' && span.kind === 'paragraph')) spanOf.set(keyOf(span.text), span);
+    }
     const keepForeign = config.foreignFragments === 'keep' && hasOwnScript(document.language);
     const articleContext = describeArticle(document, config.contextChars);
 
@@ -179,10 +194,14 @@ export class TranslationPipeline implements DocumentPipeline {
       // A fragment with no letter of the source script in it is a work title, a
       // name or a discography line — never a sentence of the article.
       ...(keepForeign ? { keepVerbatim: (unit) => !isTranslatable(unit.text, document.language) } : {}),
-      memory: await context.memories.acquire(
+      // A retry is not served the previous attempt's answers: they are what
+      // failed. Without this the cache makes task-level fallback a no-op here —
+      // every fragment would be a hit, no model would be called, and the second
+      // attempt would rebuild the identical broken document for free.
+      ...(context.attempt > 1 ? {} : { memory: await context.memories.acquire(
         `${PIPELINE_ID}-${await context.prompts.versionOf(SEGMENTS_PROMPT_ID)}`,
         config.useTranslationMemory,
-      ),
+      ) }),
       variables: (part) => ({
         ...config.promptVariables,
         sourceLanguage: document.language,
@@ -199,9 +218,13 @@ export class TranslationPipeline implements DocumentPipeline {
         const missing = missingMasks(unit.text, translation);
         if (missing.length > 0) return `placeholder(s) ${missing.join(', ')} were not preserved`;
         const displaced = displacedMasks(unit.text, translation);
-        return displaced.length > 0
-          ? `placeholder(s) ${displaced.join(', ')} are no longer the target of a link — keep "](" and the token together`
-          : undefined;
+        if (displaced.length > 0) {
+          return `placeholder(s) ${displaced.join(', ')} are no longer the target of a link — keep "](" and the token together`;
+        }
+        // The span this key came from, for the one check that needs to know
+        // what kind of line the fragment was lifted out of.
+        const span = spanOf.get(unit.key);
+        return span ? structuralDrift(span, translation) : undefined;
       },
     });
 

@@ -82,12 +82,51 @@ export const leastFailures: RoutingStrategy = {
   },
 };
 
+/**
+ * Spread the work: the emptiest endpoint first, the cheapest among equals.
+ *
+ * The strategy for a stage whose scarce resource is **time** rather than money.
+ * `cost-optimized` ranks the free local model first for every request, which is
+ * right about price and, on a corpus of a thousand translations, disastrous
+ * about throughput: every task queues behind an endpoint that serves one
+ * request at a time while two other endpoints sit idle. Occupancy is what tells
+ * the two situations apart — a target with room answers now, a target without
+ * it answers after everything already queued on it.
+ *
+ * It ranks on **how full** each endpoint is, not on how many slots it has left,
+ * and the difference is the whole point. An endpoint that allows three parallel
+ * requests has three free slots while idle and an endpoint that allows one has
+ * one; ranking on the count would hand the generous endpoint every request from
+ * the first one onwards, which is precisely the imbalance this exists to
+ * prevent. As a fraction of what each can hold, idle is idle, and the tie is
+ * broken by cost — so an untouched pool behaves exactly like `cost-optimized`
+ * and only starts to differ once something is actually busy.
+ *
+ * The companion setting is `llm.routing.pools.<pool>.maxConcurrent`: an
+ * endpoint's own limit is what the provider tolerates, and a lane is this
+ * pool's share of it.
+ */
+export const leastBusy: RoutingStrategy = {
+  id: 'least-busy',
+  description: 'Spread load: emptiest endpoint first (as a fraction of its capacity), cheapest as the tie-break.',
+  select(context) {
+    const ranked = [...context.candidates].sort(
+      (a, b) =>
+        context.load(a) - context.load(b) ||
+        context.estimatedCost(a) - context.estimatedCost(b) ||
+        b.weight - a.weight,
+    );
+    return fittingFirst(ranked, context);
+  },
+};
+
 export const builtinStrategies: readonly RoutingStrategy[] = [
   costOptimized,
   contextOptimized,
   sequential,
   roundRobin,
   leastFailures,
+  leastBusy,
 ];
 
 /** Convenience for custom strategies defined inline in user code. */

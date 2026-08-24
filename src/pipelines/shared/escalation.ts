@@ -170,6 +170,7 @@ async function callSegment<T>(
     {
       pipeline: task.pipeline,
       pool: spec.pool,
+      variant: task.variant,
       requiredCapabilities: spec.requiredCapabilities,
       estimatedInputTokens: context.estimator.estimateMessages(messages),
       expectedOutputTokens: spec.expectedOutputTokens,
@@ -222,6 +223,7 @@ async function maxInputTokens(spec: EscalationSpec<unknown>): Promise<number> {
   const targets = context.llm.plan({
     pipeline: spec.task.pipeline,
     pool: spec.pool,
+    variant: spec.task.variant,
     estimatedInputTokens: 0,
     expectedOutputTokens: spec.expectedOutputTokens,
     requiredCapabilities: spec.requiredCapabilities,

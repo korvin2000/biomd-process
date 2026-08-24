@@ -4,6 +4,7 @@ import type { ModelTarget } from '../src/llm/types.js';
 import { Router } from '../src/routing/Router.js';
 import { RoutingStrategyRegistry } from '../src/routing/StrategyRegistry.js';
 import { TargetStatsRegistry } from '../src/routing/TargetStats.js';
+import { routingSchema, type RoutingConfig } from '../src/config/schema.js';
 import { defineStrategy } from '../src/routing/strategies/builtin.js';
 
 function target(overrides: Partial<ModelTarget> & { modelId: string }): ModelTarget {
@@ -29,6 +30,8 @@ function target(overrides: Partial<ModelTarget> & { modelId: string }): ModelTar
       query: {},
       maxConcurrent: 0,
       requestsPerMinute: 0,
+      minRequestSpacingMs: 0,
+      stream: false,
       enabled: true,
     },
     ...overrides,
@@ -54,6 +57,11 @@ const roomy = target({
 });
 
 const fitting = { reserveOutputTokens: 1024, safetyMarginRatio: 0.9 };
+
+/** A parsed routing section, so a test states only what it is about. */
+function routingConfig(overrides: Record<string, unknown> = {}): RoutingConfig {
+  return routingSchema.parse(overrides);
+}
 const request = (
   estimatedInputTokens: number,
   capabilities: ModelTarget['capabilities'] = [],
@@ -66,10 +74,12 @@ const request = (
 });
 
 function router(strategyId: string, onOverflow?: 'demote' | 'skip'): Router {
-  return new Router(new RoutingStrategyRegistry().get(strategyId), new TargetStatsRegistry(), {
-    ...fitting,
-    ...(onOverflow ? { onOverflow } : {}),
-  });
+  return new Router(
+    new RoutingStrategyRegistry(),
+    routingConfig({ strategy: strategyId }),
+    new TargetStatsRegistry(),
+    { ...fitting, ...(onOverflow ? { onOverflow } : {}) },
+  );
 }
 
 describe('routing strategies', () => {
@@ -120,7 +130,12 @@ describe('routing strategies', () => {
         [...context.candidates].sort((a, b) => b.modelId.localeCompare(a.modelId)),
       ),
     );
-    const custom = new Router(registry.get('reverse-alpha'), new TargetStatsRegistry(), fitting);
+    const custom = new Router(
+      registry,
+      routingConfig({ strategy: 'reverse-alpha' }),
+      new TargetStatsRegistry(),
+      fitting,
+    );
     expect(custom.select([cheap, mid, wide], request(100)).map((t) => t.modelId)).toEqual(['wide', 'mid', 'cheap']);
   });
 
