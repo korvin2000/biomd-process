@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { normalizePlace, parseWebAnswer } from '../src/pipelines/websearch/answer.js';
+import { normalizePlace, parseWebAnswer, sourceKey } from '../src/pipelines/websearch/answer.js';
 import { findGaps, ageOf, type GapOptions } from '../src/pipelines/websearch/gaps.js';
 import { leadParagraph } from '../src/pipelines/websearch/WebSearchPipeline.js';
 import type { Dossier } from '../src/domain/types.js';
@@ -171,11 +171,34 @@ describe('reading a web answer', () => {
         ...answerOptions,
         asked: ['born'],
         requireVerifiedSource: true,
-        verifiedSources: new Set(['https://consulted.example/a']),
+        verifiedSources: new Set([sourceKey('https://consulted.example/a')]),
       },
     );
     expect(answer?.values).toEqual([]);
     expect(answer?.rejected[0]).toContain('not present in provider web-search evidence');
+  });
+
+  it('accepts a citation the provider consulted under a different spelling', () => {
+    // Two spellings of one page must not read as two pages: rejecting a citation
+    // that *is* verified costs the field silently, which is the same damage the
+    // check exists to prevent, pointed the other way.
+    const answer = parseWebAnswer(
+      JSON.stringify({
+        born: {
+          value: '21.02.1893',
+          source: 'http://www.consulted.example/a/?utm_source=chat#Life',
+          confidence: 0.99,
+        },
+      }),
+      {
+        ...answerOptions,
+        asked: ['born'],
+        requireVerifiedSource: true,
+        verifiedSources: new Set([sourceKey('https://consulted.example/a')]),
+      },
+    );
+    expect(answer?.rejected).toEqual([]);
+    expect(answer?.values.map((value) => value.field)).toEqual(['born']);
   });
 
   it('marks a date that contradicts the record instead of discarding it', () => {

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { runJob } from '../src/app/runJob.js';
@@ -321,5 +322,31 @@ describe('websearch', () => {
     const outcome = await runJob(workspace.app({ tasks: TASKS }, client));
     expect(outcome.summary.status).toBe('failed');
     expect(outcome.summary.failures[0]?.message).toContain('no completed web_search_call');
+  });
+
+  it('drops a field whose citation is absent from the pages the provider opened', async () => {
+    // The search really happened; the model cited a page the provider never
+    // opened. Not a failed call — a well-formed answer with one unsupported
+    // claim in it — so the run succeeds, the field is dropped, and the note is
+    // the whole account of why.
+    const client = new FakeClient((call) => {
+      const content = call.request.messages.at(-1)?.content ?? '';
+      if (!isWebSearch(content)) return respond(JSON.stringify({}));
+      return respond(
+        JSON.stringify({
+          birthplace: { value: 'Melbourne', source: 'https://invented.example/a', confidence: 0.99 },
+        }),
+        { webSearch: { performed: true, sources: [{ url: 'https://consulted.example/somebody-else' }] } },
+      );
+    });
+
+    const outcome = await runJob(workspace.app({ tasks: TASKS }, client));
+    expect(outcome.summary.failures).toEqual([]);
+    expect((await readDossier()).metadata['birthplace']).toBeUndefined();
+
+    // The field produced no file, so the journal note is the whole account of
+    // why — which is what `biomd report --notes` replays.
+    const journal = await readFile(join(outcome.runDir, 'events.jsonl'), 'utf8');
+    expect(journal).toContain('not present in provider web-search evidence');
   });
 });

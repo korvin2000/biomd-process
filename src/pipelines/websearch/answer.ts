@@ -74,7 +74,10 @@ export interface AnswerOptions {
    * used, and when that is absent too, no place is rewritten.
    */
   country?: string;
-  /** URLs the provider reports actually consulting during this response. */
+  /**
+   * Provider-reported consulted URLs, already reduced with `sourceKey`. Compared
+   * against the model's own citation only when `requireVerifiedSource` is on.
+   */
   verifiedSources?: ReadonlySet<string>;
   /** Reject model-authored URLs absent from provider search evidence. */
   requireVerifiedSource?: boolean;
@@ -179,7 +182,7 @@ function accept(field: WebField, entry: RawEntry, options: AnswerOptions): Verdi
   if (options.requireSource && !source) {
     return { reason: `no usable source URL (${entry.source ?? 'none given'})` };
   }
-  if (source && options.requireVerifiedSource && !options.verifiedSources?.has(source)) {
+  if (source && options.requireVerifiedSource && !options.verifiedSources?.has(sourceKey(source))) {
     return { reason: `source URL was not present in provider web-search evidence (${source})` };
   }
 
@@ -305,6 +308,34 @@ function countryOf(token: string, known: string | undefined): string | undefined
 
 function refines(field: WebField, current: string, candidate: string): boolean {
   return (field === 'born' || field === 'died') && refinesDate(current, candidate);
+}
+
+/**
+ * The comparison key for "the provider consulted this page", not a published value.
+ *
+ * Two spellings of one page must not read as two pages. A provider reports
+ * `https://en.wikipedia.org/wiki/Foo/`, the model writes
+ * `http://www.en.wikipedia.org/wiki/Foo#Life`, and exact equality on the
+ * normalized URL rejects a citation that is in fact verified — which, with the
+ * check on, silently costs the field. So scheme, `www.`, a trailing slash, the
+ * fragment and campaign parameters are all dropped here.
+ *
+ * Deliberately *not* `normalizeUrl`: that one produces the URL actually written
+ * into a dossier and must stay faithful. This one only ever compares.
+ */
+export function sourceKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.host.toLowerCase().replace(/^www\./, '');
+    const path = parsed.pathname.replace(/\/+$/, '');
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^(utm_|fbclid$|gclid$|ref$|source$)/i.test(key)) parsed.searchParams.delete(key);
+    }
+    const query = parsed.searchParams.toString();
+    return `${host}${path}${query ? `?${query}` : ''}`;
+  } catch {
+    return url;
+  }
 }
 
 function numberOf(value: unknown): number | undefined {

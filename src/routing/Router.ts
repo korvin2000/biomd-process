@@ -28,7 +28,7 @@ const UNCAPPED: OccupancyView = {
   load: () => 0,
 };
 
-const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {} };
+const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {}, exclude: {}, preferMode: 'reorder', preferWaitMs: 30_000 };
 
 /**
  * Builds the {@link RoutingContext} and delegates ranking to the pool's
@@ -94,7 +94,8 @@ export class Router {
     const context = this.buildContext(pool, request);
 
     const ranked = this.strategyFor(request.pool, request.strategy).select(context);
-    const preferred = this.applyPreference(dedupe(ranked.length > 0 ? ranked : pool), request);
+    const allowed = this.applyExclusion(dedupe(ranked.length > 0 ? ranked : pool), request);
+    const preferred = this.applyPreference(allowed, request);
     // Avoidance is applied *after* preference, and that order is the point: a
     // language's preferred model is a statement about quality, and a model that
     // has just produced a broken answer for this very task is evidence.
@@ -111,22 +112,90 @@ export class Router {
   }
 
   /**
-   * Floats this variant's preferred models to the front, in the order they were
-   * listed. A stable partition rather than a filter: a preference says which
-   * model to *try first*, never which models are allowed, so the pool behind it
-   * is untouched and still catches a preferred model that is down.
+   * Orders this variant's preferred models, in the order they were listed.
+   *
+   * Under `reorder` this is a stable partition rather than a filter: the
+   * preference says which model to *try first*, never which are allowed, so the
+   * pool behind it is untouched and still catches a preferred model that is
+   * down. Under `restrict` the list *is* the chain — the rest of the pool is
+   * dropped for this variant, and a variant whose listed models are all
+   * unusable routes nowhere rather than borrowing a model the config did not
+   * choose for it.
+   *
+   * Either way this runs *after* the strategy has ranked, so a preference
+   * outranks what the strategy thought. It reads queue depth from neither: a
+   * listed model that is busy is still tried first and the caller waits for its
+   * slot. `prefer` is a statement about quality, and the chain behind it
+   * answers "this one failed", never "this one is busy".
    */
   private applyPreference(targets: ModelTarget[], request: RoutingRequest): ModelTarget[] {
+    const pool = this.poolConfig(request.pool);
+    const { head, tail } = this.split(targets, request);
+    if (head.length === 0) return pool.preferMode === 'restrict' && this.preferenceFor(request) ? [] : tail;
+    return pool.preferMode === 'restrict' ? head : [...head, ...tail];
+  }
+
+  /** This variant's `prefer` list, or `undefined` when it names none. */
+  private preferenceFor(request: RoutingRequest): readonly string[] | undefined {
     const preferred = request.variant ? this.poolConfig(request.pool).prefer[request.variant] : undefined;
-    if (!preferred || preferred.length === 0) return targets;
+    return preferred && preferred.length > 0 ? preferred : undefined;
+  }
+
+  /**
+   * The chain cut in two: the models this variant asked for, in the order it
+   * asked for them, and everything else that is still allowed behind them.
+   */
+  private split(targets: ModelTarget[], request: RoutingRequest): { head: ModelTarget[]; tail: ModelTarget[] } {
+    const preferred = this.preferenceFor(request);
+    if (!preferred) return { head: [], tail: targets };
 
     const rank = new Map(preferred.map((modelId, index) => [modelId, index]));
-    const wanted = targets
+    const head = targets
       .filter((target) => rank.has(target.modelId))
       .sort((a, b) => (rank.get(a.modelId) ?? 0) - (rank.get(b.modelId) ?? 0));
-    if (wanted.length === 0) return targets;
+    return { head, tail: targets.filter((target) => !rank.has(target.modelId)) };
+  }
 
-    return [...wanted, ...targets.filter((target) => !rank.has(target.modelId))];
+  /**
+   * How this variant's call should queue: which targets are worth waiting for,
+   * for how long, and what to widen to when that runs out.
+   *
+   * Only `preferMode: wait` produces a budget. The other two modes hand back
+   * the whole chain as one tier, which is what "take the first target and wait
+   * on it" already means.
+   */
+  waitPlan(
+    chain: readonly ModelTarget[],
+    request: RoutingRequest,
+  ): { preferred: readonly ModelTarget[]; rest: readonly ModelTarget[]; waitMs: number } | undefined {
+    const pool = this.poolConfig(request.pool);
+    if (pool.preferMode !== 'wait') return undefined;
+
+    const preferred = this.preferenceFor(request);
+    if (!preferred) return undefined;
+
+    const rank = new Set(preferred);
+    const head = chain.filter((target) => rank.has(target.modelId));
+    if (head.length === 0) return undefined;
+
+    return { preferred: head, rest: chain.filter((target) => !rank.has(target.modelId)), waitMs: pool.preferWaitMs };
+  }
+
+  /**
+   * Drops the models this variant may never use.
+   *
+   * A veto rather than a ranking, so it runs before preference and before the
+   * overflow policy: an excluded model must not reappear as a fallback, as the
+   * thing a preference falls back *to*, or as the last resort a full pool waits
+   * on. Every other mechanism here reorders; this one is the only one that
+   * removes.
+   */
+  private applyExclusion(targets: ModelTarget[], request: RoutingRequest): ModelTarget[] {
+    const excluded = request.variant ? this.poolConfig(request.pool).exclude[request.variant] : undefined;
+    if (!excluded || excluded.length === 0) return targets;
+
+    const denied = new Set(excluded);
+    return targets.filter((target) => !denied.has(target.modelId));
   }
 
   /**

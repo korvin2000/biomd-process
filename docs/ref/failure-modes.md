@@ -37,8 +37,11 @@ date of death and Spanish Wikipedia URL were written into Anido's and Amigo's do
 confidence 0.98, citing a page about the wrong man. `translate` catches crosstalk incidentally —
 content-hash keys stop matching, surfacing as `response_format`. **`websearch` cannot**: the
 answer is well-formed sourced prose about a real guitarist, just the wrong one. Runtime tool evidence
-now rejects a non-search answer, and the live configuration records date conflicts instead of
-letting a sharper candidate overwrite a coarser article date.
+now rejects a non-search answer, and `requireVerifiedSource` rejects a citation the provider never
+opened — but neither catches the *right* page about the *wrong* person, and
+**`biomd.config.yaml` still sets `onDateConflict: prefer-precise`**, which lets a sharper crosstalk
+date overwrite a correct coarser one. The schema default is `report`; the live file overrides it.
+Changing that overrides published data, so it is a decision, not a cleanup.
 
 ## Questions that should never be asked
 

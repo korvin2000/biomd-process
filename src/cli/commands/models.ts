@@ -7,6 +7,15 @@ import { usableInputTokens, type ModelTarget } from '../../llm/types.js';
 import { formatDuration, formatTokens, renderTable, symbols, truncate } from '../ui/format.js';
 import { heading } from '../ui/report.js';
 
+interface ModelsOptions {
+  config?: string;
+  pool?: string;
+  tokens?: string;
+  probe?: boolean;
+  /** Commander camel-cases `--probe-search`. */
+  probeSearch?: boolean;
+}
+
 export function createModelsCommand(): Command {
   return new Command('models')
     .description('List the resolved model targets and preview routing decisions')
@@ -14,7 +23,8 @@ export function createModelsCommand(): Command {
     .option('--pool <name>', 'preview the routing order for a pool')
     .option('--tokens <n>', 'assume this many input tokens when previewing', '4000')
     .option('--probe', 'send one tiny completion to every target and report which ones answer')
-    .action(async (options: { config?: string; pool?: string; tokens?: string; probe?: boolean }) => {
+    .option('--probe-search', 'also verify live web search on paid targets — bills a per-request search fee')
+    .action(async (options: ModelsOptions) => {
       const loaded = await loadConfig({ file: options.config });
       const app = createApp(loaded, { dryRun: false });
 
@@ -41,14 +51,27 @@ export function createModelsCommand(): Command {
         const lanes = Object.entries(spec.maxConcurrent)
           .filter(([, limit]) => limit > 0)
           .map(([endpoint, limit]) => `${endpoint}×${limit}`);
-        const prefer = Object.entries(spec.prefer).map(([variant, ids]) => `${variant}→${ids.join('|')}`);
+        // Under `restrict` the list is the variant's whole chain, so a one-entry
+        // list is a pool of one. Marking it here is the cheapest place to notice.
+        // `wait` carries no such edge — the rest of the pool is still behind it.
+        const restricted = spec.preferMode === 'restrict';
+        const prefer = Object.entries(spec.prefer).map(([variant, ids]) => {
+          const denied = spec.exclude[variant] ?? [];
+          const chain = `${variant}→${ids.join('|')}${denied.length > 0 ? ` −${denied.join('−')}` : ''}`;
+          return restricted && ids.length < 2 ? pc.yellow(`${chain} !`) : chain;
+        });
 
         process.stdout.write(
           `${name.padEnd(12)} ${spec.models.join(' → ') || pc.dim('(every enabled model)')}\n` +
             `${' '.repeat(12)} ${pc.dim('strategy')} ${app.router.strategyIdFor(name)}${inherited}` +
             (lanes.length > 0 ? `  ${pc.dim('lanes')} ${lanes.join(', ')}` : '') +
-            (prefer.length > 0 ? `  ${pc.dim('prefer')} ${prefer.join(', ')}` : '') +
-            '\n',
+            (prefer.length > 0
+              ? `  ${pc.dim(`prefer (${spec.preferMode}${spec.preferMode === 'wait' ? ` ${spec.preferWaitMs}ms` : ''})`)} ${prefer.join(', ')}`
+              : '') +
+            '\n' +
+            (restricted && Object.values(spec.prefer).some((ids) => ids.length < 2)
+              ? `${' '.repeat(12)} ${pc.yellow('!')} ${pc.dim('one-model chain: any failure there fails the document')}\n`
+              : ''),
         );
       }
 
@@ -84,7 +107,7 @@ export function createModelsCommand(): Command {
         process.stdout.write(`${strategy.id.padEnd(20)} ${pc.dim(strategy.description)}\n`);
       }
 
-      if (options.probe) process.exitCode = (await probeTargets(app)) ? 0 : 1;
+      if (options.probe) process.exitCode = (await probeTargets(app, options.probeSearch === true)) ? 0 : 1;
     });
 }
 
@@ -103,14 +126,27 @@ export function createModelsCommand(): Command {
  * tools. It costs a fraction of a cent across a whole config and it is the only
  * thing that distinguishes "declared" from "works".
  */
-async function probeTargets(app: App): Promise<boolean> {
+async function probeTargets(app: App, searchOnPaid: boolean): Promise<boolean> {
   heading('Probe');
 
   const targets = app.models.all();
+  const unverified = targets.filter(
+    (target) => target.capabilities.includes('web_search') && !isFree(target) && !searchOnPaid,
+  );
+  if (unverified.length > 0) {
+    process.stdout.write(
+      pc.dim(
+        `Search is verified only on free targets. ${unverified.map((t) => t.modelId).join(', ')} ` +
+          `will answer a plain completion instead — a live search there bills a per-request fee. ` +
+          `Add --probe-search to include ${unverified.length === 1 ? 'it' : 'them'}.\n\n`,
+      ),
+    );
+  }
+
   // Deliberately sequential: this is a health check, not a throughput test, and
   // bypassing the gateway's endpoint limiters must not create its own outage.
   const results = [];
-  for (const target of targets) results.push(await probeOne(app, target));
+  for (const target of targets) results.push(await probeOne(app, target, searchOnPaid));
   const failed = results.filter((result) => !result.ok);
 
   process.stdout.write(
@@ -147,10 +183,26 @@ interface ProbeResult {
   detail: string;
 }
 
-async function probeOne(app: App, target: ModelTarget): Promise<ProbeResult> {
+/**
+ * A target billed at zero on every rate it declares.
+ *
+ * `--probe` runs before every real job, so anything it adds is paid for on every
+ * invocation. A completion of a few tokens is a fraction of a cent and stays;
+ * a live search is a per-request fee on top, which is why it is free-only unless
+ * asked for explicitly.
+ */
+function isFree(target: ModelTarget): boolean {
+  const { inputPer1M, outputPer1M, cachedInputPer1M, cacheWriteInputPer1M, reasoningPer1M } = target.pricing;
+  return [inputPer1M, outputPer1M, cachedInputPer1M ?? 0, cacheWriteInputPer1M ?? 0, reasoningPer1M ?? 0].every(
+    (rate) => rate === 0,
+  );
+}
+
+async function probeOne(app: App, target: ModelTarget, searchOnPaid: boolean): Promise<ProbeResult> {
   const startedAt = Date.now();
+  const declaresSearch = target.capabilities.includes('web_search');
+  const searches = declaresSearch && (isFree(target) || searchOnPaid);
   try {
-    const searches = target.capabilities.includes('web_search');
     const nonce = `${Date.now().toString(36)}-${target.modelId}`;
     const response = await app.clients.for(target.endpointId).complete(
       target,
@@ -176,7 +228,9 @@ async function probeOne(app: App, target: ModelTarget): Promise<ProbeResult> {
       latencyMs: Date.now() - startedAt,
       detail: searches
         ? `searched ${response.webSearch?.sources.length ?? 0} source(s): ${truncate(text, 28)}`
-        : (text ? truncate(text, 40) : `answered ${response.usage.completionTokens} token(s)`),
+        : declaresSearch
+          ? 'answered; search NOT verified (paid — use --probe-search)'
+          : (text ? truncate(text, 40) : `answered ${response.usage.completionTokens} token(s)`),
     };
   } catch (error: unknown) {
     return {

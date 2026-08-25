@@ -148,21 +148,92 @@ export class LaneRegistry implements OccupancyView {
             .acquire(signal)
         : undefined;
 
-    const releaseEndpoint = await this.limiters
-      .for(target.endpointId, {
-        requestsPerMinute: target.endpoint.requestsPerMinute,
-        maxConcurrent: target.endpoint.maxConcurrent,
-        // Spacing belongs to the endpoint, never to a lane: it is a fact about
-        // what the provider tolerates, and two pools each honouring it
-        // separately would still arrive together.
-        minRequestSpacingMs: target.endpoint.minRequestSpacingMs,
-      })
-      .acquire(signal);
+    try {
+      const releaseEndpoint = await this.limiters
+        .for(target.endpointId, {
+          requestsPerMinute: target.endpoint.requestsPerMinute,
+          maxConcurrent: target.endpoint.maxConcurrent,
+          // Spacing belongs to the endpoint, never to a lane: it is a fact about
+          // what the provider tolerates, and two pools each honouring it
+          // separately would still arrive together.
+          minRequestSpacingMs: target.endpoint.minRequestSpacingMs,
+        })
+        .acquire(signal);
 
-    return () => {
-      releaseEndpoint();
+      return () => {
+        releaseEndpoint();
+        releaseLane?.();
+      };
+    } catch (error: unknown) {
+      // The lane is already held at this point. Before abandoning an
+      // acquisition was possible this could not happen; now that a wait can
+      // time out it happens on every expiry, and a lane nobody holds and nobody
+      // releases would shrink the pool's capacity by one for the rest of the run.
       releaseLane?.();
-    };
+      throw error;
+    }
+  }
+
+  /**
+   * A slot on whichever of these targets frees one first.
+   *
+   * `undefined` means the deadline passed with all of them still busy — a
+   * caller's cue to widen its choice rather than keep waiting. Losing
+   * acquisitions are cancelled, and a loser that resolves anyway (cancellation
+   * can race the handoff by one turn) hands its slot straight back; otherwise
+   * it would be held by nobody for the rest of the run.
+   *
+   * Order is not a tie-break here and is not meant to be: this is for the case
+   * where *nothing* is free, so "first to free" is the only ranking available.
+   * A caller that wants its order honoured checks {@link freeSlots} first, in
+   * its own order, and only falls back to this when that finds nothing.
+   */
+  async acquireAny(
+    pool: string | undefined,
+    targets: readonly ModelTarget[],
+    options: { waitMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ target: ModelTarget; release: () => void } | undefined> {
+    if (targets.length === 0) return undefined;
+
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const timer =
+      options.waitMs !== undefined && Number.isFinite(options.waitMs)
+        ? setTimeout(abort, Math.max(0, options.waitMs))
+        : undefined;
+
+    try {
+      return await new Promise<{ target: ModelTarget; release: () => void } | undefined>((resolve) => {
+        let outstanding = targets.length;
+        let done = false;
+        const settle = (value: { target: ModelTarget; release: () => void } | undefined): void => {
+          if (done) return;
+          done = true;
+          resolve(value);
+        };
+
+        for (const target of targets) {
+          void this.acquire(pool, target, controller.signal).then(
+            (release) => {
+              if (done) {
+                release();
+                return;
+              }
+              controller.abort();
+              settle({ target, release });
+            },
+            () => {
+              outstanding -= 1;
+              if (outstanding === 0) settle(undefined);
+            },
+          );
+        }
+      });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
+    }
   }
 }
 

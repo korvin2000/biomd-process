@@ -82,6 +82,59 @@ function router(strategyId: string, onOverflow?: 'demote' | 'skip'): Router {
   );
 }
 
+describe('a language preference', () => {
+  /** A router whose one pool carries a `prefer` list and a mode. */
+  function preferring(prefer: Record<string, string[]>, preferMode?: 'reorder' | 'restrict'): Router {
+    return new Router(
+      new RoutingStrategyRegistry(),
+      routingConfig({
+        strategy: 'cost-optimized',
+        pools: { translate: { models: ['cheap', 'mid', 'wide'], prefer, ...(preferMode ? { preferMode } : {}) } },
+      }),
+      new TargetStatsRegistry(),
+      fitting,
+    );
+  }
+
+  const ask = (variant: string) => ({ ...request(1000), pool: 'translate', variant });
+
+  it('orders the list as written, ahead of what the strategy ranked', () => {
+    // cost-optimized would say cheap, mid, wide.
+    const order = preferring({ fr: ['wide', 'mid'] }).select([cheap, mid, wide], ask('fr'));
+    expect(order.map((t) => t.modelId)).toEqual(['wide', 'mid', 'cheap']);
+  });
+
+  it('reorder keeps the rest of the pool as the fallback chain', () => {
+    const order = preferring({ fr: ['wide'] }, 'reorder').select([cheap, mid, wide], ask('fr'));
+    expect(order.map((t) => t.modelId)).toEqual(['wide', 'cheap', 'mid']);
+  });
+
+  it('restrict lets nothing else in the pool serve that variant', () => {
+    const order = preferring({ fr: ['wide', 'mid'] }, 'restrict').select([cheap, mid, wide], ask('fr'));
+    expect(order.map((t) => t.modelId)).toEqual(['wide', 'mid']);
+  });
+
+  it('restrict leaves a variant with no preference on the whole pool', () => {
+    // The restriction is per variant, not per pool: `de` is named, `it` is not.
+    const router = preferring({ de: ['wide'] }, 'restrict');
+    expect(router.select([cheap, mid, wide], ask('it')).map((t) => t.modelId)).toEqual(['cheap', 'mid', 'wide']);
+  });
+
+  it('restrict routes nowhere rather than borrowing an unlisted model', () => {
+    // The sharp edge, stated: a one-entry list is a pool of one, and when that
+    // one is not among the candidates the variant has no chain at all. Failing
+    // loudly is the point — the alternative is a language quietly served by the
+    // model the config declined to choose for it.
+    const order = preferring({ fr: ['gone'] }, 'restrict').select([cheap, mid, wide], ask('fr'));
+    expect(order).toEqual([]);
+  });
+
+  it('reorder falls back to the whole pool in the same situation', () => {
+    const order = preferring({ fr: ['gone'] }, 'reorder').select([cheap, mid, wide], ask('fr'));
+    expect(order.map((t) => t.modelId)).toEqual(['cheap', 'mid', 'wide']);
+  });
+});
+
 describe('routing strategies', () => {
   it('cost-optimized puts the cheapest fitting target first', () => {
     const order = router('cost-optimized').select([wide, mid, cheap], request(1000));

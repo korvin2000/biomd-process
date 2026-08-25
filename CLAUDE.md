@@ -17,6 +17,7 @@ npm install
 cp .env.example .env                  # endpoint URLs / API keys
 npm run biomd -- config check         # validate config, load every prompt template
 npm run biomd -- models --probe       # one tiny call to every target — REQUIRED before a real run
+                                      # free search targets prove a real search; paid ones need --probe-search
 npm run biomd -- run --dry-run        # plan the job (docs, tasks, model chain, est. cost) — spends nothing
 npm run biomd -- run
 ```
@@ -29,7 +30,7 @@ npm run typecheck && npm test         # the whole gate — there is no lint scri
 |---|---|
 | `run [--dry-run] [--only extract,translate] [--lang en,de] [--limit n] [--concurrency n] [--strategy id] [--budget-usd n] [--max-requests n] [--resume auto\|off] [--resume-run <id>] [--fail-fast] [--skip-existing\|--no-skip-existing] [-o dir]` | process the corpus (**default** command) |
 | `config check` (default) \| `config show [--json]` | validate / print effective config, secrets redacted |
-| `models [--pool name] [--tokens n] [--probe]` | resolved targets, pools, routing preview. Exits 1 if any target fails |
+| `models [--pool name] [--tokens n] [--probe] [--probe-search]` | resolved targets, pools, routing preview. Exits 1 if any target fails. `--probe-search` also verifies search on paid targets — **it spends money** |
 | `prompts list` (default) \| `prompts show <task> [--messages]` | inspect/render templates, no tokens spent |
 | `report [runId] [--failed] [--notes [regex]]` | summarize a run. `--notes` replays decisions that produced **no file** |
 | `portrait <who…> [--top n] [--min-identity n] [--all] [--json]` | search the image index for one person, with reasoning. LLM-free |
@@ -71,6 +72,14 @@ npm run score -- input/ru out
 - **`run` is the default command, so options come *after* the subcommand.**
   `biomd config check -c f.yaml`, never `biomd -c f.yaml config check` — the second form used to be
   parsed as `run` with two ignorable arguments and quietly processed the whole corpus.
+- **`preferMode` decides what a `prefer` list means.** `reorder` floats it to the front; `restrict`
+  makes it the variant's whole chain (a one-entry list is then a pool of one — `biomd models` marks
+  them); `wait` makes it a first tier, queued for `preferWaitMs` before widening to the rest of the
+  pool. Only `wait` reads queue depth — under the other two a busy preferred target is still tried
+  first and the caller queues on it, which is why it serves 100% of its variant.
+- **`exclude` is a veto and the only thing that removes a model.** YAML eats a leading `!`
+  (`[a, !b]` → `['a', '']`, warning only), which is why it is its own map and not a marker in
+  `prefer`.
 - **A pool is a fallback chain, so a first choice that never works is invisible**: the run
   completes, every document is produced, and the only trace is the bill from the backup. Hence
   `--probe` before, and the run summary's target-health table after. A pool of **one** has no chain
@@ -82,6 +91,14 @@ npm run score -- input/ru out
 - **A model without web search answers search questions anyway**, fluently, with fabricated
   citations. Search targets therefore declare `webSearchMode`, and a result is accepted only with
   provider search-call/source evidence; the capability list alone is not proof.
+- **Only a real success may call `breakers.recordSuccess`** — it is `entries.delete(key)`, a full
+  wipe that closes an open breaker. A failure that merely does not *count* toward the circuit
+  (`response_format`, `unknown`, `invalid_request`) must record **nothing**, or a target alternating
+  those with real 5xx never reaches its threshold and a failed half-open probe restores full traffic.
+- **`model_unavailable` is not permanent.** It is the classification for a bare 404 and for
+  `no healthy deployment`, and `omniroute` produces both for a model listed in its own `/v1/models`,
+  working again minutes later. `disablesTarget` — the "write this target off for the whole run" list —
+  holds only `auth` and `quota`.
 - **Editing a prompt template invalidates every fingerprint** (both files hash into
   `promptVersion`) and re-plans the corpus. It also correctly starts a fresh translation-memory
   namespace — but a bad rendering already cached is re-served verbatim until then.

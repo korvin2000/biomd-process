@@ -51,6 +51,13 @@ prompt.
    subject's nationality: `Александр` → `Alexander`, not `Oleksandr`;
    `Тавровский` → `Tavrovsky`, not `Tavrovskyi`.
 
+   **Finish the word.** A name changes alphabet whole or not at all — one word
+   never contains two. `Синчук` → `Sinchuk`, never `Sinчuk`; `ХВАН` → `KHVAN`,
+   never `KHВAN`; `Карлеваро` → `Carlevaro`, never `Карлеvaro`. The letter left
+   behind is always one of two kinds: one with no single-letter counterpart
+   (`ч`, `щ`, `ж`, `х`), or one shaped like a Latin letter it is not (`В`, `Р`,
+   `Н`, `С`, `Х`). Write both out the way the target language spells that sound.
+
 7. **A title the article already prints in another language *is* that title.**
    These discographies are bilingual — the released name first, a source-language
    gloss after it. Keep the printed name exactly as it stands and translate the

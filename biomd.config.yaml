@@ -82,11 +82,20 @@ tasks:
     # Route only to targets declaring real web-search capability.
     requireWebSearchCapability: true
     requireSource: true # require a source URL
+    # …and require the provider to report having opened that URL. Turn off if a
+    # gateway reports redirect URLs rather than the pages behind them.
+    requireVerifiedSource: true
     minConfidence: 0.7
     # Age threshold for querying alive/dead/unknown when death is missing.
     livenessAgeYears: 78
-    upgradePrecision: true # exact-date upgrades require corroboration/review
+    upgradePrecision: true # ask for the exact day when only a year/month is known
     # prefer-precise | report | ignore; equal-precision conflicts are reported.
+    #
+    # Both lines below override a safer schema default (`false` / `report`) and
+    # both write to published data. `prefer-precise` lets a sourced day-precision
+    # date replace a coarser one from the article — which is the upgrade it is
+    # for, and also the path by which a crosstalk answer about a namesake
+    # overwrites a correct date. See docs/ref/failure-modes.md.
     onDateConflict: prefer-precise
     includeContext: lead # none | lead
     contextChars: 600
@@ -222,16 +231,18 @@ llm:
       reasoning: { enabled: false, dialect: reasoning }
       params:
         temperature: 0.36
-      # Provider pin; allowFallbacks=false fails instead of routing elsewhere.
-      # I am not sure, what is a correct way to configure provider?
-        # Provider pin; allow_fallbacks=false fails instead of routing elsewhere.
-        extra:
-          provider:
-            order: [CoreWeave, Parasail, DeepInfra]
-            allow_fallbacks: false        
-      provider: # or this way?
+      # The typed block is the correct place, and the only one that offers
+      # `requireParameters`. `params.extra.provider` is the raw escape hatch; it
+      # is assigned to the body *after* this block, so setting both silently
+      # discards this one. See `providerRoutingSchema` in src/config/schema.ts.
+      #
+      # `allowFallbacks: false` pins the run to `order` and fails rather than
+      # changing host mid-corpus. For a thousand articles the schema recommends
+      # leaving it unset, so the list stays a preference with the market behind
+      # it; it is set here deliberately, to keep the measured pricing above true.
+      provider:
         order: [CoreWeave, Parasail, DeepInfra]
-        allowFallbacks: false        
+        allowFallbacks: false
       tags: [remote, cheap]
 
     - id: deepseek
@@ -330,8 +341,16 @@ llm:
           local: 1
           omniroute: 3
           openrouter: 4
-        # Language preferences reorder candidates; they never remove fallbacks.
-        # Preferences outrank the normal pool ranking.
+        # wait: a language's list is the first tier. One of them is used when it
+        # is free; when none is, the call queues for `preferWaitMs` and only
+        # then widens to the rest of the pool. If everything allowed is busy it
+        # waits for whichever frees first — running out of preferred models is a
+        # reason to look further, never a reason to fail a document.
+        #
+        # Spent idle: a waiting task holds one of `run.concurrency`'s workers,
+        # so this trades throughput for quality and wants seconds, not minutes.
+        preferMode: wait
+        preferWaitMs: 30000
         prefer:
           zh: [deepseek]
           ja: [deepseek]
@@ -341,6 +360,12 @@ llm:
           fr: [deepseek, minimax-m3]
           de: [gpt-luna]
           en: [gpt-luna]
+        # Never, whatever else says so. A veto, applied to every tier — an
+        # excluded model is gone from the preference list, from the rest of the
+        # pool, and from the final wait. Kept in its own map because YAML reads
+        # a leading `!` as a tag: `[a, !b]` parses to `['a', '']` and the veto
+        # would disappear with only a warning.
+        exclude: {}
       # Free OmniRoute search targets first; paid-search is the final fallback.
       # maxTargets must stay >= 4; least-busy may use paid search for throughput.
       websearch:

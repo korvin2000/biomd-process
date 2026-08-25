@@ -98,6 +98,30 @@ describe('Responses streaming and usage', () => {
     expect(response.usage?.total_tokens).toBe(110);
   });
 
+  it('keeps usage and the truncation reason when the stream ends `incomplete`', async () => {
+    // The event a call that hits `max_output_tokens` ends with. Dropping it bills
+    // a 30k-token answer as zero, hides it from the budget guard, and turns the
+    // truncation into a retryable `response_format` — buying the identical cut
+    // on every attempt.
+    const response = await collectResponsesStream(
+      chunks(
+        { type: 'response.output_text.delta', delta: '{"born": {"value": "21.02' },
+        {
+          type: 'response.incomplete',
+          response: {
+            status: 'incomplete',
+            incomplete_details: { reason: 'max_output_tokens' },
+            usage: { input_tokens: 5000, output_tokens: 32_768, total_tokens: 37_768 },
+            output: [{ type: 'message', content: [{ type: 'output_text', text: '{"born": {"value": "21.02' }] }],
+          },
+        },
+      ),
+    );
+
+    expect(response.incomplete_details?.reason).toBe('max_output_tokens');
+    expect(mapResponsesUsage(response.usage).totalTokens).toBe(37_768);
+  });
+
   it('normalizes OmniRoute Chat cache tokens that were added twice', () => {
     const usage = mapChatUsage(
       {

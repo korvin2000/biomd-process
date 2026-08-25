@@ -302,11 +302,72 @@ const poolSchema = z.object({
    * Task variant → the models to try first for it. For `translate` and
    * `localize` the variant is the target language code.
    *
-   * A reordering of this pool, never an addition to it: every id named here
-   * must also be in `models`, so a preference can never route somewhere the
-   * pool does not allow, and the rest of the pool remains the fallback chain.
+   * Never an addition to this pool: every id named here must also be in
+   * `models`, so a preference can never route somewhere the pool does not
+   * allow. Order inside the list is the order they are tried.
    */
   prefer: z.record(z.array(identifier)).default({}),
+  /**
+   * What a `prefer` list means when the variant matches.
+   *
+   *  - `reorder` (the default) floats the listed models to the front and keeps
+   *    the rest of the pool behind them. A preference is then a quality
+   *    statement with the whole pool still catching a listed model that is
+   *    down, and preferring a model can never make a variant unroutable.
+   *  - `restrict` treats the list as the *entire* chain for that variant.
+   *    Nothing else in the pool may serve it.
+   *
+   * `restrict` is the stronger claim and the sharper edge: the list becomes the
+   * variant's whole fallback chain, so a one-entry list is a pool of one — it
+   * has no chain at all, and every transient failure becomes a failed document.
+   * A variant whose listed models are all unusable fails loudly rather than
+   * quietly borrowing a model the config did not choose, which is the point.
+   * Variants with no `prefer` entry are unaffected and use the full pool.
+   */
+  /**
+   * Task variant → models that may **never** serve it, whatever else says so.
+   *
+   * A veto, applied last and to every tier: an excluded model is dropped from
+   * the preference list, from the rest of the pool, and from the final wait. A
+   * separate map rather than a marker inside `prefer` because YAML reads a
+   * leading `!` as a tag — `[a, !b]` parses to `['a', '']` with only a warning,
+   * so the veto would vanish silently. `providerRoutingSchema` splits
+   * `order`/`ignore` for the same reason.
+   */
+  exclude: z.record(z.array(identifier)).default({}),
+  /**
+   * What a `prefer` list means when the variant matches.
+   *
+   *  - `reorder` (the default) floats the listed models to the front and keeps
+   *    the rest of the pool behind them. A preference is then a quality
+   *    statement with the whole pool still catching a listed model that is
+   *    down, and preferring a model can never make a variant unroutable.
+   *  - `restrict` treats the list as the *entire* chain for that variant.
+   *    Nothing else in the pool may serve it.
+   *  - `wait` treats the list as a first tier worth queueing for: a preferred
+   *    model is used when one is free, waited on for `preferWaitMs` when none
+   *    is, and only then does the rest of the pool get the request.
+   *
+   * `restrict` is the stronger claim and the sharper edge: the list becomes the
+   * variant's whole fallback chain, so a one-entry list is a pool of one — it
+   * has no chain at all, and every transient failure becomes a failed document.
+   * `wait` has no such edge, because the rest of the pool is still behind it.
+   * Variants with no `prefer` entry are unaffected and use the full pool.
+   */
+  preferMode: z.enum(['reorder', 'restrict', 'wait']).default('reorder'),
+  /**
+   * How long `preferMode: wait` queues for a preferred model before widening.
+   *
+   * Spent per call, and spent *idle*: the task holds one of `run.concurrency`'s
+   * workers while it waits, so a value large enough to matter is also large
+   * enough to stall the run. Seconds, not minutes.
+   *
+   * Expiry widens the choice; it never fails the call. If the rest of the pool
+   * is busy too, the call waits for whichever allowed model frees first —
+   * "nothing preferred was free" is a reason to look further, never a reason to
+   * give up on a document.
+   */
+  preferWaitMs: z.number().int().nonnegative().default(30_000),
 }).strict();
 
 /** A pool is either a bare model list (the shorthand) or the expanded object. */
@@ -893,6 +954,19 @@ export const webSearchTaskSchema = taskBase
     requireWebSearchCapability: z.boolean().default(true),
     /** Drop any value that arrives without a usable source URL. */
     requireSource: z.boolean().default(true),
+    /**
+     * Also require that the cited URL appears in the provider's own search
+     * evidence — the pages it reports having consulted — and not merely in the
+     * model's prose.
+     *
+     * A separate setting from `requireSource` because it is a separate claim and
+     * a much stronger one: the first asks the answer to name a page, the second
+     * asks the *provider* to confirm it opened that page. It is also the one
+     * that can silently cost a whole run's fields if a gateway reports redirect
+     * URLs rather than the pages behind them, so it must be turnable off on its
+     * own. Comparison is by `sourceKey`, not by string equality.
+     */
+    requireVerifiedSource: z.boolean().default(true),
     /** Drop any value the answer itself rates below this. */
     minConfidence: z.number().min(0).max(1).default(0.7),
     /**
@@ -1389,6 +1463,44 @@ function crossFieldChecks(config: z.infer<typeof rawShape>, ctx: z.RefinementCtx
           });
         }
       });
+    }
+
+    // Same reasoning as the preference check above, and one more failure it
+    // catches: excluding a model the pool never had reads as a working veto.
+    for (const [variant, excluded] of Object.entries(spec.exclude)) {
+      excluded.forEach((memberId, index) => {
+        if (members.size > 0 && !members.has(memberId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['llm', 'routing', 'pools', pool, 'exclude', variant, index],
+            message:
+              `Model "${memberId}" is excluded for "${variant}" but is not in pool "${pool}". ` +
+              'The exclusion has nothing to act on; remove it, or fix the id.',
+          });
+        }
+        if (spec.prefer[variant]?.includes(memberId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['llm', 'routing', 'pools', pool, 'exclude', variant, index],
+            message:
+              `Model "${memberId}" is both preferred and excluded for "${variant}". ` +
+              'An exclusion is a veto and wins, so the preference is dead text — say one or the other.',
+          });
+        }
+      });
+    }
+
+    // A variant whose whole tier is excluded routes nowhere, which is a config
+    // mistake that only shows up as failed documents halfway through a run.
+    for (const [variant, excluded] of Object.entries(spec.exclude)) {
+      const usable = [...members].filter((memberId) => !excluded.includes(memberId));
+      if (members.size > 0 && usable.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['llm', 'routing', 'pools', pool, 'exclude', variant],
+          message: `Every model in pool "${pool}" is excluded for "${variant}", leaving nothing to route to.`,
+        });
+      }
     }
 
     for (const [endpointId, limit] of Object.entries(spec.maxConcurrent)) {

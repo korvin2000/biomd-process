@@ -193,6 +193,10 @@ tasks:
     requireWebSearchCapability: true
     # A value with no source URL behind it is an assertion from memory.
     requireSource: true
+    # A source URL the model wrote is a claim; a URL in the provider's own
+    # search evidence is a fact. This requires the second. Turn it off only if a
+    # gateway reports redirect URLs instead of the pages behind them.
+    requireVerifiedSource: true
     minConfidence: 0.7
     # Age past which an undated death becomes a question. Not a claim that
     # anyone has died: past it, "the article does not mention a death" stops
@@ -821,6 +825,20 @@ llm:
           local: 1
           omniroute: 3
           openrouter: 3
+        # reorder (default) | restrict | wait.
+        #   reorder   float the list to the front, rest of the pool behind it
+        #   restrict  the list is the whole chain; a one-entry list is a pool of one
+        #   wait      the list is a first tier: use a free one, else queue
+        #             `preferWaitMs`, else widen to the rest of the pool, else
+        #             wait for whichever allowed model frees first
+        # Only `wait` reads queue depth. Under the other two a busy preferred
+        # model is still tried first and the caller queues on it.
+        preferMode: reorder
+        preferWaitMs: 30000
+        # Models a language may never use, whatever else says so. Its own map
+        # rather than a `!` marker inside `prefer`, because YAML reads a leading
+        # `!` as a tag: `[a, !b]` parses to `['a', '']` with only a warning.
+        exclude: {}
         # Which model renders which language best, by target language code.
         # A reordering of the pool and never an addition to it: the models
         # behind the preferred one are still its fallback chain, so a preference

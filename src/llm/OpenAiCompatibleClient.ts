@@ -350,11 +350,25 @@ export function reasoningFields(target: Pick<ModelTarget, 'reasoning'>): Record<
   }
 }
 
+/**
+ * The Responses spelling of the same intent — but only for the dialects that
+ * have one.
+ *
+ * `reasoning_effort` and `reasoning` are both effort-based and map onto the
+ * Responses `reasoning` object directly. `thinking` does not: Anthropic's
+ * `{ type, budget_tokens }` has no analogue here, and emitting `{ effort }` in
+ * its place would look like it worked while asking for something else. A target
+ * that needs it says so through `params.extra`, where what goes on the wire is
+ * visible in the config.
+ */
 function responsesReasoning(target: Pick<ModelTarget, 'reasoning'>): Record<string, unknown> | undefined {
   const { reasoning } = target;
-  if (reasoning.dialect === 'none') return undefined;
+  if (reasoning.dialect !== 'reasoning_effort' && reasoning.dialect !== 'reasoning') return undefined;
+  if (!reasoning.enabled) return { effort: 'none' };
   return {
-    effort: reasoning.enabled ? reasoning.effort : 'none',
+    effort: reasoning.effort,
+    ...(reasoning.dialect === 'reasoning' && reasoning.maxTokens ? { max_tokens: reasoning.maxTokens } : {}),
+    ...(reasoning.dialect === 'reasoning' ? { exclude: reasoning.exclude } : {}),
   };
 }
 
@@ -499,16 +513,33 @@ export async function collectStream(
   };
 }
 
+/**
+ * Reassembles a streamed Responses call into the non-streamed shape.
+ *
+ * Every terminal event carries the whole response object, so the work is to
+ * catch all three of them. `response.incomplete` is the one that matters most
+ * and is the easiest to forget: it is what a call that hits `max_output_tokens`
+ * ends with, and it carries both the `usage` block and the
+ * `incomplete_details.reason` that becomes `finishReason: 'length'`. Dropping it
+ * bills a 30k-token answer as zero, hides it from the budget guard, and
+ * classifies the truncation as `response_format` — which is retryable, so the
+ * identical cut is bought again on every attempt.
+ *
+ * The synthesized fallback is for a stream that ends with no terminal event at
+ * all; it can only carry the text, so it says `incomplete` rather than claiming
+ * a clean stop.
+ */
+const RESPONSES_TERMINAL_EVENTS = new Set(['response.completed', 'response.incomplete', 'response.failed']);
+
 export async function collectResponsesStream(stream: AsyncIterable<ResponseStreamEventLike>): Promise<ResponseLike> {
-  let completed: ResponseLike | undefined;
+  let terminal: ResponseLike | undefined;
   let text = '';
 
   for await (const event of stream) {
     if (event.type === 'response.output_text.delta' && event.delta) text += event.delta;
-    if (event.type === 'response.completed' && event.response) completed = event.response;
-    if (event.type === 'response.failed' && event.response) completed = event.response;
+    if (event.type && RESPONSES_TERMINAL_EVENTS.has(event.type) && event.response) terminal = event.response;
   }
-  if (completed) return completed;
+  if (terminal) return terminal;
   return {
     status: 'incomplete',
     output: [{ type: 'message', content: [{ type: 'output_text', text }] }],

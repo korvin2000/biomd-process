@@ -83,9 +83,20 @@ export function countsTowardCircuit(kind: LlmErrorKind): boolean {
   return CIRCUIT_FAILURES.has(kind);
 }
 
-/** Target-scoped failures for which another request in the same run cannot help. */
+/**
+ * Target-scoped failures for which another request in the same run cannot help,
+ * and the target is therefore written off until the process exits.
+ *
+ * `model_unavailable` is deliberately **not** here, however conclusive its name
+ * sounds. It is the classification for a bare 404 and for `no healthy
+ * deployment`, and `omniroute` produces both intermittently for a model listed
+ * in its own `/v1/models` — working again minutes later. Writing the target off
+ * permanently on one such window is how a free-first pool spends the rest of a
+ * corpus on the paid fallback. The circuit breaker already covers it: repeated
+ * occurrences open it, and a cool-down lets the target prove itself again.
+ */
 export function disablesTarget(kind: LlmErrorKind): boolean {
-  return kind === 'auth' || kind === 'quota' || kind === 'model_unavailable';
+  return kind === 'auth' || kind === 'quota';
 }
 
 export class LlmCallError extends AppError {

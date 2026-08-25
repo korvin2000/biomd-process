@@ -1,4 +1,5 @@
-import { systemClock, type Clock } from '../shared/async.js';
+import { systemClock, throwIfAborted, type Clock } from '../shared/async.js';
+import { AbortedError } from '../shared/errors.js';
 
 export interface RateLimitOptions {
   /** 0 = unlimited. */
@@ -38,29 +39,76 @@ export class RateLimiter {
     this.lastRefill = clock.now();
   }
 
-  /** Resolves to a release function; always call it in a `finally`. */
+  /** True when a slot is available without waiting. Advisory: read, then race. */
+  get hasFreeSlot(): boolean {
+    const limit = this.options.maxConcurrent || Number.POSITIVE_INFINITY;
+    return this.active < limit;
+  }
+
+  /**
+   * Resolves to a release function; always call it in a `finally`.
+   *
+   * Rejects with {@link AbortedError} when `signal` fires first, and takes no
+   * slot when it does. That is what makes "wait this long for a slot, then give
+   * up" expressible: a caller that cannot tell being served from giving up has
+   * to wait forever.
+   */
   async acquire(signal?: AbortSignal): Promise<() => void> {
     await this.acquireSlot(signal);
-    await this.acquireToken(signal);
-    await this.acquireSpacing(signal);
 
     let released = false;
-    return () => {
+    const release = (): void => {
       if (released) return;
       released = true;
       this.active -= 1;
       this.waiters.shift()?.();
     };
+
+    // The slot is held from here on, so anything that throws below must hand it
+    // back. Token and spacing waits both sleep, and both reject when aborted.
+    try {
+      await this.acquireToken(signal);
+      await this.acquireSpacing(signal);
+    } catch (error: unknown) {
+      release();
+      throw error;
+    }
+    return release;
   }
 
+  /**
+   * Queues for a concurrency slot, or rejects if `signal` fires while queueing.
+   *
+   * An abandoned waiter takes itself out of the queue. Leaving it there costs
+   * more than the memory: `release` hands the freed slot to `waiters.shift()`,
+   * so a dead waiter swallows a wakeup that a live one was owed, and the queue
+   * stalls behind it until the next release.
+   */
   private async acquireSlot(signal?: AbortSignal): Promise<void> {
     const limit = this.options.maxConcurrent || Number.POSITIVE_INFINITY;
+    throwIfAborted(signal, 'Aborted before acquiring a concurrency slot');
+
     while (this.active >= limit) {
-      await new Promise<void>((resolve) => {
-        this.waiters.push(resolve);
-        signal?.addEventListener('abort', () => resolve(), { once: true });
+      await new Promise<void>((resolve, reject) => {
+        const waiter = (): void => {
+          signal?.removeEventListener('abort', onAbort);
+          // Woken and abandoned in the same turn: pass the slot on rather than
+          // taking it, or the wakeup is lost with nobody holding anything.
+          if (signal?.aborted) {
+            this.waiters.shift()?.();
+            reject(new AbortedError('Aborted while waiting for a concurrency slot'));
+            return;
+          }
+          resolve();
+        };
+        const onAbort = (): void => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(new AbortedError('Aborted while waiting for a concurrency slot'));
+        };
+        this.waiters.push(waiter);
+        signal?.addEventListener('abort', onAbort, { once: true });
       });
-      if (signal?.aborted) break;
     }
     this.active += 1;
   }

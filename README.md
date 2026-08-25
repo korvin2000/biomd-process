@@ -78,8 +78,10 @@ npm run biomd -- run --dry-run
 ```
 
 `--probe` sends one tiny completion to every target and reports who answered;
-for a `web_search` target it also requires a provider search call with a
-consulted source. A pool is a
+for a **free** `web_search` target it also requires a provider search call with
+a consulted source. Search is not verified on a paid target unless you add
+`--probe-search`, because a live search bills a per-request fee and this command
+runs before every job. A pool is a
 fallback chain, so a dead first choice is otherwise invisible until the bill
 arrives. `--dry-run` then plans the whole job — documents, tasks, the model
 chain each pipeline would use and an estimated cost — without issuing a single
@@ -94,7 +96,8 @@ request. Drop the flag to execute.
 | `config check` | Validate the config, resolve paths, load every prompt template. |
 | `config show` | Print the effective config with secrets redacted. |
 | `models` | List resolved model targets, pools, and a routing preview. |
-| `models --probe` | Call every target once; search targets must prove a real search. Exits 1 if any fails. |
+| `models --probe` | Call every target once; free search targets must prove a real search. Exits 1 if any fails. |
+| `models --probe --probe-search` | Also verify search on **paid** targets. Bills a per-request search fee. |
 | `prompts list` / `prompts show <task>` | Inspect and render templates without spending tokens. |
 | `report [runId]` | Summarize a finished run from its journal. `--notes` replays the decisions that produced no file — a refused web answer, a date conflict recorded rather than published. |
 | `portrait <who…>` | Search the image index for one entry and print the ranking with its reasoning (`--faces n` for an ensemble). Spends nothing. |

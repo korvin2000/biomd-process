@@ -25,7 +25,12 @@ import { PipelineError } from '../../shared/errors.js';
 import { hashStructure } from '../../shared/hash.js';
 import { keyOf, type LocalizationUnit } from '../localization/StringTable.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
-import { hasOwnScript, isTranslatable } from '../shared/script.js';
+import {
+  halfTransliteratedNote,
+  hasOwnScript,
+  introducedMixedScriptWords,
+  isTranslatable,
+} from '../shared/script.js';
 import { translateUnits } from '../shared/stringBatch.js';
 import { StructureGuard } from './StructureGuard.js';
 
@@ -134,6 +139,10 @@ export class TranslationPipeline implements DocumentPipeline {
         ? await this.translateSpans(task, context, document, targetLang, config)
         : await this.translateDocument(task, context, document, targetLang, config);
 
+    // Both modes land here, so the check sits at the one point that has the
+    // source and the finished edition side by side.
+    const halfTransliterated = introducedMixedScriptWords(document.content, outcome.markdown);
+
     return {
       artifacts: [
         {
@@ -146,7 +155,9 @@ export class TranslationPipeline implements DocumentPipeline {
       usage: outcome.usage,
       costUsd: outcome.costUsd,
       contextAttempt: outcome.attempt,
-      notes: outcome.notes,
+      notes: halfTransliterated.length > 0
+        ? [...outcome.notes, halfTransliteratedNote(halfTransliterated)]
+        : outcome.notes,
     };
   }
 
