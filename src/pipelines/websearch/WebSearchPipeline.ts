@@ -19,7 +19,7 @@ import { PipelineError } from '../../shared/errors.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import { findDossierToLocalize } from '../shared/dossierSource.js';
-import { parseWebAnswer, type WebAnswer, type WebValue } from './answer.js';
+import { parseWebAnswer, sourceKey, type WebAnswer, type WebValue } from './answer.js';
 import { readTitle } from '../../documents/markdown/title.js';
 import { languageName, resolveEnsemble } from '../../domain/vocabulary.js';
 import { findGaps, type FieldQuestion, type GapAnalysis, type WebField } from './gaps.js';
@@ -216,7 +216,8 @@ export class WebSearchPipeline implements DocumentPipeline {
           const verifiedSources = new Set(
             response.webSearch.sources
               .map((source) => normalizeUrl(source.url))
-              .filter((source): source is string => source !== undefined),
+              .filter((source): source is string => source !== undefined)
+              .map(sourceKey),
           );
           parsed = parseWebAnswer(response.text, {
             asked,
@@ -228,7 +229,7 @@ export class WebSearchPipeline implements DocumentPipeline {
             // prose value belongs in its language.
             language: item.language,
             verifiedSources,
-            requireVerifiedSource: config.requireSource,
+            requireVerifiedSource: config.requireVerifiedSource,
             ...(hints.country ? { country: hints.country } : {}),
           });
           if (!parsed) return { ok: false, reason: 'the answer was not a JSON object' };

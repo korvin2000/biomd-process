@@ -84,9 +84,10 @@ A task declaring `mergesOutput` (`catalog`, `websearch`) is exempt from the firs
 ### `tasks.websearch`
 | Key | Default | |
 |---|---|---|
-| `requireWebSearchCapability` | `true` | only as honest as the capability list |
+| `requireWebSearchCapability` | `true` | the routing gate; a declaration, checked at runtime by search evidence |
+| `requireSource` · `requireVerifiedSource` | `true` · `true` | the answer must name a URL · the **provider** must report opening it. Compared by `sourceKey`, not string equality |
 | `livenessAgeYears` | `78` | born this long ago with no `died` → the absence becomes a question |
-| `onDateConflict` | `report` | keeps the authored value and writes `conflicts[]`; `prefer-precise` is an explicit overwrite policy |
+| `onDateConflict` | `report` | keeps the authored value and writes `conflicts[]`; `prefer-precise` is an explicit overwrite policy — and what `biomd.config.yaml` sets |
 | `contextChars` | `600` | the lead paragraph, for telling namesakes apart |
 
 ### `tasks.portrait`

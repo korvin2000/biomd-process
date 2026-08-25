@@ -9,6 +9,7 @@ import {
   disablesTarget,
   isOutputTruncated,
 } from '../src/reliability/errors.js';
+import type { LlmErrorKind } from '../src/reliability/errors.js';
 import { RetryPolicy } from '../src/reliability/RetryPolicy.js';
 import { TimeoutError } from '../src/shared/errors.js';
 import type { Clock } from '../src/shared/async.js';
@@ -111,8 +112,65 @@ describe('target health classification', () => {
   it('disables only conclusively unusable targets', () => {
     expect(disablesTarget('auth')).toBe(true);
     expect(disablesTarget('quota')).toBe(true);
-    expect(disablesTarget('model_unavailable')).toBe(true);
     expect(disablesTarget('timeout')).toBe(false);
+  });
+
+  it('does not write a target off for the run on `model_unavailable`', () => {
+    // It is the classification for a bare 404 and for `no healthy deployment`,
+    // and `omniroute` produces both intermittently for a model listed in its own
+    // `/v1/models`, working again minutes later. Permanently disabling the target
+    // on one such window is how the rest of a corpus ends up on the paid
+    // fallback. The breaker still counts it, so a genuinely dead target opens.
+    expect(disablesTarget('model_unavailable')).toBe(false);
+    expect(countsTowardCircuit('model_unavailable')).toBe(true);
+  });
+});
+
+describe('the circuit breaker under mixed failure kinds', () => {
+  const config = { enabled: true, failureThreshold: 3, resetAfterMs: 30_000, halfOpenMaxCalls: 1 };
+
+  /** Exactly what `LlmGateway` does on a caught failure. */
+  function onFailure(breakers: CircuitBreakerRegistry, key: string, kind: LlmErrorKind): void {
+    if (countsTowardCircuit(kind)) breakers.recordFailure(key);
+  }
+
+  it('opens for a target that keeps failing on health grounds', () => {
+    const breakers = new CircuitBreakerRegistry(config);
+    for (let i = 0; i < 3; i++) onFailure(breakers, 'ep:model', 'server');
+    expect(breakers.stateOf('ep:model')).toBe('open');
+  });
+
+  it('does not let a request-specific failure erase the failures counted so far', () => {
+    // `recordSuccess` is `entries.delete(key)`. Calling it for a failure that
+    // merely does not *count* is a full state wipe, and a target alternating
+    // `server` with `response_format` would then never reach its threshold.
+    const breakers = new CircuitBreakerRegistry(config);
+    onFailure(breakers, 'ep:model', 'server');
+    onFailure(breakers, 'ep:model', 'server');
+    onFailure(breakers, 'ep:model', 'response_format');
+    onFailure(breakers, 'ep:model', 'server');
+    expect(breakers.stateOf('ep:model')).toBe('open');
+  });
+
+  it('keeps the breaker open when a half-open probe fails for a request-specific reason', () => {
+    let now = 1_000_000;
+    const breakers = new CircuitBreakerRegistry(config, { now: () => now, sleep: async () => {} });
+    for (let i = 0; i < 3; i++) onFailure(breakers, 'ep:model', 'server');
+
+    now += 40_000;
+    expect(breakers.canAttempt('ep:model')).toBe(true); // the single probe
+    onFailure(breakers, 'ep:model', 'response_format');
+    expect(breakers.stateOf('ep:model')).not.toBe('closed');
+  });
+
+  it('clears the record only on a real success', () => {
+    const breakers = new CircuitBreakerRegistry(config);
+    onFailure(breakers, 'ep:model', 'server');
+    onFailure(breakers, 'ep:model', 'server');
+    breakers.recordSuccess('ep:model');
+    onFailure(breakers, 'ep:model', 'server');
+    onFailure(breakers, 'ep:model', 'server');
+    expect(breakers.stateOf('ep:model')).toBe('closed');
   });
 });
 

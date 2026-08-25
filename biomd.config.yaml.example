@@ -193,6 +193,10 @@ tasks:
     requireWebSearchCapability: true
     # A value with no source URL behind it is an assertion from memory.
     requireSource: true
+    # A source URL the model wrote is a claim; a URL in the provider's own
+    # search evidence is a fact. This requires the second. Turn it off only if a
+    # gateway reports redirect URLs instead of the pages behind them.
+    requireVerifiedSource: true
     minConfidence: 0.7
     # Age past which an undated death becomes a question. Not a claim that
     # anyone has died: past it, "the article does not mention a death" stops

@@ -893,6 +893,19 @@ export const webSearchTaskSchema = taskBase
     requireWebSearchCapability: z.boolean().default(true),
     /** Drop any value that arrives without a usable source URL. */
     requireSource: z.boolean().default(true),
+    /**
+     * Also require that the cited URL appears in the provider's own search
+     * evidence — the pages it reports having consulted — and not merely in the
+     * model's prose.
+     *
+     * A separate setting from `requireSource` because it is a separate claim and
+     * a much stronger one: the first asks the answer to name a page, the second
+     * asks the *provider* to confirm it opened that page. It is also the one
+     * that can silently cost a whole run's fields if a gateway reports redirect
+     * URLs rather than the pages behind them, so it must be turnable off on its
+     * own. Comparison is by `sourceKey`, not by string equality.
+     */
+    requireVerifiedSource: z.boolean().default(true),
     /** Drop any value the answer itself rates below this. */
     minConfidence: z.number().min(0).max(1).default(0.7),
     /**

@@ -165,6 +165,12 @@ export class FakeClient implements LlmClient {
 
     const outcome = this.behaviour(call, index);
     if (outcome instanceof Error) throw outcome;
+
+    // Convenience for the happy path only: a *cooperative* search provider
+    // opened the pages the answer goes on to cite, so the default evidence is
+    // built from them. Production must never infer evidence this way — a URL in
+    // model prose is the claim being checked, not the check. Any test about the
+    // check itself passes `webSearch` explicitly and this branch stands aside.
     if (!request.webSearch || outcome.webSearch) return outcome;
     const urls = [...outcome.text.matchAll(/https?:\/\/[^"\s}]+/g)].map((match) => match[0] ?? '');
     return {

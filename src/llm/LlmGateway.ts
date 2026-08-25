@@ -164,6 +164,13 @@ export class LlmGateway implements LlmPort {
   private readonly retry: RetryPolicy;
   /** Targets already announced as down, so the warning is one line and not one per call. */
   private readonly reportedDown = new Set<string>();
+  /**
+   * Deduped separately from `reportedDown`. An open breaker is recoverable and a
+   * disabled target is not; sharing one set lets the recoverable notice consume
+   * the one-shot slot and swallow the announcement that the target later died
+   * for good — which is the single line this whole mechanism exists to print.
+   */
+  private readonly reportedCircuitOpen = new Set<string>();
   /** Targets conclusively unusable for the remainder of this run. */
   private readonly unavailableTargets = new Set<string>();
 
@@ -210,7 +217,7 @@ export class LlmGateway implements LlmPort {
         // Skipping a target with an open breaker is correct and used to be
         // completely silent — which is how a whole run can be served by the
         // fallback without anyone noticing. Say it once.
-        this.announceDown(target, options, request, 'circuit_open', `Circuit open for ${target.key}`);
+        this.announceCircuitOpen(target, options, request, `Circuit open for ${target.key}`);
         failures.push(new LlmCallError('circuit_open', `Circuit open for ${target.key}`, { target: target.key }));
         continue;
       }
@@ -231,17 +238,22 @@ export class LlmGateway implements LlmPort {
       } catch (error: unknown) {
         const failure = this.classifier.classify(error, target.key);
         failures.push(failure);
+        // A request-specific failure proves the endpoint answered, so it must not
+        // count against the target's health — but it is *not* evidence of health
+        // either, and `recordSuccess` is `entries.delete(key)`: a full state wipe
+        // that closes an open breaker and erases the failures counted so far. A
+        // target alternating `server` with `response_format` would then never
+        // reach its threshold, and a failed half-open probe would restore full
+        // traffic to a dead endpoint. Only a real success clears the record.
         if (countsTowardCircuit(failure.kind)) this.breakers.recordFailure(target.key);
-        else this.breakers.recordSuccess(target.key);
 
         // Announce only a target we really stop using. Request-specific failures
-        // prove the endpoint answered and must not poison its circuit or create
-        // a false TARGET DOWN event.
+        // must not create a false TARGET DOWN event.
         if (disablesTarget(failure.kind)) {
           this.unavailableTargets.add(target.key);
           this.announceDown(target, options, request, failure.kind, failure.message);
         } else if (this.breakers.stateOf(target.key) === 'open') {
-          this.announceDown(target, options, request, 'circuit_open', failure.message);
+          this.announceCircuitOpen(target, options, request, failure.message);
         }
 
         if (!this.shouldFallback(failure)) break;
@@ -287,6 +299,23 @@ export class LlmGateway implements LlmPort {
       pipeline: options.pipeline,
       ...(request.correlationId ? { correlationId: request.correlationId } : {}),
       kind,
+      message,
+    });
+  }
+
+  private announceCircuitOpen(
+    target: ModelTarget,
+    options: GatewayCallOptions,
+    request: CompletionRequest,
+    message: string,
+  ): void {
+    if (this.reportedCircuitOpen.has(target.key) || this.reportedDown.has(target.key)) return;
+    this.reportedCircuitOpen.add(target.key);
+    this.observer.onTargetDown?.({
+      target: target.key,
+      pipeline: options.pipeline,
+      ...(request.correlationId ? { correlationId: request.correlationId } : {}),
+      kind: 'circuit_open',
       message,
     });
   }
