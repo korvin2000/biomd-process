@@ -5,7 +5,12 @@ import { splitBlocks } from '../src/documents/markdown/blocks.js';
 import { compareSkeletons, markdownSkeleton } from '../src/documents/markdown/skeleton.js';
 import { applyTextSpans, extractTextSpans } from '../src/documents/markdown/textSpans.js';
 import { readTitle } from '../src/documents/markdown/title.js';
-import { hasOwnScript, isTranslatable } from '../src/pipelines/shared/script.js';
+import {
+  halfTransliteratedNote,
+  hasOwnScript,
+  introducedMixedScriptWords,
+  isTranslatable,
+} from '../src/pipelines/shared/script.js';
 import { StructureGuard } from '../src/pipelines/translation/StructureGuard.js';
 import { HeuristicTokenEstimator } from '../src/llm/TokenEstimator.js';
 import type { SourceDocument } from '../src/documents/types.js';
@@ -166,6 +171,40 @@ describe('translatable prose', () => {
     expect(hasOwnScript('ru')).toBe(true);
     expect(hasOwnScript('en')).toBe(false);
     expect(isTranslatable('Plays Domenico Scarlatti', 'en')).toBe(true);
+  });
+});
+
+describe('half-transliterated names', () => {
+  // Both observed on 2026-08-25 in a real run, from cx/gpt-5.6-luna: the model
+  // romanized most of a name and left one letter in Cyrillic.
+  it('reports a letter the model left behind', () => {
+    expect(introducedMixedScriptWords('Виктор Синчук', 'Wiktor Sinчuk')).toEqual(['Sinчuk']);
+    expect(introducedMixedScriptWords('ХВАН Анатолий', 'KHВAN Anatoli')).toEqual(['KHВAN']);
+    expect(introducedMixedScriptWords('Абель Карлеваро', 'Авель Карлеvaro')).toEqual(['Карлеvaro']);
+  });
+
+  it('says nothing about a translation that finished the word', () => {
+    expect(introducedMixedScriptWords('Виктор Синчук', 'Wiktor Sinchuk')).toEqual([]);
+    expect(introducedMixedScriptWords('ХВАН Анатолий', 'KHVAN Anatoli')).toEqual([]);
+  });
+
+  it('leaves a sentence that merely mixes alphabets alone', () => {
+    // Russian prose with a Spanish name in it is ordinary here; the test is per
+    // word, because within one word the mixture is never intentional.
+    const prose = 'Играл на гитаре Pedro Maldonado';
+    expect(introducedMixedScriptWords(prose, prose)).toEqual([]);
+  });
+
+  it('does not blame the model for a mixture the source already had', () => {
+    // A corpus typo is the article's. Reporting it here would send someone
+    // looking in the wrong place.
+    expect(introducedMixedScriptWords('Карлеvaro играл', 'Карлеvaro played')).toEqual([]);
+  });
+
+  it('phrases one word and several differently', () => {
+    expect(halfTransliteratedNote(['Sinчuk'])).toContain('A word changed alphabet halfway');
+    expect(halfTransliteratedNote(['Sinчuk', 'KHВAN'])).toContain('2 words changed alphabet halfway');
+    expect(halfTransliteratedNote(['Sinчuk'])).toContain('Sinчuk');
   });
 });
 

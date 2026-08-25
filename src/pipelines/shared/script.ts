@@ -100,3 +100,28 @@ export function mixedScriptWords(text: string): string[] {
     .map((match) => match[0])
     .filter((word) => MIXED_WORD.test(word));
 }
+
+/**
+ * The mixed-alphabet words a *translation* introduced.
+ *
+ * Extraction reads an article and can only pass a mixture through; translation
+ * and localization romanize, which is where the mixture is actually made —
+ * `Синчук` → `Sinчuk`, `ХВАН` → `KHВAN`, `Карлеваро` → `Карлеvaro`. The letter
+ * left behind is either one with no single-letter counterpart (`ч`, `щ`, `ж`)
+ * or one shaped like a Latin letter it is not (`В`, `Р`, `Н`).
+ *
+ * Subtracting the source is what makes the note honest: a corpus typo is the
+ * article's, and reporting it here as the model's would send someone looking in
+ * the wrong place. Reported and never repaired, for the reason
+ * `mixedScriptWords` gives — which half is right is not knowable from here.
+ */
+export function introducedMixedScriptWords(source: string, output: string): string[] {
+  const inherited = new Set(mixedScriptWords(source));
+  return [...new Set(mixedScriptWords(output))].filter((word) => !inherited.has(word));
+}
+
+/** The one-line account of a half-transliterated word, as the run notes phrase it. */
+export function halfTransliteratedNote(words: readonly string[]): string {
+  const subject = words.length === 1 ? 'A word changed' : `${words.length} words changed`;
+  return `${subject} alphabet halfway through: ${words.join(', ')}. Half-transliterated by the model; check it.`;
+}

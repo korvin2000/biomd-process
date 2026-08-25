@@ -15,6 +15,7 @@ import type { Dossier } from '../../domain/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
 import { hashStructure } from '../../shared/hash.js';
+import { halfTransliteratedNote, introducedMixedScriptWords } from '../shared/script.js';
 import { readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import {
@@ -160,6 +161,15 @@ export class LocalizePipeline implements DocumentPipeline {
     // One pass through the sanitizer so the edition is punctuated, ordered and
     // shaped exactly like its source — the comparison `INV-17` is checked by.
     const clean = sanitizeDossier(localized, this.dossierOptions(context));
+
+    // Localization is romanization, so this is where a half-transliterated name
+    // is made rather than merely passed through. Compared against the source so
+    // a mixture the corpus already had is not reported as the model's doing.
+    const halfTransliterated = introducedMixedScriptWords(
+      JSON.stringify(source),
+      JSON.stringify(clean.dossier),
+    );
+
     return this.result(
       config,
       item,
@@ -167,7 +177,9 @@ export class LocalizePipeline implements DocumentPipeline {
       clean.dossier as unknown as JsonValue,
       batch.usage,
       batch.costUsd,
-      [...notes, ...clean.notes],
+      halfTransliterated.length > 0
+        ? [...notes, ...clean.notes, halfTransliteratedNote(halfTransliterated)]
+        : [...notes, ...clean.notes],
     );
   }
 
