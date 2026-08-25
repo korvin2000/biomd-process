@@ -221,6 +221,37 @@ llm:
       # Temperature omitted: this gateway ignores it.
       tags: [remote, cheap]
 
+    - id: minimax-m3-free
+      endpoint: openrouter
+      model: minimax/minimax-m3:free
+      contextWindow: 262144
+      maxOutputTokens: 32768
+      capabilities: [json_object, tools]
+      pricing: { inputPer1M: 0.0, outputPer1M: 0.0, cachedInputPer1M: 0.0 }
+      reasoning: { enabled: false, dialect: reasoning }
+      params:
+        temperature: 0.36
+      provider:
+        order: [gmicloud/fp8]
+        allowFallbacks: true
+      tags: [remote, cheap]
+
+    - id: nemotron-free
+      endpoint: openrouter
+      model: nvidia/nemotron-3-ultra-550b-a55b:free
+      contextWindow: 1000000
+      maxOutputTokens: 65536
+      # No response_format / structured_outputs / cache pricing on the free tier.
+      capabilities: [tools]
+      pricing: { inputPer1M: 0.0, outputPer1M: 0.0 }
+      # default_enabled: true upstream — this is what turns it off.
+      reasoning: { enabled: false, dialect: reasoning }
+      provider:
+        order: [nvidia]
+        allowFallbacks: false
+      tags: [remote, cheap]
+
+
     - id: minimax-m3
       endpoint: openrouter
       model: minimax/minimax-m3
@@ -255,7 +286,7 @@ llm:
       pricing: { inputPer1M: 0.08, outputPer1M: 0.18, cachedInputPer1M: 0.016 }
       # requireParameters rejects providers that silently ignore requested parameters.
       provider:
-        order: [ambient/fp4, together, phala, deepinfra/fp8, morph/bf16]
+        order: [together, phala, deepinfra/fp8, morph/bf16, wafer/fast, ambient/fp4]
         requireParameters: true
       # Disable upstream-default reasoning; hiding the trace alone does not disable it.
       reasoning: { enabled: false, dialect: reasoning }
@@ -335,8 +366,8 @@ llm:
 
       # least-busy maximizes translation throughput across endpoints.
       translate:
-        models: [gemma-local, gpt-luna, deepseek, minimax-m3]
-        strategy: least-busy
+        models: [gemma-local, gpt-luna, deepseek, minimax-m3, minimax-m3-free]
+        strategy: adaptive
         maxConcurrent:
           local: 1
           omniroute: 3
@@ -348,10 +379,10 @@ llm:
         preferMode: wait
         preferWaitMs: 45000
         prefer:
-          zh: [deepseek, minimax-m3, gemma-local]
-          ja: [deepseek, minimax-m3, gpt-luna]
+          zh: [deepseek, minimax-m3, minimax-m3-free, gemma-local]
+          ja: [deepseek, minimax-m3, minimax-m3-free, gpt-luna]
           ko: [deepseek, gpt-luna]
-          ua: [gpt-luna, minimax-m3, gemma-local]
+          ua: [gpt-luna, minimax-m3, minimax-m3-free, gemma-local]
         exclude:
           pt: [gemma-local]
           it: [gemma-local]

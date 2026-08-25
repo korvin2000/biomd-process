@@ -4,6 +4,7 @@ import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { MessageBuilder } from '../../prompts/MessageBuilder.js';
 import type { PromptVariables } from '../../prompts/types.js';
 import { isOutputTruncated } from '../../reliability/errors.js';
+import { complexityOf } from '../../routing/strategies/adaptive/ComplexityScorer.js';
 import { PipelineError } from '../../shared/errors.js';
 import { extractJsonBlock, safeJsonParse, type JsonObject } from '../../shared/json.js';
 import type { LocalizationUnit } from '../localization/StringTable.js';
@@ -240,6 +241,10 @@ async function callOnce(
       estimatedInputTokens: context.estimator.estimateMessages(messages),
       // The answer repeats every key and runs longer than the source.
       expectedOutputTokens: Math.ceil(context.estimator.estimateText(payload) * 1.6) + 128,
+      // Measured on the strings themselves, not on the rendered prompt: the
+      // prompt's own boilerplate is identical on every call and would dilute
+      // every document towards the same middling score.
+      signals: { complexity: complexityOf(batch.map((unit) => unit.text).join('\n')) },
       signal: context.signal,
       validate: (response) => {
         parsed = undefined;

@@ -54,6 +54,12 @@ export interface GatewayCallOptions {
   /** Drives routing decisions; the caller already knows its prompt size. */
   estimatedInputTokens: number;
   expectedOutputTokens: number;
+  /**
+   * Measurements of this payload beyond its size, for strategies that rank on
+   * what is being sent. Forwarded to routing untouched and ignored by every
+   * built-in strategy. See {@link RoutingRequest.signals}.
+   */
+  signals?: Readonly<Record<string, number>>;
   signal?: AbortSignal;
   /**
    * Domain check on a syntactically fine response. A rejection is treated as a
@@ -357,6 +363,7 @@ export class LlmGateway implements LlmPort {
       estimatedInputTokens: options.estimatedInputTokens,
       expectedOutputTokens: options.expectedOutputTokens,
       requiredCapabilities: options.requiredCapabilities ?? [],
+      ...(options.signals ? { signals: options.signals } : {}),
       ...(options.tuning?.avoid ? { avoid: options.tuning.avoid } : {}),
       ...(options.tuning?.strategy ? { strategy: options.tuning.strategy } : {}),
     };
@@ -499,7 +506,12 @@ export class LlmGateway implements LlmPort {
           }
 
           record.outcome = 'success';
-          this.stats.recordSuccess(target.key, Date.now() - startedAt, record.costUsd);
+          this.stats.recordSuccess(
+            target.key,
+            Date.now() - startedAt,
+            record.costUsd,
+            record.usage.totalTokens,
+          );
           return response;
         } catch (error: unknown) {
           const failure = this.classifier.classify(error, target.key);

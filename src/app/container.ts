@@ -20,6 +20,7 @@ import { CircuitBreakerRegistry } from '../reliability/CircuitBreaker.js';
 import { RateLimiterRegistry } from '../reliability/RateLimiter.js';
 import { Router } from '../routing/Router.js';
 import { RoutingStrategyRegistry } from '../routing/StrategyRegistry.js';
+import { adaptive } from '../routing/strategies/adaptive/AdaptiveStrategy.js';
 import { TargetStatsRegistry } from '../routing/TargetStats.js';
 import { PipelineRegistry } from '../core/PipelineRegistry.js';
 import { ImageIndexStore } from '../images/ImageIndexStore.js';
@@ -97,7 +98,9 @@ export function createApp(loaded: LoadedConfig, options: CreateAppOptions = {}):
   const observers = new ObserverHub();
 
   const models = new ModelRegistry(config);
-  const strategies = new RoutingStrategyRegistry();
+  // `adaptive` is opt-in: registering it only makes the id resolvable, and
+  // nothing routes through it until a pool asks for it by name.
+  const strategies = new RoutingStrategyRegistry().register(adaptive);
   const stats = new TargetStatsRegistry();
   // One object answers "who is busy" for both halves of the decision: the
   // strategy reads it to rank, the gateway claims against it to make the

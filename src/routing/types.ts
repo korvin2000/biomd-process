@@ -1,6 +1,22 @@
 import type { Capability } from '../config/schema.js';
 import type { ModelTarget } from '../llm/types.js';
 
+/**
+ * One completed call, kept only long enough to answer "how fast is this target
+ * *now*".
+ *
+ * Tokens rather than seconds, because seconds are a statement about the
+ * document as much as about the model: a target that happened to draw short
+ * articles looks fast, and would keep drawing them.
+ */
+export interface RecentCall {
+  latencyMs: number;
+  totalTokens: number;
+}
+
+/** How many completed calls a target's rolling window keeps. */
+export const RECENT_WINDOW = 4;
+
 export interface TargetStats {
   key: string;
   requests: number;
@@ -10,6 +26,34 @@ export interface TargetStats {
   totalLatencyMs: number;
   costUsd: number;
   lastUsedAt: number;
+  /**
+   * The last {@link RECENT_WINDOW} successes, oldest first.
+   *
+   * Separate from the cumulative counters because they answer different
+   * questions. `totalLatencyMs / successes` is the average over a whole run and
+   * moves slower and slower as the run goes on; a target that went bad an hour
+   * in barely dents it. A short window forgets, which is the point.
+   */
+  recent: RecentCall[];
+}
+
+/**
+ * Throughput over the rolling window, in tokens per second, or `undefined` when
+ * the window holds nothing to divide by.
+ *
+ * Deliberately not a member of {@link TargetStats}: it is derived, and storing
+ * it would invite two sources of truth for one number.
+ */
+export function recentThroughput(stats: TargetStats): number | undefined {
+  if (stats.recent.length === 0) return undefined;
+  let tokens = 0;
+  let ms = 0;
+  for (const call of stats.recent) {
+    tokens += call.totalTokens;
+    ms += call.latencyMs;
+  }
+  if (ms <= 0 || tokens <= 0) return undefined;
+  return (tokens * 1000) / ms;
 }
 
 export interface RoutingRequest {
@@ -36,6 +80,21 @@ export interface RoutingRequest {
   estimatedInputTokens: number;
   expectedOutputTokens: number;
   requiredCapabilities: readonly Capability[];
+  /**
+   * Named measurements of *this payload*, for strategies that rank on what is
+   * being sent rather than only on who could send it.
+   *
+   * `estimatedInputTokens` is already one of these — how big — and the only
+   * reason it is a field of its own is that fitting needs it. `signals` is the
+   * open half: how tangled, how much inline markup, how many scripts. A
+   * strategy that does not read them is unaffected, and a caller that does not
+   * measure them sends nothing.
+   *
+   * Values are the caller's own scale; a strategy that compares them across
+   * pipelines is responsible for saying what the number means. See
+   * `src/routing/strategies/adaptive` for the one that defines `complexity`.
+   */
+  signals?: Readonly<Record<string, number>>;
 }
 
 /**
@@ -128,6 +187,7 @@ export function emptyStats(key: string): TargetStats {
     totalLatencyMs: 0,
     costUsd: 0,
     lastUsedAt: 0,
+    recent: [],
   };
 }
 

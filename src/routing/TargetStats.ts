@@ -1,4 +1,4 @@
-import { emptyStats, type TargetStats } from './types.js';
+import { emptyStats, RECENT_WINDOW, type TargetStats } from './types.js';
 
 /** Live per-target counters, read by strategies and reported in the run summary. */
 export class TargetStatsRegistry {
@@ -13,7 +13,13 @@ export class TargetStatsRegistry {
     return entry;
   }
 
-  recordSuccess(key: string, latencyMs: number, costUsd: number): void {
+  /**
+   * `totalTokens` is optional so a caller that does not know the usage still
+   * records the success. A window entry without tokens would be worse than no
+   * entry: it would drag the measured throughput of a healthy target towards
+   * zero, so those calls update the counters and leave the window alone.
+   */
+  recordSuccess(key: string, latencyMs: number, costUsd: number, totalTokens = 0): void {
     const entry = this.get(key);
     entry.requests += 1;
     entry.successes += 1;
@@ -21,6 +27,10 @@ export class TargetStatsRegistry {
     entry.totalLatencyMs += latencyMs;
     entry.costUsd += costUsd;
     entry.lastUsedAt = Date.now();
+    if (totalTokens > 0 && latencyMs > 0) {
+      entry.recent.push({ latencyMs, totalTokens });
+      if (entry.recent.length > RECENT_WINDOW) entry.recent.splice(0, entry.recent.length - RECENT_WINDOW);
+    }
   }
 
   recordFailure(key: string): void {
@@ -32,6 +42,6 @@ export class TargetStatsRegistry {
   }
 
   snapshot(): TargetStats[] {
-    return [...this.stats.values()].map((entry) => ({ ...entry }));
+    return [...this.stats.values()].map((entry) => ({ ...entry, recent: [...entry.recent] }));
   }
 }
