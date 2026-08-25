@@ -33,9 +33,22 @@ provider quirks: [docs/ref/providers.md](../../docs/ref/providers.md).
   variant's *whole* chain: a one-entry list is then a pool of one, and a list whose models are all
   unusable routes nowhere — deliberately, so a language fails loudly instead of being served by a
   model the config declined to choose for it.
-- **No `prefer` mode reads queue depth.** A listed model that is busy is still tried first and the
-  caller waits on `Lanes.acquire`. The chain behind it answers "this one failed", never "this one
-  is busy" — which is why a preferred target serves 100% of its variant, not most of it.
+  `wait` makes the list a first tier instead: free preferred model, else queue `preferWaitMs`, else
+  the rest of the pool, else wait for whichever allowed model frees first. It never fails a call.
+- **`exclude` is the only mechanism that removes.** Everything else here reorders. It is applied
+  before preference and before the overflow policy, so a vetoed model cannot come back as a
+  fallback, as what a preference falls back *to*, or as the last resort a saturated pool waits on.
+- **Only `wait` reads queue depth, and only in `LlmGateway.headOfChain`.** `reorder` and `restrict`
+  hand the head of the chain to `Lanes.acquire`, which queues indefinitely — which is why a
+  preferred target under those modes serves 100% of its variant, not most of it.
+- **`freeSlots` counts claims; `acquire` takes the semaphore.** They are separate on purpose and
+  the gateway holds both. Claims outlive individual attempts, so `freeSlots` under-reports
+  availability and never over-reports — which is what stops the availability check from picking a
+  target whose semaphore is full. A test that takes one without the other builds a state
+  production cannot reach.
+- **An abandoned acquisition must reject, drop its queue slot and take nothing.** `RateLimiter`
+  used to resolve, increment `active` past the cap, and leave a dead waiter to eat the next
+  wakeup. Anything that can time out depends on all three.
 - **A `GatewayObserver` method is optional, so an event `ObserverHub` forgets to forward reaches no
   listener and nothing fails.** That killed `onTargetDown` and every mechanism built on it. When
   adding an event, add it to the hub in the same change.

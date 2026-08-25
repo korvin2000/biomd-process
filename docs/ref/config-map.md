@@ -39,7 +39,9 @@ Both because several tasks have to agree about them.
 | `llm.routing.pools.<pool>.strategy` | inherits | per-pool. Extraction is scarce in money, translation in wall-clock — `least-busy` is the translation answer |
 | `llm.routing.pools.<pool>.maxConcurrent.<endpoint>` | `{}` | a **lane**: this pool's share of that endpoint's cap. The schema refuses lanes summing above the cap |
 | `llm.routing.pools.<pool>.prefer.<variant>` | `{}` | a variant naming its own models, tried in list order. Naming a model outside the pool is a **config error** |
-| `llm.routing.pools.<pool>.preferMode` | `reorder` | `reorder` keeps the rest of the pool behind the list as fallback; `restrict` makes the list the variant's whole chain — a one-entry list is then a pool of one. Neither reads queue depth |
+| `llm.routing.pools.<pool>.exclude.<variant>` | `{}` | models this variant may **never** use. A veto applied to every tier — the only mechanism here that removes rather than reorders |
+| `llm.routing.pools.<pool>.preferMode` | `reorder` | `reorder` keeps the rest of the pool behind the list; `restrict` makes the list the variant's whole chain (a one-entry list is then a pool of one); `wait` makes it a first tier worth queueing for |
+| `llm.routing.pools.<pool>.preferWaitMs` | `30000` | `wait` only: how long to queue for a preferred model before widening. Spent **idle** — the task holds a `run.concurrency` worker |
 | `llm.routing.onOverflow` | `demote` | `demote` ranks a non-fitting target last but still calls it; `skip` drops it |
 | `llm.models[].apiFormat` · `webSearchMode` · `capabilities` | `chat_completions` · — · `[]` | `responses_tool` requires Responses; `online` requires a `:online` model; `plugin` requires `params.extra.plugins[].id: web` |
 | `llm.models[].contextWindow` · `maxOutputTokens` | — | a target must both **hold** the prompt and **emit** the answer |

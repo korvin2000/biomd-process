@@ -53,9 +53,11 @@ export function createModelsCommand(): Command {
           .map(([endpoint, limit]) => `${endpoint}×${limit}`);
         // Under `restrict` the list is the variant's whole chain, so a one-entry
         // list is a pool of one. Marking it here is the cheapest place to notice.
+        // `wait` carries no such edge — the rest of the pool is still behind it.
         const restricted = spec.preferMode === 'restrict';
         const prefer = Object.entries(spec.prefer).map(([variant, ids]) => {
-          const chain = `${variant}→${ids.join('|')}`;
+          const denied = spec.exclude[variant] ?? [];
+          const chain = `${variant}→${ids.join('|')}${denied.length > 0 ? ` −${denied.join('−')}` : ''}`;
           return restricted && ids.length < 2 ? pc.yellow(`${chain} !`) : chain;
         });
 
@@ -64,7 +66,7 @@ export function createModelsCommand(): Command {
             `${' '.repeat(12)} ${pc.dim('strategy')} ${app.router.strategyIdFor(name)}${inherited}` +
             (lanes.length > 0 ? `  ${pc.dim('lanes')} ${lanes.join(', ')}` : '') +
             (prefer.length > 0
-              ? `  ${pc.dim(restricted ? 'prefer (restrict)' : 'prefer')} ${prefer.join(', ')}`
+              ? `  ${pc.dim(`prefer (${spec.preferMode}${spec.preferMode === 'wait' ? ` ${spec.preferWaitMs}ms` : ''})`)} ${prefer.join(', ')}`
               : '') +
             '\n' +
             (restricted && Object.values(spec.prefer).some((ids) => ids.length < 2)

@@ -72,10 +72,14 @@ npm run score -- input/ru out
 - **`run` is the default command, so options come *after* the subcommand.**
   `biomd config check -c f.yaml`, never `biomd -c f.yaml config check` — the second form used to be
   parsed as `run` with two ignorable arguments and quietly processed the whole corpus.
-- **`prefer` never spills on load.** A preferred target that is busy is still tried first and the
-  caller queues on it, so a variant's preferred model serves 100% of it, not most of it — and
-  `preferMode: restrict` additionally forbids anything else in the pool from serving that variant.
-  A one-entry `prefer` list under `restrict` is a pool of one. `biomd models` marks them.
+- **`preferMode` decides what a `prefer` list means.** `reorder` floats it to the front; `restrict`
+  makes it the variant's whole chain (a one-entry list is then a pool of one — `biomd models` marks
+  them); `wait` makes it a first tier, queued for `preferWaitMs` before widening to the rest of the
+  pool. Only `wait` reads queue depth — under the other two a busy preferred target is still tried
+  first and the caller queues on it, which is why it serves 100% of its variant.
+- **`exclude` is a veto and the only thing that removes a model.** YAML eats a leading `!`
+  (`[a, !b]` → `['a', '']`, warning only), which is why it is its own map and not a marker in
+  `prefer`.
 - **A pool is a fallback chain, so a first choice that never works is invisible**: the run
   completes, every document is produced, and the only trace is the bill from the backup. Hence
   `--probe` before, and the run summary's target-health table after. A pool of **one** has no chain

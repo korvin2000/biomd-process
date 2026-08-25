@@ -3,7 +3,7 @@ import { ConfigError } from '../shared/errors.js';
 import type { ModelTarget } from './types.js';
 
 /** What a pool without its own entry looks like: no members, no overrides. */
-const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {}, preferMode: 'reorder' };
+const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {}, exclude: {}, preferMode: 'reorder', preferWaitMs: 30_000 };
 
 /**
  * Turns the declarative `llm` config into resolved {@link ModelTarget}s and

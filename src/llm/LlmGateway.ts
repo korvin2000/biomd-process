@@ -9,6 +9,7 @@ import {
   RetryPolicy,
 } from '../reliability/index.js';
 import type { Router } from '../routing/Router.js';
+import type { RoutingRequest } from '../routing/types.js';
 import type { TargetStatsRegistry } from '../routing/TargetStats.js';
 import { withTimeout } from '../shared/async.js';
 import type { BudgetGuard } from './Budget.js';
@@ -214,7 +215,18 @@ export class LlmGateway implements LlmPort {
     const attempts: AttemptRecord[] = [];
     const failures: LlmCallError[] = [];
 
-    for (const [index, target] of chain.entries()) {
+    // Under `preferMode: wait` the head of the chain is not a ranking decision
+    // but an availability one, and answering it may mean holding a slot.
+    const head = await this.headOfChain(chain, options);
+    let held = head.held;
+
+    for (const [index, target] of head.chain.entries()) {
+      // The slot was won for one specific target. Reaching any other means that
+      // target failed, so the slot is no longer ours to keep.
+      if (held && held.target.key !== target.key) {
+        held.release();
+        held = undefined;
+      }
       if (this.unavailableTargets.has(target.key)) {
         failures.push(
           new LlmCallError('model_unavailable', `Target disabled for this run: ${target.key}`, {
@@ -241,8 +253,11 @@ export class LlmGateway implements LlmPort {
        */
       const claim = this.lanes.claim(options.pool, target);
 
+      const reserved = held?.target.key === target.key ? held.release : undefined;
+      held = undefined;
+
       try {
-        const response = await this.callTarget(target, request, options, attempts);
+        const response = await this.callTarget(target, request, options, attempts, reserved);
         this.breakers.recordSuccess(target.key);
         return this.buildResult(response, target, attempts);
       } catch (error: unknown) {
@@ -283,6 +298,10 @@ export class LlmGateway implements LlmPort {
         claim();
       }
     }
+
+    // A slot won for a target the loop never reached — every entry after it was
+    // skipped by a breaker, say — is still ours until we say otherwise.
+    held?.release();
 
     // The per-target list says *what* failed; the last message says *why*, and
     // without it a validation failure reads as an anonymous "response_format".
@@ -330,9 +349,8 @@ export class LlmGateway implements LlmPort {
     });
   }
 
-  private chainFor(options: GatewayCallOptions): ModelTarget[] {
-    const candidates = this.registry.pool(options.pool);
-    const ranked = this.router.select(candidates, {
+  private routingRequest(options: GatewayCallOptions): RoutingRequest {
+    return {
       pipeline: options.pipeline,
       pool: options.pool,
       variant: options.variant,
@@ -341,8 +359,72 @@ export class LlmGateway implements LlmPort {
       requiredCapabilities: options.requiredCapabilities ?? [],
       ...(options.tuning?.avoid ? { avoid: options.tuning.avoid } : {}),
       ...(options.tuning?.strategy ? { strategy: options.tuning.strategy } : {}),
-    });
+    };
+  }
+
+  private chainFor(options: GatewayCallOptions): ModelTarget[] {
+    const candidates = this.registry.pool(options.pool);
+    const ranked = this.router.select(candidates, this.routingRequest(options));
     return ranked.slice(0, this.reliability.fallback.maxTargets);
+  }
+
+  /**
+   * Which target this call should head for, under `preferMode: wait`.
+   *
+   * Four questions in order, and the order is the feature:
+   *
+   *  1. Is one of the preferred models free **now**? Asked in the order the
+   *     config listed them, because that is the only phase where the ranking
+   *     the user wrote can be honoured — later phases are decided by whoever
+   *     frees first, which nobody chooses.
+   *  2. If none is, wait — but only for `preferWaitMs`. This is the whole point:
+   *     a preferred model is worth queueing for, and not worth queueing for
+   *     forever.
+   *  3. The wait bought nothing, so widen: anything else still allowed that is
+   *     free right now.
+   *  4. Nothing anywhere is free. Wait, without a deadline, for whichever
+   *     allowed model frees first. "Nothing preferred was available" is a reason
+   *     to look further; it is never a reason to fail a document.
+   *
+   * Phases 2 and 4 come back holding a slot, which is why the result carries a
+   * release: dropping it and re-acquiring would hand the slot to whichever
+   * worker asked next, and the wait would have bought nothing.
+   */
+  private async headOfChain(
+    chain: readonly ModelTarget[],
+    options: GatewayCallOptions,
+  ): Promise<{ chain: readonly ModelTarget[]; held?: { target: ModelTarget; release: () => void } }> {
+    const plan = this.router.waitPlan(chain, this.routingRequest(options));
+    if (!plan) return { chain };
+
+    const usable = (target: ModelTarget): boolean =>
+      this.breakers.canAttempt(target.key) &&
+      !this.unavailableTargets.has(target.key) &&
+      this.lanes.freeSlots(options.pool, target) > 0;
+
+    const preferred = plan.preferred.filter(
+      (target) => this.breakers.canAttempt(target.key) && !this.unavailableTargets.has(target.key),
+    );
+    const rest = plan.rest.filter(
+      (target) => this.breakers.canAttempt(target.key) && !this.unavailableTargets.has(target.key),
+    );
+
+    const readyPreferred = preferred.find(usable);
+    if (readyPreferred) return { chain: promote(chain, readyPreferred) };
+
+    const waited = await this.lanes.acquireAny(options.pool, preferred, {
+      waitMs: plan.waitMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (waited) return { chain: promote(chain, waited.target), held: waited };
+
+    const readyRest = rest.find(usable);
+    if (readyRest) return { chain: promote(chain, readyRest) };
+
+    const any = await this.lanes.acquireAny(options.pool, [...preferred, ...rest], {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return any ? { chain: promote(chain, any.target), held: any } : { chain };
   }
 
   private shouldFallback(failure: LlmCallError): boolean {
@@ -356,7 +438,10 @@ export class LlmGateway implements LlmPort {
     request: CompletionRequest,
     options: GatewayCallOptions,
     attempts: AttemptRecord[],
+    /** A slot already held for this target's first attempt; a retry queues normally. */
+    reserved?: () => void,
   ): Promise<CompletionResponse> {
+    let reservation = reserved;
     return this.retry.run(
       async (attempt) => {
         this.budget.assertAvailable();
@@ -377,7 +462,8 @@ export class LlmGateway implements LlmPort {
         // The pool's lane first, then the endpoint. Acquired per attempt rather
         // than per target, so a backoff sleep frees the slot for somebody else
         // instead of holding an endpoint idle while nobody talks to it.
-        const release = await this.lanes.acquire(options.pool, target, options.signal);
+        const release = reservation ?? (await this.lanes.acquire(options.pool, target, options.signal));
+        reservation = undefined;
 
         try {
           const response = await withTimeout(
@@ -478,4 +564,9 @@ export class LlmGateway implements LlmPort {
       attempts: [...attempts],
     };
   }
+}
+
+/** The chain with `target` moved to the front, everything else in place. */
+function promote(chain: readonly ModelTarget[], target: ModelTarget): readonly ModelTarget[] {
+  return [target, ...chain.filter((candidate) => candidate.key !== target.key)];
 }
