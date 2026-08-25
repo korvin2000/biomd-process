@@ -127,6 +127,142 @@ describe('index-<lang>.json', () => {
   });
 });
 
+describe('INV-15 — the display name against the dossier', () => {
+  /** `[0]` names one person, the dossier another: the drift a renumbering leaves behind. */
+  it('warns when the card and the dossier hold different names', () => {
+    const findings = validateCatalogue(
+      snapshot({ names: new Map([['ru', file({ '1': ['Иван Петров', 'Петров'] })]]) }),
+      { supportedLanguages: LANGUAGES },
+    );
+    expect(codes(findings)).toContain('INV-15');
+  });
+
+  /**
+   * The false positive this check exists to avoid. `displayNameOrder: roster`
+   * files the roster's own language surname-first on purpose, so a strict
+   * reading of `INV-15` would warn on every correctly-produced Russian row.
+   */
+  it('accepts the roster order for the roster language, and only there', () => {
+    const names = new Map([['ru', file({ '1': ['Барриос Агустин', 'Агустин Барриос'] })]]);
+    const rosterOrder = validateCatalogue(snapshot({ names }), {
+      supportedLanguages: LANGUAGES,
+      displayNameOrder: 'roster',
+      rosterLanguage: 'ru',
+    });
+    expect(codes(rosterOrder)).not.toContain('INV-15');
+
+    // Same files, a deployment that declared the other order: now it is a bug.
+    const givenFirst = validateCatalogue(snapshot({ names }), {
+      supportedLanguages: LANGUAGES,
+      displayNameOrder: 'given-first',
+    });
+    expect(codes(givenFirst)).toContain('INV-15');
+  });
+
+  /**
+   * `roster` order for a language the roster is not written in keeps
+   * `Forename Surname`, because a Russian filing convention is not a German one.
+   */
+  it('holds every other language to the given-first order under roster', () => {
+    const index = file([
+      { id: '1', title: 'A', lang: 'ru,de', type: 'guitarist', md: '/a.bio.md', json: '/a.bio.json' },
+    ]);
+    const dossiers = new Map([
+      ['de/a.bio.json', file({ metadata: { forename: 'Agustin', surname: 'Barrios' } })],
+    ]);
+    const findings = validateCatalogue(
+      snapshot({ index, dossiers, names: new Map([['de', file({ '1': ['Barrios Agustin'] })]]) }),
+      { supportedLanguages: LANGUAGES, checkFiles: false, displayNameOrder: 'roster', rosterLanguage: 'ru' },
+    );
+    expect(codes(findings)).toContain('INV-15');
+  });
+
+  /**
+   * The roster heading the setting exists for: `Абреу Зекинья` is the name a
+   * reader looks for, `Хосе Гомеш де Абреу` is what the article calls him. The
+   * roster is an input and never reaches the snapshot, so the only claim left
+   * is that the two names have a word in common.
+   */
+  it('lets a roster heading say something the dossier does not, if it is the same man', () => {
+    const dossiers = new Map([
+      ['ru/agustin-barrios.bio.json', file({ metadata: { forename: 'Хосе Гомеш', surname: 'де Абреу' } })],
+    ]);
+    const options = { supportedLanguages: LANGUAGES, displayNameOrder: 'roster', rosterLanguage: 'ru' } as const;
+
+    const sameMan = validateCatalogue(
+      snapshot({ dossiers, names: new Map([['ru', file({ '1': ['Абреу Зекинья'] })]]) }),
+      options,
+    );
+    expect(codes(sameMan)).not.toContain('INV-15');
+
+    const somebodyElse = validateCatalogue(
+      snapshot({ dossiers, names: new Map([['ru', file({ '1': ['Иван Петров'] })]]) }),
+      options,
+    );
+    expect(codes(somebodyElse)).toContain('INV-15');
+  });
+
+  /** `INV-16`, first exemption: a comma-list is several people, not a given name. */
+  it('exempts a collective whose forename is the roster s comma-list of members', () => {
+    const findings = validateCatalogue(
+      snapshot({
+        dossiers: new Map([
+          ['ru/agustin-barrios.bio.json', file({ metadata: { forename: 'Иванов, Петров', surname: 'Дуэт' } })],
+        ]),
+      }),
+      { supportedLanguages: LANGUAGES },
+    );
+    expect(codes(findings)).not.toContain('INV-15');
+  });
+
+  /**
+   * `INV-16`, second exemption. `external/01` §1.6 asks the producer to record
+   * which of two rows sharing a dossier is canonical and to distinguish the
+   * other by a qualifier — but the format has no member for it, so checking
+   * either would report the qualifier as the defect.
+   */
+  it('exempts rows that do not own their dossier outright', () => {
+    const index = file([
+      { id: '1', title: 'A', lang: 'ru', type: 'guitarist', md: '/a.bio.md', json: '/shared.bio.json' },
+      { id: '2', title: 'B', lang: 'ru', type: 'guitarist', md: '/b.bio.md', json: '/shared.bio.json' },
+    ]);
+    const findings = validateCatalogue(
+      snapshot({
+        index,
+        names: new Map([['ru', file({ '1': ['Агустин Барриос'], '2': ['Агустин Барриос (вариант)'] })]]),
+        dossiers: new Map([
+          ['ru/shared.bio.json', file({ metadata: { forename: 'Агустин', surname: 'Барриос' } })],
+        ]),
+      }),
+      { supportedLanguages: LANGUAGES, checkFiles: false },
+    );
+    expect(codes(findings)).not.toContain('INV-15');
+  });
+
+  /** A mononym is filed in both columns; publishing it twice would be the bug. */
+  it('does not ask a mononym for its name twice', () => {
+    const findings = validateCatalogue(
+      snapshot({
+        names: new Map([['ru', file({ '1': ['Армик', 'Armik'] })]]),
+        dossiers: new Map([
+          ['ru/agustin-barrios.bio.json', file({ metadata: { forename: 'Армик', surname: 'Армик' } })],
+        ]),
+      }),
+      { supportedLanguages: LANGUAGES },
+    );
+    expect(codes(findings)).not.toContain('INV-15');
+  });
+
+  /** No name components is the premise missing, not the conclusion failing. */
+  it('says nothing about a dossier that carries no name at all', () => {
+    const findings = validateCatalogue(
+      snapshot({ dossiers: new Map([['ru/agustin-barrios.bio.json', file({ metadata: { birthplace: 'Мисьонес' } })]]) }),
+      { supportedLanguages: LANGUAGES },
+    );
+    expect(codes(findings)).not.toContain('INV-15');
+  });
+});
+
 describe('dossiers', () => {
   it('reports a document with no top-level metadata, which a reader discards whole', () => {
     const findings = validateCatalogue(
