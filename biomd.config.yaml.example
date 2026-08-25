@@ -825,6 +825,13 @@ llm:
           local: 1
           omniroute: 3
           openrouter: 3
+        # reorder (default) | restrict. Under `restrict` a language's list is
+        # its whole chain and nothing else in the pool may serve it — so a
+        # one-entry list is a pool of one, with no fallback at all. Under
+        # `reorder` the rest of the pool stays behind the list. Neither mode
+        # reads queue depth: a busy preferred model is still tried first and
+        # the caller waits for its slot.
+        preferMode: reorder
         # Which model renders which language best, by target language code.
         # A reordering of the pool and never an addition to it: the models
         # behind the preferred one are still its fallback chain, so a preference

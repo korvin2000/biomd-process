@@ -51,14 +51,25 @@ export function createModelsCommand(): Command {
         const lanes = Object.entries(spec.maxConcurrent)
           .filter(([, limit]) => limit > 0)
           .map(([endpoint, limit]) => `${endpoint}×${limit}`);
-        const prefer = Object.entries(spec.prefer).map(([variant, ids]) => `${variant}→${ids.join('|')}`);
+        // Under `restrict` the list is the variant's whole chain, so a one-entry
+        // list is a pool of one. Marking it here is the cheapest place to notice.
+        const restricted = spec.preferMode === 'restrict';
+        const prefer = Object.entries(spec.prefer).map(([variant, ids]) => {
+          const chain = `${variant}→${ids.join('|')}`;
+          return restricted && ids.length < 2 ? pc.yellow(`${chain} !`) : chain;
+        });
 
         process.stdout.write(
           `${name.padEnd(12)} ${spec.models.join(' → ') || pc.dim('(every enabled model)')}\n` +
             `${' '.repeat(12)} ${pc.dim('strategy')} ${app.router.strategyIdFor(name)}${inherited}` +
             (lanes.length > 0 ? `  ${pc.dim('lanes')} ${lanes.join(', ')}` : '') +
-            (prefer.length > 0 ? `  ${pc.dim('prefer')} ${prefer.join(', ')}` : '') +
-            '\n',
+            (prefer.length > 0
+              ? `  ${pc.dim(restricted ? 'prefer (restrict)' : 'prefer')} ${prefer.join(', ')}`
+              : '') +
+            '\n' +
+            (restricted && Object.values(spec.prefer).some((ids) => ids.length < 2)
+              ? `${' '.repeat(12)} ${pc.yellow('!')} ${pc.dim('one-model chain: any failure there fails the document')}\n`
+              : ''),
         );
       }
 

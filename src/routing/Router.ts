@@ -28,7 +28,7 @@ const UNCAPPED: OccupancyView = {
   load: () => 0,
 };
 
-const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {} };
+const EMPTY_POOL: PoolConfig = { models: [], options: {}, maxConcurrent: {}, prefer: {}, preferMode: 'reorder' };
 
 /**
  * Builds the {@link RoutingContext} and delegates ranking to the pool's
@@ -111,21 +111,34 @@ export class Router {
   }
 
   /**
-   * Floats this variant's preferred models to the front, in the order they were
-   * listed. A stable partition rather than a filter: a preference says which
-   * model to *try first*, never which models are allowed, so the pool behind it
-   * is untouched and still catches a preferred model that is down.
+   * Orders this variant's preferred models, in the order they were listed.
+   *
+   * Under `reorder` this is a stable partition rather than a filter: the
+   * preference says which model to *try first*, never which are allowed, so the
+   * pool behind it is untouched and still catches a preferred model that is
+   * down. Under `restrict` the list *is* the chain — the rest of the pool is
+   * dropped for this variant, and a variant whose listed models are all
+   * unusable routes nowhere rather than borrowing a model the config did not
+   * choose for it.
+   *
+   * Either way this runs *after* the strategy has ranked, so a preference
+   * outranks what the strategy thought. It reads queue depth from neither: a
+   * listed model that is busy is still tried first and the caller waits for its
+   * slot. `prefer` is a statement about quality, and the chain behind it
+   * answers "this one failed", never "this one is busy".
    */
   private applyPreference(targets: ModelTarget[], request: RoutingRequest): ModelTarget[] {
-    const preferred = request.variant ? this.poolConfig(request.pool).prefer[request.variant] : undefined;
+    const pool = this.poolConfig(request.pool);
+    const preferred = request.variant ? pool.prefer[request.variant] : undefined;
     if (!preferred || preferred.length === 0) return targets;
 
     const rank = new Map(preferred.map((modelId, index) => [modelId, index]));
     const wanted = targets
       .filter((target) => rank.has(target.modelId))
       .sort((a, b) => (rank.get(a.modelId) ?? 0) - (rank.get(b.modelId) ?? 0));
-    if (wanted.length === 0) return targets;
 
+    if (pool.preferMode === 'restrict') return wanted;
+    if (wanted.length === 0) return targets;
     return [...wanted, ...targets.filter((target) => !rank.has(target.modelId))];
   }
 

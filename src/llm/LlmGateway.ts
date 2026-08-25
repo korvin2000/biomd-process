@@ -196,8 +196,18 @@ export class LlmGateway implements LlmPort {
   async complete(request: CompletionRequest, options: GatewayCallOptions): Promise<GatewayResult> {
     const chain = this.chainFor(options);
     if (chain.length === 0) {
+      // "The pool is empty" is the wrong sentence when a `preferMode: restrict`
+      // variant is what emptied it: the pool is full of models, and none of them
+      // is one this variant is allowed to use. Naming the variant is the
+      // difference between a two-minute fix and an afternoon.
+      const pool = options.pool ?? 'default';
+      const reason = options.variant
+        ? `No model target for variant "${options.variant}" in pool "${pool}". ` +
+          'Under `preferMode: restrict` a variant may use only the models its `prefer` list names, ' +
+          'and none of them is currently usable — check the list, their capabilities and their health.'
+        : `Routing pool "${pool}" is empty`;
       throw new AllTargetsFailedError('No model targets available for this task', [
-        new LlmCallError('model_unavailable', `Routing pool "${options.pool ?? 'default'}" is empty`),
+        new LlmCallError('model_unavailable', reason),
       ]);
     }
 

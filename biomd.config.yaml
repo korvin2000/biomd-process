@@ -341,8 +341,13 @@ llm:
           local: 1
           omniroute: 3
           openrouter: 4
-        # Language preferences reorder candidates; they never remove fallbacks.
-        # Preferences outrank the normal pool ranking.
+        # restrict: a language's list is its *whole* chain — nothing else in the
+        # pool may serve it. A one-entry list is therefore a pool of one and has
+        # no fallback at all, so a transient failure there fails the document
+        # rather than borrowing a model this file did not choose for it.
+        # Preferences outrank the normal pool ranking, and read no queue depth:
+        # a listed model that is busy is still tried first and the caller waits.
+        preferMode: restrict
         prefer:
           zh: [deepseek]
           ja: [deepseek]

@@ -302,11 +302,29 @@ const poolSchema = z.object({
    * Task variant → the models to try first for it. For `translate` and
    * `localize` the variant is the target language code.
    *
-   * A reordering of this pool, never an addition to it: every id named here
-   * must also be in `models`, so a preference can never route somewhere the
-   * pool does not allow, and the rest of the pool remains the fallback chain.
+   * Never an addition to this pool: every id named here must also be in
+   * `models`, so a preference can never route somewhere the pool does not
+   * allow. Order inside the list is the order they are tried.
    */
   prefer: z.record(z.array(identifier)).default({}),
+  /**
+   * What a `prefer` list means when the variant matches.
+   *
+   *  - `reorder` (the default) floats the listed models to the front and keeps
+   *    the rest of the pool behind them. A preference is then a quality
+   *    statement with the whole pool still catching a listed model that is
+   *    down, and preferring a model can never make a variant unroutable.
+   *  - `restrict` treats the list as the *entire* chain for that variant.
+   *    Nothing else in the pool may serve it.
+   *
+   * `restrict` is the stronger claim and the sharper edge: the list becomes the
+   * variant's whole fallback chain, so a one-entry list is a pool of one — it
+   * has no chain at all, and every transient failure becomes a failed document.
+   * A variant whose listed models are all unusable fails loudly rather than
+   * quietly borrowing a model the config did not choose, which is the point.
+   * Variants with no `prefer` entry are unaffected and use the full pool.
+   */
+  preferMode: z.enum(['reorder', 'restrict']).default('reorder'),
 }).strict();
 
 /** A pool is either a bare model list (the shorthand) or the expanded object. */
