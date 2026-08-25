@@ -19,6 +19,7 @@ import { countryCodes } from './countries.js';
 import {
   DEFAULT_SUPPORTED_LANGUAGES,
   FORBIDDEN_DOSSIER_MEMBERS,
+  type DisplayNameOrder,
   type EntryRow,
 } from './types.js';
 import {
@@ -70,6 +71,23 @@ export interface ValidateOptions {
    * this deployment chose to keep a partial date rather than lose the fact.
    */
   datePrecision?: DatePrecision;
+  /**
+   * How `index-<lang>.json[0]` was authored (`tasks.catalog.displayNameOrder`).
+   *
+   * `INV-15` asks whether `[0]` agrees with the dossier's `forename surname`,
+   * and *agrees* is only decidable once the authored order is known — the same
+   * arrangement as {@link ValidateOptions.datePrecision}, where the setting is
+   * the statement of intent and the checker accepts what it allows.
+   *
+   * Defaults to `given-first`, which is `INV-15` as `external/07` §7.3 states
+   * it; `biomd validate` passes the configured value instead.
+   */
+  displayNameOrder?: DisplayNameOrder;
+  /**
+   * The language the roster is written in (`roster.language`), which is the
+   * only language `displayNameOrder: roster` treats differently.
+   */
+  rosterLanguage?: string;
 }
 
 const LATIN_SCRIPT_LANGUAGES = new Set(['en', 'es', 'de', 'fr', 'it', 'pt']);
@@ -87,6 +105,7 @@ export function validateCatalogue(snapshot: CatalogueSnapshot, options: Validate
   const titles = new Map(rows.map((row) => [row.id, text(row.title) ?? '']));
 
   checkNameIndices(snapshot, ids, titles, add);
+  checkDisplayNames(snapshot, rows, options.displayNameOrder ?? 'given-first', options.rosterLanguage ?? '', add);
   checkDossiers(snapshot, supported, options.datePrecision ?? 'day', add);
   checkEditions(snapshot, rows, supported, options.checkFiles !== false, add);
   checkCrossEdition(snapshot, rows, add);
@@ -305,6 +324,134 @@ function checkNameIndices(
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// index-<lang>.json[0] against the dossier
+// ---------------------------------------------------------------------------
+
+/**
+ * `INV-15`, with `INV-16`'s exemptions: the name a reader sees is still the
+ * name of the person whose dossier sits behind it.
+ *
+ * The defect is drift, not a typo. `mergeNameIndex` deliberately keeps a
+ * hand-authored `[0]` and appends only new aliases, so a dossier renamed after
+ * the fact leaves the old display name standing for ever with the new one filed
+ * behind it as an alias — the entry looks right, searches right, and is carded
+ * under a name nothing else in the catalogue uses. A renumbered id does the
+ * same thing more violently, parking one person's names on another's row.
+ *
+ * Agreement is *not* equality with `forename + " " + surname`, because which
+ * order `[0]` takes is a deployment choice ({@link DisplayNameOrder}) and all
+ * three of them are correct output. The expected form is therefore computed
+ * from the declared order, and only that form is accepted — strictly, since a
+ * catalogue that declared one order and published the other has a real bug.
+ *
+ * `roster` order for the roster's own language is the one case this cannot be
+ * decided from the published files: there `[0]` may legitimately be a heading a
+ * person wrote — `Абреу Зекинья` where the dossier says `Хосе Гомеш де Абреу` —
+ * and the roster is an *input*, absent from the snapshot. The check degrades
+ * there to the only thing that still separates a hand-authored heading from a
+ * wrong row: it must have a word in common with the dossier's name.
+ */
+function checkDisplayNames(
+  snapshot: CatalogueSnapshot,
+  rows: readonly EntryRow[],
+  order: DisplayNameOrder,
+  rosterLanguage: string,
+  add: Emit,
+): void {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+
+  // `INV-16`, second exemption. `external/01` §1.6 lets two rows declare the
+  // same `json` and asks the producer to record which of them is canonical —
+  // but the format has no member for it, so a validator cannot tell the
+  // canonical row from the variant it was told to distinguish by appending a
+  // qualifier. Checking both would report that qualifier as the defect.
+  const owners = new Map<string, number>();
+  for (const row of rows) {
+    const json = text(row.json);
+    if (!json) continue;
+    const path = stripLeadingSlash(json);
+    owners.set(path, (owners.get(path) ?? 0) + 1);
+  }
+
+  for (const [lang, file] of snapshot.names) {
+    if (!isObject(file.value)) continue;
+    const where = `index-${lang}.json`;
+
+    for (const [id, value] of Object.entries(file.value as Record<string, unknown>)) {
+      if (!Array.isArray(value)) continue;
+      const display = value.find((item): item is string => typeof item === 'string' && item.trim() !== '');
+      if (display === undefined) continue;
+
+      const row = byId.get(id);
+      const json = row ? text(row.json) : undefined;
+      if (!json || (owners.get(stripLeadingSlash(json)) ?? 0) > 1) continue;
+
+      const path = `${lang}/${stripLeadingSlash(json)}`;
+      const root = snapshot.dossiers.get(path)?.value;
+      if (!isObject(root)) continue;
+      const meta = root['metadata'];
+      if (!isObject(meta)) continue;
+
+      const forename = text(meta['forename']) ?? '';
+      const surname = text(meta['surname']) ?? '';
+      // A dossier with no name components is this invariant's premise missing,
+      // not its conclusion failing. `INV-8` is what reports an absent edition.
+      if (!forename && !surname) continue;
+      // `INV-16`, first exemption: a comma-separated `forename` is the roster's
+      // convention for several people, not one person's given name.
+      if (forename.includes(',')) continue;
+
+      const expected = expectedDisplay(forename, surname, order, lang === rosterLanguage);
+      if (foldName(display) === foldName(expected)) continue;
+      if (order === 'roster' && lang === rosterLanguage && sharesWord(display, `${forename} ${surname}`)) continue;
+
+      add(
+        'warning',
+        'INV-15',
+        where,
+        `Entry "${id}": display name "${display}" does not agree with ${path} ("${expected}") — ` +
+          `the card and the dossier hold different names.`,
+      );
+    }
+  }
+}
+
+/** `Forename Surname`, or `Surname Forename` where the deployment files it that way. */
+function expectedDisplay(
+  forename: string,
+  surname: string,
+  order: DisplayNameOrder,
+  isRosterLanguage: boolean,
+): string {
+  // A mononym reaches a dossier as `forename === surname` — `Армик`, `Sting`,
+  // and every collective whose title was filed in both columns. Joining them
+  // would ask for the name twice.
+  const mononym = foldName(forename) === foldName(surname);
+  const given = (mononym ? [surname] : [forename, surname]).filter(Boolean).join(' ');
+  const invert = order === 'surname-first' || (order === 'roster' && isRosterLanguage);
+  if (!invert || mononym || !forename || !surname) return given;
+  return `${surname} ${forename}`;
+}
+
+/**
+ * Do two names share a word, ignoring case, diacritics and initials?
+ *
+ * The weakest claim worth making about a heading a person wrote: `Абреу
+ * Зекинья` and `Хосе Гомеш де Абреу` are one man under two conventions and
+ * share `Абреу`, while a name that arrived from another row shares nothing.
+ * Anything under three characters is excluded for `INV-28`'s reason — an
+ * initial or a particle matches nearly everything, so it is not agreement.
+ */
+function sharesWord(left: string, right: string): boolean {
+  const words = (value: string): string[] =>
+    foldName(value)
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((word) => word.length > 2);
+  const first = new Set(words(left));
+  return words(right).some((word) => first.has(word));
 }
 
 // ---------------------------------------------------------------------------

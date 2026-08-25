@@ -38,6 +38,12 @@ export function createValidateCommand(): Command {
         supportedLanguages: languages,
         checkFiles: options.files !== false,
         datePrecision: loaded.config.catalogue.datePrecision,
+        // `INV-15` compares `index-<lang>.json[0]` against the dossier's name,
+        // and these two settings are what "agrees" means: the same arrangement
+        // as `datePrecision`, where the configuration states the intent and the
+        // checker accepts what it allows.
+        displayNameOrder: loaded.config.tasks.catalog.displayNameOrder,
+        rosterLanguage: loaded.config.roster.language,
       });
 
       if (options.json) {

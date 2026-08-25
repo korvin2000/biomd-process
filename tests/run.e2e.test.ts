@@ -256,7 +256,15 @@ describe('language editions and catalogue', () => {
     await runJob(workspace.app({ tasks: FULL }, FakeClient.happyPath()));
 
     const snapshot = await readCatalogue(workspace.path('out'), { supportedLanguages: ['ru', 'en'] });
-    const findings = validateCatalogue(snapshot, { supportedLanguages: ['ru', 'en'] });
+    // The same two settings the run was made under. `INV-15` compares
+    // `index-<lang>.json[0]` against the dossier's name, and this deployment
+    // files the roster's own language surname-first on purpose — validating
+    // without saying so would report every correct Russian row.
+    const findings = validateCatalogue(snapshot, {
+      supportedLanguages: ['ru', 'en'],
+      displayNameOrder: 'roster',
+      rosterLanguage: 'ru',
+    });
 
     expect(findings.filter((finding) => finding.severity === 'error')).toEqual([]);
   });

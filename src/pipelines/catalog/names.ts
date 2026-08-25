@@ -1,4 +1,4 @@
-import type { Dossier, EntryRow } from '../../domain/types.js';
+import type { DisplayNameOrder, Dossier, EntryRow } from '../../domain/types.js';
 import { text } from '../../domain/values.js';
 import { isLatinScript, romanizeCyrillic, toAscii } from '../../domain/romanize.js';
 
@@ -27,20 +27,12 @@ export type AliasPolicy = 'distinct' | 'spec';
 /**
  * Which name lands in `index-<lang>.json[0]`.
  *
- * `[0]` is not one alias among several: the reader prints it under the
- * thumbnail and searches everything after it. So the choice is a deployment
- * decision, not a derivation.
- *
- *  - `roster` — the roster's own `fullname` for the roster's language, falling
- *    back to `Surname Forename` when the roster does not know the entry; every
- *    other language keeps `Forename Surname`, because a Russian catalogue's
- *    filing order is not an English one.
- *  - `surname-first` — `Surname Forename` in every language.
- *  - `given-first` — `Forename Surname` in every language.
- *
- * Whichever order loses becomes the first alias, so both stay searchable.
+ * Defined in `src/domain/types.ts`, because `validate` has to hold the same
+ * opinion: `INV-15` compares `[0]` against the dossier's name components, and
+ * what counts as agreement is precisely this setting. Re-exported here so the
+ * pipeline reads as owning its own vocabulary.
  */
-export type DisplayNameOrder = 'roster' | 'surname-first' | 'given-first';
+export type { DisplayNameOrder };
 
 export interface NameOptions {
   /** Emit search-only aliases after the display name. */

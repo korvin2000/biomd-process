@@ -37,6 +37,27 @@ export interface EntryRow {
 /** `index-<lang>.json` — `id` → `[display name, ...search-only aliases]`. */
 export type NameIndex = Record<string, string[]>;
 
+/**
+ * Which name lands in `index-<lang>.json[0]` — `tasks.catalog.displayNameOrder`.
+ *
+ * `[0]` is not one alias among several: the reader prints it under the
+ * thumbnail and searches everything after it, so the choice is a deployment
+ * decision rather than a derivation. It lives here because two layers have to
+ * agree about it — `catalog` authors `[0]` and `validate` checks it (`INV-15`)
+ * — exactly as {@link DatePrecision} is shared by the writer and the checker.
+ *
+ *  - `roster` — the roster's own `fullname` for the roster's language, falling
+ *    back to `Surname Forename` when the roster does not know the entry; every
+ *    other language keeps `Forename Surname`, because a Russian catalogue's
+ *    filing order is not an English one.
+ *  - `surname-first` — `Surname Forename` in every language.
+ *  - `given-first` — `Forename Surname` in every language, which is `INV-15`
+ *    as `external/07` §7.3 states it.
+ *
+ * Whichever order loses becomes the first alias, so both stay searchable.
+ */
+export type DisplayNameOrder = 'roster' | 'surname-first' | 'given-first';
+
 /** VD-DATE values, all optional, all L0. */
 export interface EntryDates {
   born?: string;
