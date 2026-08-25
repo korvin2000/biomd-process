@@ -19,7 +19,7 @@ cli → app → core ─┬→ pipelines → io
 
 | File | Owns | Key exports |
 |---|---|---|
-| `types.ts` | `EntryRow`, `NameIndex`, `Dossier`, member orders, forbidden members | `FORBIDDEN_DOSSIER_MEMBERS` `METADATA_ORDER` `ROW_ORDER` `DATE_KEYS` `LIST_KEYS` `PROSE_KEYS` |
+| `types.ts` | `EntryRow`, `NameIndex`, `Dossier`, member orders, forbidden members, `DisplayNameOrder` | `FORBIDDEN_DOSSIER_MEMBERS` `METADATA_ORDER` `ROW_ORDER` `DATE_KEYS` `LIST_KEYS` `PROSE_KEYS` `DisplayNameOrder` |
 | `values.ts` | every `VD-*` value domain | `normalizeDate` `parseDate` `datePrecisionOf` `refinesDate` `sharpensDate` `yearOf` `normalizeCsvList` `normalizeRanking` `normalizeUrl` `normalizeTarget` `slugOf` `normalizeId` `normalizeAssetPath` `normalizeContentPath` |
 | `vocabulary.ts` | multilingual synonyms → canonical token | `resolveEntryType` `resolveGender` `resolveDocumentType` `resolveLanguage` `resolveEnsemble` `languageName` |
 | `countries.ts` | 249 alpha-2 codes, both directions | `resolveCountry` `countryName` `isCountryCode` |
@@ -37,7 +37,7 @@ cli → app → core ─┬→ pipelines → io
 | `translation/` | `TranslationPipeline` | `StructureGuard.ts` — `StructureGuard` `StructureStrictness` |
 | `localization/` | `LocalizePipeline` | `StringTable.ts` — `collectUnits` `applyUnits` `keyOf` `missingKeys` · `TranslationMemory.ts` · `TranslationMemoryRegistry.ts` |
 | `portrait/` | `PortraitPipeline` `assetPath` | none — all logic lives in `src/images` |
-| `catalog/` | `CatalogPipeline` | `names.ts` — `displayNamesOf` `latinTitleOf` `AliasPolicy` `DisplayNameOrder` |
+| `catalog/` | `CatalogPipeline` | `names.ts` — `displayNamesOf` `latinTitleOf` `AliasPolicy`, and a re-export of `DisplayNameOrder` (which lives in `domain/types.ts`, because `validate` holds the same opinion for `INV-15`) |
 | `shared/` | cross-pipeline helpers | `escalation.ts` — `runWithEscalation` `EscalationSpec` · `stringBatch.ts` — `translateUnits` (repair + narrowing ladders) · `dossierSource.ts` — `findSourceDossier` `findDossierToLocalize` `outputDossierPath` · `script.ts` — `isTranslatable` `hasOwnScript` `mixedScriptWords` · `roster.ts` — `rosterEntryFor` |
 
 ## src/documents — reading Markdown and putting it back

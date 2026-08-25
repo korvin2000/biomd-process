@@ -60,4 +60,4 @@ a per-document localization diff, not a model study.
 2. [INDEX.md](INDEX.md) → the one reference file your task needs
 3. [source-map.md](source-map.md) — before grepping for a concept
 4. `src/` — 131 files, ~21.8k lines
-5. `tests/` — 27 files, 505 tests
+5. `tests/` — 27 files, 513 tests
