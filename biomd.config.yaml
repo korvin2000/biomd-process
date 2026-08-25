@@ -1,11 +1,6 @@
 # biomd-process — main configuration
-#
-# Everything here has a default (see src/config/schema.ts); this file shows the
-# knobs you are most likely to touch. Secrets come from the environment:
-# `${VAR}` is substituted at load time, `${VAR:-fallback}` supplies a default.
-# minimax/minimax-m3: es, fr, it, de, pt, zh, ja
-#   biomd config check     validate this file and print the effective values
-#   biomd run --dry-run    plan the whole job without spending a token
+# Full docs: biomd.config.yaml.example. Defaults: src/config/schema.ts.
+# Env secrets: ${VAR} / ${VAR:-fallback}. Validate with `biomd config check`.
 
 version: 1
 
@@ -13,55 +8,25 @@ project:
   name: biomd-process
   rootDir: .
 
-# --------------------------------------------------------------------------
-# Which documents to process
-# --------------------------------------------------------------------------
 input:
   baseDir: input
   include:
     - '*/**.bio.md'
   exclude:
     - '**/node_modules/**'
-  # 'auto' derives the language from the first directory under baseDir
-  # (examples/ru/paco-de-lucia.bio.md -> ru)
-  sourceLanguage: auto
+  sourceLanguage: auto # source language from first directory under baseDir
   slugSuffix: .bio.md
-  limit: 0 # 0 = no limit
+  limit: 0 # 0 = unlimited
 
-# --------------------------------------------------------------------------
-# A second input source: the extracted index of the site's own name list.
-#
-# article file -> full name, family name, given name, patronymic, alternative
-# spellings. It knows things one reading of one article cannot — the family name
-# behind a patronymic-only byline, the pseudonym a reader will type, a
-# collective's own title — and it is also incomplete (739 of ~1000 articles) and
-# wrong in places (`authors.bio.md` is a page title split across the name
-# columns). So every consumer treats it as corroboration, never as authority:
-# it fills a gap the article left and never overwrites a fact the article states.
-#
-# Three tasks read it: extract (gap-filling + a conflict report), portrait
-# (extra name spellings, which is how a collective gets found at all), and
-# catalog (hand-authored search aliases).
-# --------------------------------------------------------------------------
+# Optional roster hints; fill gaps only. Empty `file` disables.
 roster:
-  file: data/names.json # empty disables the roster entirely
-  # The language it is written in. Its names are variants, not translations, so
-  # they are offered to index-ru.json and to no other language index.
-  language: ru
-  # Supply forename/surname the article did not yield. Gap-filling only.
-  fillMetadata: true
-  # Contribute its spellings and its own name order as search aliases.
-  aliases: true
-  # Feed its spellings to the portrait matcher.
-  nameHints: true
-  # Report a roster name that contradicts the extracted one. Off by default:
-  # on a thousand articles the two disagree about hundreds of abbreviations
-  # ("Е." against "Евгений") and a note per document is noise. On for a QA pass.
-  reportConflicts: false
+  file: data/names.json
+  language: ru # variant spellings; indexed only for roster language
+  fillMetadata: true # fill missing forename/surname
+  aliases: true # add roster spellings/order as aliases
+  nameHints: true # use roster spellings for portrait matching
+  reportConflicts: false # report roster/article name conflicts
 
-# --------------------------------------------------------------------------
-# Where results go. Templates are relative to output.baseDir.
-# --------------------------------------------------------------------------
 output:
   baseDir: out
   channels:
@@ -69,159 +34,63 @@ output:
     translation: '{lang}/{slug}.bio.md'
     catalogIndex: 'index.json'
     catalogLocalizedIndex: 'index-{lang}.json'
-    # Internal hand-off from `extract` to `catalog`; not part of the published
-    # format, dot-prefixed so the consuming site ignores the directory.
+    # Internal hint files; dot-prefixed to stay unpublished.
     catalogHints: '.hints/{slug}.json'
-    # The portrait `portrait` chose, the runners-up, and why each lost. Also
-    # internal, and worth reading when a picture looks wrong.
-    portraitHints: '.hints/{slug}.portrait.json'
-    # Classification a web search supplied that index.json owns (country).
+    portraitHints: '.hints/{slug}.portrait.json' # portrait choice + alternatives
     websearchHints: '.hints/{slug}.web.json'
-  # skip | overwrite | fail — what the writer does when the file is already there.
-  #
-  # `skip` is also read by the **planner**, which is what makes it cheap: a task
-  # whose output exists and will not be replaced is retired before it is
-  # planned, so no model is called and nothing is billed. It used to be a
-  # write-time decision only — the model answered, the answer was paid for, and
-  # then discarded with a warning — which after a prompt edit (every fingerprint
-  # invalidated, so every task re-plans) cost the price of the whole corpus for
-  # nothing.
-  #
-  # `run.skipExistingOutputs` says the same thing from the other end and either
-  # one is enough. A task that *merges* into its output (`catalog`, `websearch`)
-  # is deliberately exempt from both: its file exists from the end of the first
-  # run onwards and says nothing about whether this run's work is in it.
+  # skip | overwrite | fail. `skip` also blocks --no-skip-existing reruns;
+  # use overwrite when CLI-forced regeneration must remain possible.
   onExisting: skip
   jsonIndent: 2
 
-# --------------------------------------------------------------------------
-# The published format itself — see external/ for the normative specification.
-# These are deployment properties, not task settings: extract, localize, catalog
-# and `biomd validate` all have to agree about them.
-# --------------------------------------------------------------------------
+# Published-format settings shared by extract/search/localize/catalog/validate.
 catalogue:
-  # The closed set of content languages (VD-LANG). Chinese is `zh`, never `ch`.
-  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko]
-  # day | month | year — the coarsest date this catalogue publishes.
-  # external/02 says a date not known to the day must be omitted, which throws
-  # away the fact whenever an article says only "born in 1885". `year` keeps it,
-  # as the canonical form truncated from the left: "02.1893", "1893".
-  # The trade-off, stated once: VD-DATE requires a consumer to treat anything
-  # outside DD.MM.YYYY as absent, so a strict reader ignores a partial date and
-  # behaves exactly as if the field had been dropped. Nothing breaks.
+  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko] # VD-LANG; Chinese = `zh`
+  # day | month | year; coarsest published date precision.
   datePrecision: year
-  # `type` for a biography nothing else classified.
-  defaultType: guitarist
-  # `type` for an article-only entry (About, News): `hidden` keeps it out of the
-  # grid, search and the facets while leaving it routable.
-  defaultPageType: hidden
-  # The vocabulary is open in the format; false is safer for machine-produced
-  # values, where an unknown craft is usually an invented synonym.
-  allowUnknownTypes: false
+  defaultType: guitarist # fallback biography type
+  defaultPageType: hidden # routable but hidden from the grid
+  allowUnknownTypes: false # reject unrecognized machine types
 
-# --------------------------------------------------------------------------
-# What to do with them. Enable any combination.
-#
-# With every task on, ru/x.bio.md produces:
-#   out/ru/x.bio.json   dossier extracted from the article, completed from the web
-#   out/en/x.bio.md     translated article
-#   out/en/x.bio.json   dossier localized into English
-#   out/index.json      catalogue index (incl. the chosen portrait) + index-<lang>.json
-# --------------------------------------------------------------------------
+# Pipeline stages can be enabled independently.
 tasks:
   extract:
     enabled: true
     pool: extract
     outputChannel: metadata
-    # A response missing all of these is rejected and retried / escalated.
-    # They are the *minimum* for a usable dossier, not the extraction target:
-    # every key of the card is asked for, and every one the article answers is
-    # filled in. See `readWholeDocument` below for what that requires.
+    # Minimum dossier fields; collectives waive person-only requirements.
     requiredFields: [forename, surname]
-    # Read the whole article, skipping the context ladder's truncated rungs.
-    #
-    # Extraction is a harvest: the question is "answer every key this article
-    # supports". A model sent the first 1500 tokens answers it for the first
-    # 1500 tokens, and it cannot tell you that the sentence naming the teachers,
-    # the award and the instruments was never in the part it saw — those keys
-    # simply come back absent, exactly as if the article had never stated them.
-    # Biographies put identity in the lead and everything else wherever the
-    # prose reached it, which is routinely 85% of the way in.
-    #
-    # This costs nothing rather than double-billing: the truncated rung is
-    # dropped at plan time, so the call that would have been rejected is never
-    # made. An article too large for any context window still degrades to a
-    # chunked pass and the parts are merged.
-    #
-    # false restores the cheap head-first reading.
+    # Read the full source; skip truncated extraction rungs.
     readWholeDocument: true
-    # An authored <slug>.bio.json beside the article (this tool's own output in
-    # `out/` deliberately does not count — see the schema) is authored data:
-    #   reuse    (default) never call a model; normalize, migrate to v2, re-emit
-    #   complete ask only for the fields it lacks, and never overwrite one it has
-    #   rebuild  ignore it and extract from scratch
+    # Authored sibling dossier: reuse | complete | rebuild.
     onExistingDossier: reuse
-    # The gallery is parsed out of the article's own ::: image containers and
-    # tablature tables. Costs nothing, and the target is the path the article
-    # contains rather than one a model retyped.
+    # Parse article image containers/tables into gallery metadata.
     harvest:
       photos: true
       music: true
       maxItems: 60
-    # `type`/`gender`/`country`/Latin `title` belong to index.json, not to a
-    # dossier — but the article is open anyway, so a model that notices them
-    # writes them to the catalogHints channel for `catalog` to pick up.
-    emitCatalogHints: true
-    # Empty = the built-in field card. Naming fewer keys is the most direct cost
-    # lever there is: the card *is* the prompt.
-    fields: []
+    emitCatalogHints: true # emit type/gender/country/title hints
+    fields: [] # [] = built-in extraction card
 
-  # Facts the article does not contain, from a model that can search.
-  #
-  # Conditional by construction: the questions are computed from the dossier, so
-  # an entry that already answers everything costs nothing — no gaps, no call.
-  # The article is never sent; what crosses the wire is a short identity card.
+  # Fill missing dossier facts; no gaps means no search call.
   websearch:
     enabled: true
     pool: websearch
-    outputChannel: metadata # the dossier is completed in place
+    outputChannel: metadata # complete dossier in place
     hintsChannel: websearchHints
     fields: [born, died, birthplace, deathplace, country]
-    # Route only to models that declare `web_search`. This is what separates
-    # "searched and found" from "recalled and asserted" — a model without search
-    # will answer these questions anyway, fluently and without a source.
+    # Route only to targets declaring real web-search capability.
     requireWebSearchCapability: true
-    # A value with no source URL behind it is an assertion from memory.
-    requireSource: true
+    requireSource: true # require a source URL
     minConfidence: 0.7
-    # Age past which an undated death becomes a question. Not a claim that
-    # anyone has died: past it, "the article does not mention a death" stops
-    # being evidence that there was none, because the article may predate it.
-    # The answer is a status (alive | dead | unknown), never a bare date, so
-    # silence about a living person can never turn into a date of death.
+    # Age threshold for querying alive/dead/unknown when death is missing.
     livenessAgeYears: 78
-    # Also ask for the exact day when only a year or a month is on record.
-    upgradePrecision: true
-    # What to do when the sourced answer disagrees with the date on record.
-    #
-    # An article that says "born about 1950" and a cited 25.07.1949 are not two
-    # facts of equal standing: one is a rounded approximation, the other a full
-    # date with a page behind it. `prefer-precise` lets the strictly more
-    # precise sourced date win, disagreeing year included — and only then. Two
-    # dates of the *same* precision that disagree are a real conflict, so they
-    # are written to out/.hints/<slug>.web.json with their source and left for
-    # a human, never resolved by provenance alone.
-    #
-    #   report  never overwrite; record every disagreement for review
-    #   ignore  drop it (the behaviour before this setting existed)
-    #
-    # Whatever happens is in the run notes: `biomd report --notes conflict`.
+    upgradePrecision: true # upgrade year/month to exact date when available
+    # prefer-precise | report | ignore; equal-precision conflicts are reported.
     onDateConflict: prefer-precise
-    # none | lead. The lead paragraph is how a namesake gets told apart.
-    includeContext: lead
+    includeContext: lead # none | lead
     contextChars: 600
-    # url: fill an empty metadata.url from the best source found.
-    recordSources: url
+    recordSources: url # fill empty metadata.url from best source
 
   translate:
     enabled: true
@@ -229,204 +98,67 @@ tasks:
     outputChannel: translation
     targetLanguages: [en, fr, es, de, it]
     skipSourceLanguage: true
-    # Copy the source article into the output tree as its original edition.
-    # INV-8 wants a file for every code in a row's `lang`, the first one
-    # included — and when input.baseDir and output.baseDir differ, nothing else
-    # puts it there. Costs nothing. Turn off when the corpus *is* the root.
+    # Also emit the source-language article into the output tree.
     copySourceArticle: true
-    # strict | lenient | off. strict is right for `segments` mode, where the
-    # skeleton is never sent and so cannot legitimately change.
-    verifyStructure: strict
-    # segments: send only the prose. Headings, list markers, ::: containers and
-    #   their src:/position:/size: attributes, code and every URL stay here and
-    #   are spliced back locally, so structure survives by construction and only
-    #   words are billed. Identical fragments are translated once per run.
-    # document: send the whole Markdown. More context for the translator, more
-    #   tokens, and the structure guard becomes the only defence.
+    verifyStructure: strict # strict structure check
+    # segments = prose-only + local structure splice; document = whole Markdown.
     mode: segments
-    # keep | translate — what to do with a fragment that is not written in the
-    # source language. A Russian article prints work titles, discographies and
-    # Latin spellings of names as their own languages write them (`Allegro vivo`,
-    # `Plays Domenico Scarlatti`, `'Amadeus' Guitar Duo`); `keep` never sends a
-    # fragment with no Cyrillic in it. Cheaper than asking, and more reliable:
-    # an instruction is obeyed on most calls, a fragment that was never sent on
-    # all of them. A mixed fragment is always sent.
+    # keep | translate; mixed fragments are always translated.
     foreignFragments: keep
-    # auto | code | text — what a ``` fence contains.
-    #
-    # These articles set poems and song lyrics in a bare fence, and the span
-    # extractor used to skip every fence on the assumption that fencing meant
-    # code. On garcia_lorca.bio.md that left 44% of the Russian text
-    # untranslated, and nothing caught it: the structure guard ignores fenced
-    # content, so the article passed every check with half of it in Russian.
-    #
-    # `auto` classifies each block by what is in it — an info string naming a
-    # language, tablature and ASCII rules are code; lines of words are verse —
-    # and lifts verse one span per line, so the shape of the poem is restored by
-    # the splice rather than asked of the model. `code` is the old behaviour.
+    # auto | code | text; `auto` translates prose/verse fences.
     fencedBlocks: auto
-    # Characters of the article's title and lead sent with each batch, so the
-    # fragments arrive with a subject. Rides in the volatile part of the message,
-    # so the prompt-cache prefix is untouched. 0 sends nothing.
-    contextChars: 300
-    # Sized so the *answer* fits the smallest model in the pool, which is the
-    # binding constraint and not the context window: the reply repeats every key
-    # and runs longer than the source, so a batch needs roughly
-    # `chars(prose) / charsPerToken * 1.6` output tokens. Against local-small's
-    # 8192-token ceiling that is ~16k characters of prose per call — about 20
-    # paragraphs of these biographies, and 40 was over it on the longer ones.
-    #
-    # Going over is no longer fatal (the batch is halved and re-asked, and the
-    # router will not hand it to a model that cannot finish it), but every
-    # oversized call is still one cut-off answer paid for before the correction.
+    contextChars: 300 # title + lead context per batch
+    # Batch-size guard; oversized batches are split and retried.
     maxSegmentsPerCall: 45
-    # Models routinely answer 39 of 40 keys. A repair call re-asks for just the
-    # missing ones instead of re-sending (and re-paying for) the whole batch.
-    # 0 restores all-or-nothing retries.
-    repairAttempts: 2
-    # off | run | persistent. `persistent` keeps the cache in run.memoryDir, so a
-    # re-run over a grown corpus pays only for the strings that are new.
+    repairAttempts: 2 # retry missing keys only; 0 = all-or-nothing
+    # off | run | persistent; persistent uses run.memoryDir.
     useTranslationMemory: run
-    # A house glossary, for the terms a model renders differently on different
-    # calls. `promptVariables` is free-form and merged into the template
-    # variables, and `glossary` is the key both translation user templates
-    # already look for — so this needs no code and costs a few tokens.
-    #
-    # It rides in the *stable* half of the message, before the document, so a
-    # constant glossary leaves the prompt-cache prefix intact. Keep it short:
-    # it is for the handful of terms the corpus argues about (a guitar
-    # publication is a "magazine", not a "journal"), not a dictionary.
-    #
-    # promptVariables:
-    #   glossary:
-    #     журнал: magazine
-    #     семиструнная гитара: seven-string guitar
-    #     заслуженный артист: Honoured Artist
 
-  # Per-language edition of the dossier. Only the prose values are sent, keyed by
-  # content hash; dates, ranking, url, every media target and every unknown field
-  # are copied from the source and cannot be altered by a model.
+  # Localize prose fields only; structured fields are copied unchanged.
   localize:
     enabled: true
     pool: translate
     outputChannel: metadata
-    targetLanguages: [en, fr, es, de, it] # empty follows tasks.translate.targetLanguages
+    targetLanguages: [en, fr, es, de, it] # [] = follow translate targets
     maxStringsPerCall: 60
     repairAttempts: 2
     useTranslationMemory: run
 
-  # The entry's portrait, chosen out of an existing image index. No LLM: the
-  # whole decision is name matching plus the index's own `ai` block.
-  #
-  #   biomd portrait "Андрес Сеговия" --top 10
-  #
-  # shows the ranking and the reasoning for one person without running anything.
+  # LLM-free portrait selection from names, image metadata, and article images.
   portrait:
     enabled: true
     indexFile: images/artists.json
-    # img resolves against the catalogue root, so this says where the scanned
-    # image tree sits under it: pages/ + photo/s/x.jpg -> pages/photo/s/x.jpg
-    #
-    # Bucket-relative on purpose (no leading slash). external/09 lists
-    # "/pages/photos/x.jpg" as an error — that is the *mistake* of writing img
-    # as if it resolved against the resource base. Here the image tree really
-    # does live under /pages, and the house style keeps the difference visible.
+    # Image root under the catalogue root; bucket-relative.
     assetPrefix: 'pages/'
     outputChannel: portraitHints
-    # How sure the matcher must be that the picture shows *this* person.
-    # Identity only — picture quality never compensates for a weak name match.
-    # Below it, no img is written at all, and the reader substitutes its own
-    # default portrait by gender (external/03 §3.4.9).
+    # Minimum identity score; below it no image is emitted.
     minIdentity: 0.9
-    # 1 = a person class with exactly one detected face; 2 also allows one with
-    # no face detected, or a single face in a picture classified `group`/`other`.
-    maxTier: 2
+    maxTier: 2 # 1 = strict single-person; 2 allows weaker face evidence
     minPixels: 80
-    # A record sleeve is artwork with the artist's name printed on it. The
-    # archive is full of them and several classify as clean single-face portraits.
-    excludeReleaseCovers: true
+    excludeReleaseCovers: true # avoid release-cover false positives
     keepCandidates: 8
-    # omit | default. `omit` is the documented fallback and keeps the synthetic
-    # placeholder out of the entry's gallery.
-    onLowConfidence: omit
+    onLowConfidence: omit # omit | default
 
-  # Catalogue aggregation. Runs last, uses no LLM, and reports the editions that
-  # actually landed on disk.
+  # Final LLM-free catalogue aggregation.
   catalog:
     enabled: true
     indexChannel: catalogIndex
     localizedIndexChannel: catalogLocalizedIndex
     localizedNames: true
-    # Search-only aliases after the display name.
     generateAliases: true
-    # distinct | spec — which aliases are worth authoring.
-    #
-    # `spec` is external/04 §4.5 as written: every form a reader might type, the
-    # bare family name and a transliteration included.
-    #
-    # `distinct` is this deployment's deliberate narrowing of it — the second
-    # place after catalogue.datePrecision where a setting overrides the
-    # specification on purpose. The consumer grades a match by position and
-    # counts a word-start hit, so a query for "Сеговия" already reaches
-    # "Андрес Сеговия": the bare surname adds a row and a tie and no
-    # reachability. Dropped for the same reason: an alias equal to the row's
-    # `title` (which is searched in its own right) and a machine
-    # transliteration ("Andres Segoviya", "Dzhon Vilyams"), which nobody types.
-    # Kept, because nothing else reaches them: the inverted order
-    # ("Сеговия Андрес"), the birth name, and the roster's own spellings.
+    # distinct trims search-redundant aliases; spec follows external/04 §4.5.
     aliasPolicy: distinct
-    # Which name goes in index-<lang>.json[0] — the string the reader prints
-    # under the thumbnail, as opposed to the aliases behind it, which are
-    # search-only. index.json.title is Latin-only, so for every non-Latin
-    # language this element *is* the display name.
-    #
-    #   roster         the roster's own `fullname` for the roster's language
-    #                  ("Абитон Жерар" — a person wrote it, in the catalogue's
-    #                  own order), falling back to `Surname Forename` when the
-    #                  roster does not know the entry. Every other language
-    #                  keeps `Forename Surname`: a Russian filing convention is
-    #                  not an English one.
-    #   surname-first  `Surname Forename` in every language.
-    #   given-first    `Forename Surname` everywhere (the old behaviour).
-    #
-    # Whichever order loses becomes the first alias, so nothing stops being
-    # findable.
+    # Display-name order: roster | surname-first | given-first.
+    # The alternate order remains searchable as an alias.
     displayNameOrder: roster
-    # Row members this run may *correct* rather than only fill in.
-    #
-    # `merge: true` protects hand-edits by never overwriting a value that is
-    # already there — which also means a value this tool derived *wrongly* is
-    # permanent. Changing `tasks.portrait.assetPrefix` is the case that bites:
-    # every row keeps a path built from the old prefix, silently, for ever.
-    # (`biomd validate` now calls that out: a VD-PATH-ASSET value has no `..`
-    # segment in it.)
-    #
-    #   img, title, type, gender, country   members of index.json
-    #   displayNames                        index-<lang>.json[0]
-    #
-    # Each replacement is reported in the run notes. Turn a member on for the
-    # run that fixes it, then take it back out — the protective default is the
-    # right steady state.
+    # Fields allowed to overwrite merged values; [] = fill-only.
     refresh: []
-    # Update the existing index.json and index-<lang>.json rather than replacing
-    # them. Turning this off deletes every row this run did not visit — and with
-    # them their ids, which index-<lang>.json joins on and which must be stable
-    # forever.
-    #
-    # It is also the only way to *correct* a derived display name: the merge
-    # treats every existing `[0]` as hand-authored, so a name this tool got
-    # wrong last run survives being fixed. The surgical version of that is to
-    # delete the one `index-<lang>.json` and re-run with merge still on — it
-    # carries no ids of its own, so nothing is lost but the names being redone.
+    # merge=true preserves untouched rows/IDs; false rebuilds the index.
     merge: true
 
-# --------------------------------------------------------------------------
-# LLM endpoints (any OpenAI-compatible URL) and the models they serve
-# --------------------------------------------------------------------------
 llm:
   endpoints:
-    # Local gateway: LiteLLM / OmniRoute / 9router / vLLM / Ollama shim
-    - id: local
+    - id: local # OpenAI-compatible local gateway
       baseUrl: http://192.168.1.26:8080/v1
       maxConcurrent: 1
       requestsPerMinute: 0
@@ -435,40 +167,9 @@ llm:
       baseUrl: http://192.168.1.26:20129/v1
       apiKey: ${OMNIROUTE_API_KEY}
       requestsPerMinute: 60
-      # These two lines are one setting, and it is a correctness setting rather
-      # than a throughput one.
-      #
-      # This gateway used to coalesce requests in flight at the same moment:
-      # three different bodies sent within a few milliseconds all came back with
-      # **one** answer, the first one's, byte for byte. Measured 2026-08-23 with
-      # `websearch` at concurrency 3, Aguado's date of death and his Spanish
-      # Wikipedia URL were published into Anido's and Amigo's dossiers, at
-      # confidence 0.98, citing a page about the wrong man — and nothing
-      # downstream can catch that, because the answer is well-formed, sourced
-      # and about a real guitarist, just not the one who was asked about.
-      #
-      # Re-measured 2026-08-24, and the finding is that **the trigger is
-      # `stream: false`, not the interval**. Two overlapping requests asking for
-      # a buffered answer: the second gets the first's completion, 5 rounds out
-      # of 5, and a 2000ms stagger changes nothing — what collides is the
-      # overlap, not the arrival. The same pairs streamed answer correctly 15
-      # times out of 15. So spacing them out is not a fix and never was; the
-      # earlier "100ms apart" rule of thumb describes when the collision is
-      # *likely*, not when it is possible.
-      #
-      # `stream: true` is therefore the setting that makes concurrency safe
-      # here, and `maxConcurrent: 2` is only safe because of it. Take the stream
-      # away and this must go back to 1.
-      #
-      # `minRequestSpacingMs` stays as cheap insurance and as the honest floor
-      # `requestsPerMinute` cannot express: a token bucket starts full, so
-      # 60/min permits sixty simultaneous requests and then a minute of silence.
-      #
-      # Note also that this gateway caches responses: an identical request body
-      # returns in ~15-50ms with no model attribution. That is free and correct,
-      # and worth knowing when a re-run looks implausibly fast.
-      maxConcurrent: 2
-      minRequestSpacingMs: 150
+      # OmniRoute buffered overlap can cross-talk; stream=true is required for maxConcurrent > 1.
+      maxConcurrent: 3
+      minRequestSpacingMs: 350 # enforce inter-request spacing
       stream: true
 
     - id: openrouter
@@ -477,383 +178,168 @@ llm:
       headers:
         HTTP-Referer: https://www.abc-guitars.com
         X-Title: biomd-process
-      requestsPerMinute: 60
-      maxConcurrent: 3
+      requestsPerMinute: 90
+      minRequestSpacingMs: 300
+      maxConcurrent: 4
 
   models:
-    - id: local-small
+    - id: gemma-local
       endpoint: local
       model: gemma4-31b-local
       contextWindow: 65536
-      maxOutputTokens: 18432
+      maxOutputTokens: 16384
       capabilities: [json_schema, json_object, prompt_cache]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      # This was the only target in the file with no `params`, so it ran at
-      # whatever the server defaults to while every other target sat at 0.1 —
-      # and it is the target that does all the extraction and all the
-      # translation. Measured on 2026-08-23, the same eight fragments asked
-      # three times:
-      #
-      #   server default   3 distinct answers out of 3
-      #   temperature 0.2  2 distinct answers out of 3
-      #   temperature 0    1 distinct answer  out of 3
-      #
-      # That churn is what makes two runs of the *same* prompt differ on
-      # "very young age" vs "too-young age" and "Cambo-les-Bains" vs
-      # "Cambio-le-Ben" — differences easily mistaken for a prompt regression.
-      # A catalogue wants the reproducible end of that: `useTranslationMemory`
-      # assumes a stable rendering, and a re-run should not rewrite prose it
-      # already published. Use 0 when reproducibility matters more than the
-      # last few percent of fluency.
-      # params: { temperature: 0.1 }
+      params:
+        temperature: 0.75
+        topP: 0.915
+        extra: { top_k: 64, min_p: 0.035 } # topK/minP are also first-class fields
       tags: [local, cheap]
 
-    # The German/English translation model. Measured against four alternatives
-    # on this endpoint (2026-08-24, `omniroute-openai-report.md`): first on
-    # translation quality of the five, second overall, and the only family that
-    # transliterates into German rather than English — `Tschudinow`, not
-    # `Chudinov`, which is the difference between an entry a German reader finds
-    # and one they do not. 41s and ~2.1k output tokens per article.
-    - id: or-luna
+    - id: gpt-luna
       endpoint: omniroute
       model: cx/gpt-5.6-luna
-      # The gateway's own `/v1/models` record, not a guess: 272000 / 128000.
-      # The old 127000 / 4096 understated both, and the output figure is the one
-      # that cost something — `routing.onOverflow: skip` reads it as "this model
-      # cannot finish a long article" and drops the target from the chain.
-      # 32768 is generous for a whole-document translation and still low enough
-      # that a runaway answer surfaces as `output_truncated` rather than a bill.
+      # Gateway advertises 272k context / 128k output; cap output at 32k.
       contextWindow: 272000
       maxOutputTokens: 32768
-      # All three verified by probe; `json_object` is what `mode: segments`
-      # sends, and `prompt_cache` is real here — 2816 of a 3704-token first call
-      # came back as `cached_tokens`, shared across runs and across models.
-      capabilities: [json_object, json_schema, prompt_cache, tools]
+      capabilities: [json_object, json_schema, prompt_cache, tools] # probe-verified
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      # This model reasons unless told not to: the bare id spends 184 reasoning
-      # tokens on a control question with no parameter at all, so "no reasoning"
-      # has to be asked for. It is worth asking for twice over. Reasoning did
-      # not resolve this corpus's ambiguities, it manufactured one — the typo
-      # `да и а строй` ("and the tuning held") became "die A-Saite" in 4 of 4
-      # runs at medium effort and 2 of 4 at high, published as fluent German
-      # about a string the article never mentions. The high-effort variant also
-      # spent 86% of its output on deliberation (15k tokens, 288s per article
-      # against 41s) and spelled the subject's surname two or three ways in one
-      # document in half its runs.
+      # Disable default reasoning to avoid token/latency overhead.
       reasoning: { enabled: false, dialect: reasoning_effort }
-      # No `params.temperature`, deliberately. This gateway accepts the field
-      # and range-checks it (`3.5` -> "must be between 0 and 2") and then
-      # ignores it: at `temperature: 0` the same prompt returns three different
-      # texts, `temperature: 2` still writes clean prose, and across 20 runs the
-      # samples show no similarity ordering by temperature distance. Setting it
-      # would record an intention the endpoint does not honour.
+      # Temperature omitted: this gateway ignores it.
       tags: [remote, cheap]
 
-    - id: or-cheap
+    - id: minimax-m3
+      endpoint: openrouter
+      model: minimax/minimax-m3
+      contextWindow: 262144
+      maxOutputTokens: 32768
+      capabilities: [json_schema, json_object, prompt_cache]
+      pricing: { inputPer1M: 0.30, outputPer1M: 1.20, cachedInputPer1M: 0.06 }
+      reasoning: { enabled: false, dialect: reasoning }
+      params:
+        temperature: 0.36
+        # Provider pin; allow_fallbacks=false fails instead of routing elsewhere.
+        extra:
+          provider:
+            order: [CoreWeave, Parasail, DeepInfra]
+            allow_fallbacks: false
+      tags: [remote, cheap]
+
+    - id: deepseek
       endpoint: openrouter
       model: deepseek/deepseek-v4-flash-0731
       contextWindow: 128000
-      maxOutputTokens: 24576
+      maxOutputTokens: 16384
       capabilities: [json_schema, json_object, tools, prompt_cache]
-      # Priced for the providers named below rather than for the model page:
-      # `deepinfra/fp8` and `ambient/fp4` are both 0.08 / 0.18 with cache reads
-      # at 0.016. Pinning changes the bill, so the bill is written where the pin
-      # is.
+      # Pricing reflects the provider order below.
       pricing: { inputPer1M: 0.08, outputPer1M: 0.18, cachedInputPer1M: 0.016 }
-      # WHICH providers may serve this model, because on OpenRouter that is a
-      # correctness question and not a price one.
-      #
-      # This one model id is served by 29 hosts, and **their sampling support
-      # differs**. Measured 2026-08-24 from
-      # `/api/v1/models/deepseek/deepseek-v4-flash-0731/endpoints`: only nine of
-      # the 29 implement `top_k` *and* `min_p` *and* `response_format`. The other
-      # twenty accept the request and drop what they do not implement — DeepSeek's
-      # own host answers 200 to a `top_k: 1, min_p: 0.5` request and samples as if
-      # neither had been sent. Nothing downstream can see that: same status, same
-      # German, same cost, and which of the two happened depends on who had
-      # capacity that second.
-      #
-      # `requireParameters: true` is what makes the drop audible. It restricts
-      # routing to a provider that supports every field in the request, so an
-      # unhonoured `min_p` arrives as `404 No endpoints found that can handle the
-      # requested parameters` — verified against `only: [deepseek]`, which 200s
-      # without it and 404s with it. Any target carrying more than `temperature`
-      # wants this on.
-      #
-      # `allowFallbacks` is deliberately left unset (i.e. true): `order` is then a
-      # preference with the rest of the qualifying market behind it, which is what
-      # a thousand-article batch wants. Set it to false to pin an experiment.
-      #
-      # The order is measured, cheapest-that-is-good-enough first:
-      #   deepinfra/fp8   0.08/0.18  42 tok/s  p50 602ms   cache, seed
-      #   ambient/fp4     0.08/0.18  46 tok/s  p50 458ms   cache, seed   (fp4)
-      #   together        0.14/0.28  33 tok/s  p50 1473ms  cache
-      #   phala           0.20/0.40  49 tok/s  p50 1632ms  cache, seed
-      #   morph/bf16      0.079/0.278 7 tok/s  p50 1902ms  cache, seed   (bf16,
-      #     the only unquantized host — highest fidelity, six times slower, so it
-      #     is the tail of the list rather than the head)
-      # `wafer/fast` also qualifies and is left out: status -2, 85.8% uptime.
-      # Add `quantizations: [bf16, fp8]` to exclude the fp4 hosts outright.
+      # requireParameters rejects providers that silently ignore requested parameters.
       provider:
-        order: [deepinfra/fp8, ambient/fp4, together, phala, morph/bf16]
+        order: [ambient/fp4, together, phala, deepinfra/fp8, morph/bf16]
         requireParameters: true
-      # This model reasons unless told not to, and reasoning tokens bill at the
-      # output rate — they were 78% of the output on a measured run here.
-      # `dialect` says how to phrase it; `enabled: false` is the instruction.
-      # Drop the whole block (or set dialect: none) to leave the model's default
-      # alone; set enabled: true when a task genuinely needs the deliberation.
+      # Disable upstream-default reasoning; hiding the trace alone does not disable it.
       reasoning: { enabled: false, dialect: reasoning }
+      params:
+        temperature: 0.6
+        topP: 0.95
+        topK: 42
+        minP: 0.02
       tags: [remote, cheap]
 
-    # A model that actually searches. Three ways to get one on OpenRouter, in
-    # descending order of how little has to be true for it to work:
-    #   1. a hosted search model:   model: perplexity/sonar
-    #   2. the `:online` suffix:    model: openai/gpt-4o-mini:online
-    #   3. the web plugin:          params.extra.plugins (below)
-    # The `web_search` capability is what `tasks.websearch` routes on; declaring
-    # it on a model that cannot search is how you get confident fiction.
-    - id: or-search
+    # Search routing relies on declared `web_search`; declare it only for real search targets.
+    - id: search-std
       endpoint: omniroute
       model: cx/gpt-5.6-luna
-      contextWindow: 127000
-      maxOutputTokens: 4096
+      contextWindow: 272000
+      maxOutputTokens: 32768
       capabilities: [json_object, tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
+      reasoning: { enabled: false, dialect: reasoning_effort }
       params:
         temperature: 0.1
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search, cheap]
 
-    - id: or-search2
+    - id: search-mx
       endpoint: omniroute
       model: cx/gpt-5.6-luna-medium
-      contextWindow: 127000
-      maxOutputTokens: 4096
+      contextWindow: 272000
+      maxOutputTokens: 32768
       capabilities: [json_object, tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
+      reasoning: { enabled: false, dialect: reasoning_effort }
       params:
         temperature: 0.2
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search, cheap]
 
-    - id: or-search3
+    - id: search-safe
       endpoint: omniroute
       model: cx/gpt-5.6-terra-low
-      contextWindow: 127000
-      maxOutputTokens: 4096
+      contextWindow: 272000
+      maxOutputTokens: 32768
       capabilities: [json_object, tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
+      reasoning: { enabled: false, dialect: reasoning_effort }
       params:
         temperature: 0.1
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search, cheap]
 
-    # The `:online` suffix is what makes this one *search*. Without it the model
-    # is a plain chat model that declares `web_search` here and answers from
-    # memory anyway — which is precisely the failure the capability gate exists
-    # to prevent, and it is invisible: the answers arrive, fluent and sourceless.
-    # `:online` bills a per-request search fee on top of the tokens.
-    - id: or-osearch
+    # `:online` enables provider web search and adds a per-request search fee.
+    - id: paid-search
       endpoint: openrouter
       model: openai/gpt-5.6-luna:online
       contextWindow: 127000
       maxOutputTokens: 4096
-      # `json_object` is deliberately absent, and its absence is what makes this
-      # target work at all. OpenAI refuses the combination outright —
-      # "Web Search cannot be used with JSON mode" — so every `websearch` call,
-      # which always asks for `json_object`, came back 400 and this paid
-      # fallback served 0 of its requests while `or-search` carried the corpus
-      # alone. The transport now sends `response_format` only to a target that
-      # declares it, so leaving it off here degrades to asking for JSON in the
-      # prompt, which is what the prompt already does.
+      # No json_object: OpenAI web search is incompatible with JSON mode here.
       capabilities: [tools, web_search]
       pricing: { inputPer1M: 0.1, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
       params:
         temperature: 0.1
-        # The explicit form of the same thing, if you want to size the results:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
       tags: [remote, search]
 
-    # A strong general model, and **not a search model** — note the absence of
-    # `web_search` below, which is the whole point of the entry.
-    #
-    # Put it in `websearch` and it answers every question fluently, with a
-    # citation, from memory. Measured here on 2026-08-23: asked for Gérard
-    # Abiton's date of birth it returned `18.06.1954`, confidence 0.95, sourced
-    # to `https://data.bnf.fr/fr/13934335/gerard_abiton/` — a URL that resolves
-    # to a BnF record for somebody else and carries no such date, while French
-    # Wikipedia states only the year. It "found" more fields than any real
-    # search model in the same test, because inventing is faster than searching.
-    # That is the failure `tasks.websearch.requireWebSearchCapability` exists to
-    # prevent, and it works only as long as this list stays honest.
-    #
-    # `reasoning.enabled: false` used to be here and made the target dead: this
-    # endpoint answers `400 Reasoning is mandatory for this endpoint and cannot
-    # be disabled`. Reasoning competes with the answer for the output budget, so
-    # keep `maxOutputTokens` generous when using it.
-    - id: or-search-quality
-      endpoint: openrouter
-      model: google/gemini-3.7-flash
-      contextWindow: 200000
-      maxOutputTokens: 16384
-      capabilities: [json_schema, json_object, tools, reasoning, prompt_cache]
-      pricing: { inputPer1M: 0.375, outputPer1M: 1.875, cachedInputPer1M: 0.038 }
-      reasoning: { enabled: true, effort: low, dialect: reasoning }
-      params: { temperature: 0.1 }
-      tags: [remote, quality]
-
   routing:
-    # The default for every pool that does not name its own. See below: a pool
-    # may override it, because the three stages of this tool are scarce in
-    # different resources.
-    #
-    #   cost-optimized    cheapest target that fits         (money)
-    #   least-busy        emptiest endpoint, cheapest tie   (wall-clock)
-    #   context-optimized most headroom first               (long documents)
-    #   sequential        declaration order                 (explicit preference)
-    #   round-robin       rotate                            (equivalent workers)
-    #   least-failures    fewest consecutive failures       (flaky providers)
+    # cost-optimized | least-busy | context-optimized | sequential |
+    # round-robin | least-failures.
     strategy: cost-optimized
-    # A pool is the fallback chain. `cost-optimized` always ranks the free local
-    # model first among the targets that can serve the request, so the paid
-    # entries behind it cost nothing until the local one cannot do the job — a
-    # document too large for its 8K output ceiling, a restart, a temporary
-    # overload. A single-model pool has no chain at all: that is what
-    # "All 1 model target(s) failed" means, and it is the one shape to avoid.
-    #
-    # A pool is written either as a bare list of model ids — which is all most
-    # pools need — or as an object with `models` plus any of:
-    #
-    #   strategy      how to rank this pool; falls back to `strategy` above
-    #   maxConcurrent this pool's share of an endpoint's concurrent slots
-    #   prefer        target language -> the model to try first for it
-    #   options       strategy knobs, merged over `options` below
+    # A pool is also its fallback chain; object form adds per-pool options.
     pools:
       default:
-        models: [local-small, or-luna, or-cheap]
+        models: [gemma-local, gpt-luna, deepseek]
         strategy: round-robin
-      # Extraction is mechanical: start cheap, escalate only on failure.
 
+      # least-busy spreads extraction across endpoint capacity.
       extract:
-        models: [local-small, or-cheap, or-luna]
-        strategy: cost-optimized
-
-      # Translation is the only stage whose real cost is **time**.
-      #
-      # Measured here on 2026-08-23, the same three articles into English at
-      # run.concurrency 3:
-      #
-      #   cost-optimized, no lanes    1m 43s   all 3 calls on `local`, one after another
-      #   least-busy + lanes             34s   one call per endpoint, at the same time
-      #
-      # Same output, same corpus, $0.00012 of it paid. The three-fold difference
-      # is not the models being faster; it is three of them working instead of
-      # one.
-      #
-      # Under `cost-optimized` every translation ranks the free local model
-      # first, which is correct about price and disastrous about throughput:
-      # `local` serves one request at a time, so three concurrent tasks become
-      # one, and `omniroute` and `openrouter` sit idle for the whole run.
-      # `least-busy` ranks the *emptiest* endpoint first instead — as a
-      # fraction of what each can hold, so an endpoint is not rewarded merely
-      # for allowing more parallelism — and breaks the tie on cost, which means
-      # an idle pool still behaves exactly like `cost-optimized`.
-      #
-      # `maxConcurrent` is this pool's lane on an endpoint. `openrouter` allows
-      # three parallel requests and the other two allow one each; without a lane
-      # it would take the majority of the corpus simply because it says yes more
-      # often, and it is also the only paid endpoint here. One slot each keeps
-      # all three busy and the bill on the free two. The lanes across all pools
-      # may not exceed an endpoint's own `maxConcurrent` — `config check` says
-      # so if they do.
-      #
-      # Raise `run.concurrency` to at least the number of lanes, or the
-      # orchestrator runs out of tasks before the endpoints run out of slots.
-      translate:
-        models: [local-small, or-luna, or-cheap]
+        models: [gemma-local, gpt-luna, deepseek]
         strategy: least-busy
-        maxConcurrent:
-          local: 1
-          omniroute: 2
-          openrouter: 1
-        # Which model renders which language best, by target language code.
-        # A reordering of the pool and never an addition to it: the models
-        # behind the preferred one are still its fallback chain, so a preference
-        # can slow a language down but can never make it unroutable.
-        #
-        # Chinese and Japanese are the case that motivates it — a Chinese
-        # open-weights model renders them better than a Western one, and the
-        # reverse holds for European languages. Nothing here declares one yet;
-        # add the model to `models` first, then name it:
-        #
-        # prefer:
-        #   zh: [or-deepseek]
-        #   ja: [or-deepseek]
+
+      # least-busy maximizes translation throughput across endpoints.
+      translate:
+        models: [gemma-local, gpt-luna, deepseek, minimax-m3]
+        strategy: least-busy
+        # Language preferences reorder candidates; they never remove fallbacks.
+        # Preferences outrank the normal pool ranking.
         prefer:
-          zh: [or-cheap]
-          ja: [or-cheap]
-          ko: [or-cheap]
-          es: [or-cheap]
-          de: [or-luna]
-          en: [or-luna]
-      # Only models that can search belong here; see tasks.websearch.
-      #
-      # The three free omniroute targets are genuinely different models and give
-      # genuinely different answers — measured over twelve documents they filled
-      # 7, 8 and 6 fields respectively, agreeing on the facts and differing on
-      # which page they cite. Three of them is a real fallback chain, and the
-      # paid `:online` model behind them is the one that survives omniroute
-      # being down. `or-search-quality` is deliberately absent: it cannot
-      # search, and what it does instead is worse than a gap.
-      #
-      # `sequential`, and the list re-ordered to say what it means.
-      #
-      # Three of these four are priced at zero, so `cost-optimized` could only
-      # order them by leaving them in declaration order and pushing the paid one
-      # last — the right answer arrived at through a tie. Written out, the order
-      # is the decision: the free searchers first, the paid `:online` model last
-      # as the one that survives omniroute being down. Same chain as before,
-      # now robust to any of these prices changing.
-      #
-      # Careful here: under `sequential` the first entry is what gets called.
-      # Leaving `or-osearch` at the front of this list — where `cost-optimized`
-      # had been quietly demoting it — would send every web search to the only
-      # target that bills.
-      #
-      # Note also that `reliability.fallback.maxTargets: 3` cuts this chain to
-      # its first three, so the fourth entry is unreachable as configured. That
-      # has always been true here (cost sorted the paid one last, and the
-      # cut removed it); raise maxTargets to 4 if the `:online` model is meant
-      # to be a real fallback rather than documentation.
+          zh: [deepseek]
+          ja: [deepseek]
+          ko: [deepseek]
+          it: [deepseek]
+          es: [minimax-m3]
+          fr: [deepseek, minimax-m3]
+          de: [gpt-luna]
+          en: [gpt-luna]
+      # Free OmniRoute search targets first; paid-search is the final fallback.
+      # maxTargets must stay >= 4; least-busy may use paid search for throughput.
       websearch:
-        models: [or-search2, or-search, or-search3, or-osearch]
+        models: [search-mx, search-std, search-safe, paid-search]
         strategy: cost-optimized
-    # demote | skip — what to do with a target that cannot serve a request,
-    # either because the prompt exceeds its context window or because the answer
-    # would exceed its `maxOutputTokens`.
-    #
-    # `skip` is the setting that stops a small model being handed a document it
-    # cannot finish: it is dropped from the chain rather than called, cut off
-    # mid-sentence and only then given up on. `demote` (the default) still calls
-    # it last, which is right when the pool has nothing better.
-    #
-    # It never routes nowhere — if no model in the pool fits, the least
-    # overloaded one is still tried, so a mis-sized pool surfaces as a real
-    # provider error rather than as silence.
+    # demote | skip on overflow; `skip` avoids known-truncated calls.
     onOverflow: skip
     options: {}
 
   defaults:
     timeoutMs: 120000
-#    params:
-#      temperature: 0.2
 
-# --------------------------------------------------------------------------
-# Failure handling. `retry` = same model; `fallback` = next model in the pool.
-# --------------------------------------------------------------------------
+# retry = same model; fallback = next model in the pool.
 reliability:
   retry:
     maxAttempts: 3
@@ -865,26 +351,10 @@ reliability:
   fallback:
     maxTargets: 4
     onValidationFailure: true
-  # Fallback one level up: re-run a whole **task** on a different model.
-  #
-  # `fallback` above answers "this call failed" and moves down the chain. It
-  # cannot answer "every call returned 200 and the document they add up to is
-  # broken" — a translation whose spliced result no longer matches the source
-  # skeleton, an extraction that parsed and made no sense. Only the task that
-  # assembled the answer knows that, and it used to die on the spot with two
-  # untried models sitting in the pool. Measured on this corpus, 2026-08-24:
-  # belousov -> es, bitetti -> en and blackmore -> de each failed a structure
-  # check after every one of their calls had succeeded, and no other model was
-  # ever asked.
-  #
-  # Between attempts the targets that already failed this task are demoted, so
-  # a fresh one leads; a task that never called a model is not retried at all.
+  # Task-level fallback retries a broken whole task on another model.
   taskFallback:
-    maxAttempts: 3 # total attempts per task; 1 disables this entirely
-    # The last attempt, once every model in the pool has already failed the
-    # task. There is no fresh model left, so the only thing left to vary is how
-    # one is asked: the steadiest target this run, and a temperature low enough
-    # to buy literalness with the flair a translation would otherwise want.
+    maxAttempts: 3 # 1 = disabled
+    # After all targets fail, retry the least-failing target conservatively.
     lastAttempt:
       strategy: least-failures
       temperature: 0.1
@@ -893,41 +363,23 @@ reliability:
     failureThreshold: 5
     resetAfterMs: 30000
 
-# --------------------------------------------------------------------------
-# Spending guard rails. 0 = unlimited.
-# --------------------------------------------------------------------------
 cost:
-  budget:
+  budget: # 0 limits = unlimited
     maxRequests: 0
     maxTotalTokens: 0
     maxCostUsd: 10
   onExceeded: stop
 
-# --------------------------------------------------------------------------
-# How much of a document to send, and in what order to escalate.
-#   full             whole document, one call
-#   truncation-first head slice first, whole document only if that is rejected
-#   chunked          split into token-bounded chunks, merge the results
-#   staged           head -> head+tail -> chunked
-#
-# `chunked` is the safe general answer: it sends the whole document in a single
-# call whenever it fits and only splits when it cannot, so nothing is ever lost
-# to a window that was too small.
-#
-# The truncated ladders (`truncation-first`, `staged`) exist for a task that
-# looks for one specific fact and can tell when it has found it. They are *not*
-# used by the tasks that must see everything: `extract` (unless
-# `readWholeDocument: false`) and whole-document `translate` skip their
-# truncated rungs, so setting one here no longer quietly halves what gets read.
-# --------------------------------------------------------------------------
+# full | truncation-first | chunked | staged.
+# chunked splits only when needed; full has no fallback rung.
 context:
   strategy: full
   tokenEstimator:
     type: heuristic
-    charsPerToken: 3.2 # cyrillic/CJK pack fewer chars per token than latin
+    charsPerToken: 3.2 # lower for Cyrillic/CJK
   reserveOutputTokens: 2048
   safetyMarginRatio: 0.9
-  truncation:
+  truncation: # unused with strategy=full
     headTokens: 3000
     tailTokens: 0
   chunking:
@@ -935,10 +387,7 @@ context:
     overlapTokens: 150
     splitOn: heading
 
-# --------------------------------------------------------------------------
-# Prompt templates live in files so they can be edited and diffed on their own.
-# A template change alters the task fingerprint and invalidates cached results.
-# --------------------------------------------------------------------------
+# Prompt template hashes affect task fingerprints; edits invalidate completed state.
 prompts:
   dir: prompts
   templates:
@@ -948,12 +397,10 @@ prompts:
     websearch:
       system: websearch/system.md
       user: websearch/user.md
-    # Used by tasks.translate.mode = document
-    translate:
+    translate: # for mode=document
       system: translation/system.md
       user: translation/user.md
-    # Used by tasks.translate.mode = segments
-    translateSegments:
+    translateSegments: # for mode=segments
       system: translation/segments-system.md
       user: translation/segments-user.md
     localize:
@@ -962,52 +409,22 @@ prompts:
   variables:
     projectName: Guitar codex
 
-# --------------------------------------------------------------------------
 run:
-  # At least the number of translate lanes (1 local + 2 omniroute + 1
-  # openrouter), or the orchestrator runs out of tasks before the endpoints run
-  # out of slots and the lanes are a promise nothing keeps.
-  concurrency: 4
+  # Matches total endpoint capacity: local 1 + omniroute 3 + openrouter 4.
+  concurrency: 8
   stateDir: .biomd/runs
-  memoryDir: .biomd/memory # only used by useTranslationMemory: persistent
+  memoryDir: .biomd/memory # persistent translation memory only
   resume: auto # auto | off | <runId>
   dryRun: false
   failFast: false
-  skipExistingOutputs: true
+  skipExistingOutputs: true # --no-skip-existing overrides
 
 logging:
   level: info
   console: pretty # pretty | json | off
   file: .biomd/logs/biomd.jsonl
-
-  # A plain-text account of the run, in the project root. `tail -f progress.log`
-  # is the intended way to read it.
-  #
-  # Everything else this tool records is written for a machine to read back
-  # afterwards — `events.jsonl` is an audit trail and `state.json` a checkpoint,
-  # both complete and both unreadable while you are waiting. This answers the
-  # question a four-hour batch actually prompts: what is it doing, who is doing
-  # it, and what went wrong.
-  #
-  #   [22:40:01] [extract]   '/ru/abiton.bio.json' : local-small:gemma4-31b-local (35.0s)
-  #   [22:40:36] [translate] ! 'abiton → de' fallback local:local-small → omniroute:or-luna
-  #                            — output_truncated: Response was cut off by the output token limit
-  #   [22:41:38] [translate] '/de/abiton.bio.md' : or-luna:cx/gpt-5.6-luna (32.4s)
-  #
-  # (The path is relative to output.baseDir, written with the platform's own
-  # separator — backslashes on Windows.)
-  #
-  # A line with `!` in it is an incident — a retry, a fallback, or a target
-  # written off for the rest of the run — and it is there so the line under it
-  # is explicable: the file above says `or-luna` because the line above *that*
-  # says why. `grep ' ! ' progress.log` is the incident report.
-  #
-  # It appends rather than truncating, one header per run: "which model produced
-  # this file last time" is as real a question as "what is it doing now".
-  # null disables it. `--dry-run` never writes it — nothing was processed, so a
-  # log of what processed it would be fiction.
+  # Human-readable live progress log; null disables, `!` marks incidents.
+  # --dry-run never writes it.
   progressFile: progress.log
-  # Floor on how often it is written, and equally a ceiling: a line that arrives
-  # just after a write is flushed when the interval elapses rather than waiting
-  # for the next task, so a slow document never leaves the file looking stalled.
+  # Flush interval for progress output.
   progressIntervalMs: 30000
