@@ -64,6 +64,18 @@ const ALL_TARGETS = [
 const IDLE: OccupancyView = { load: () => 0, freeSlots: () => Number.POSITIVE_INFINITY, inFlight: () => 0 };
 
 /**
+ * Tokens a translate prompt carries on top of the article itself — template,
+ * instructions, article context, JSON scaffolding.
+ *
+ * Derived rather than guessed: the median document in `out/ru` is 4687 bytes
+ * (~1465 tokens at the configured 3.2 chars/token) and the median recorded
+ * `translate` prompt across 1177 real calls is 2347 tokens. Ignoring the
+ * difference would understate every request by more than a third and hide any
+ * effect that depends on request size, `maxComfortableTokens` among them.
+ */
+const PROMPT_OVERHEAD_TOKENS = 880;
+
+/**
  * The free endpoints saturated, `openrouter` the emptiest — the state a real
  * run spends most of its time in, since `local` holds one slot and `omniroute`
  * three against a corpus of hundreds.
@@ -142,7 +154,7 @@ async function main(): Promise<void> {
     const request = {
       pipeline: 'translate',
       pool: 'translate',
-      estimatedInputTokens: Math.ceil(text.length / 3.2),
+      estimatedInputTokens: Math.ceil(text.length / 3.2) + PROMPT_OVERHEAD_TOKENS,
       expectedOutputTokens: Math.ceil(text.length / 3.2),
       requiredCapabilities: [],
       signals: { complexity: score },

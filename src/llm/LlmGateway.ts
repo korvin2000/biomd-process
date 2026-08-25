@@ -510,7 +510,7 @@ export class LlmGateway implements LlmPort {
             target.key,
             Date.now() - startedAt,
             record.costUsd,
-            record.usage.totalTokens,
+            record.usage.completionTokens,
           );
           return response;
         } catch (error: unknown) {

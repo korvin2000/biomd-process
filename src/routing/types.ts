@@ -8,10 +8,25 @@ import type { ModelTarget } from '../llm/types.js';
  * Tokens rather than seconds, because seconds are a statement about the
  * document as much as about the model: a target that happened to draw short
  * articles looks fast, and would keep drawing them.
+ *
+ * **Completion** tokens, and this is not a detail. Counting the prompt too
+ * measures how much text was *sent*, which the model did not generate and is
+ * processed at an entirely different rate — so the number stops being a speed
+ * and becomes a function of prompt size. It flattered every target unevenly,
+ * by whatever its prompt-to-answer ratio happened to be: measured over four
+ * live runs the prompt-inclusive figure overstated deepseek 3.7-fold and
+ * minimax-m3 4.8-fold, which is a reordering, not a rescaling.
+ *
+ * Generation tokens over **wall-clock** latency, so routing overhead and time
+ * to first token are inside the denominator. That makes it a slightly
+ * different quantity from the `tok/s` an OpenRouter activity log reports, which
+ * times generation alone — 80.9 against their 85.5 for deepseek over the same
+ * traffic. Wall clock is the right one here: what a run costs in time is
+ * delivery, not generation.
  */
 export interface RecentCall {
   latencyMs: number;
-  totalTokens: number;
+  completionTokens: number;
 }
 
 /** How many completed calls a target's rolling window keeps. */
@@ -38,7 +53,7 @@ export interface TargetStats {
 }
 
 /**
- * Throughput over the rolling window, in tokens per second, or `undefined` when
+ * Throughput over the rolling window, in generated tokens per second, or `undefined` when
  * the window holds nothing to divide by.
  *
  * Deliberately not a member of {@link TargetStats}: it is derived, and storing
@@ -49,7 +64,7 @@ export function recentThroughput(stats: TargetStats): number | undefined {
   let tokens = 0;
   let ms = 0;
   for (const call of stats.recent) {
-    tokens += call.totalTokens;
+    tokens += call.completionTokens;
     ms += call.latencyMs;
   }
   if (ms <= 0 || tokens <= 0) return undefined;

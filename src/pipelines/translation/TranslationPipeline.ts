@@ -31,6 +31,7 @@ import {
   introducedMixedScriptWords,
   isTranslatable,
 } from '../shared/script.js';
+import { complexityOf } from '../../routing/strategies/adaptive/ComplexityScorer.js';
 import { translateUnits } from '../shared/stringBatch.js';
 import { StructureGuard } from './StructureGuard.js';
 
@@ -202,6 +203,10 @@ export class TranslationPipeline implements DocumentPipeline {
       units,
       maxPerCall: config.maxSegmentsPerCall,
       repairAttempts: config.repairAttempts,
+      // Measured on the article, not on the fragments drawn from it — the
+      // fragments carry none of the structure that makes an article hard to
+      // reassemble. See {@link StringBatchSpec.complexity}.
+      complexity: complexityOf(document.content),
       ...(articleContext ? { articleContext } : {}),
       // A fragment with no letter of the source script in it is a work title, a
       // name or a discography line — never a sentence of the article.

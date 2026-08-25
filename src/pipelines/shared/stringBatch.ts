@@ -44,6 +44,29 @@ export interface StringBatchSpec {
    * section, after the instructions, so the prompt-cache prefix is untouched.
    */
   articleContext?: string;
+  /**
+   * Complexity of the **whole source document**, 0…1, for routing.
+   *
+   * It has to come from the caller, and the reason is worth stating because
+   * measuring it here looks obviously right and is not. What this function
+   * holds is `units` — prose, and only prose. Every container fence, every
+   * `src:`/`caption:` line, every table row has already been lifted out and
+   * will be spliced back locally; they are never sent and never translated.
+   * So a batch scores near zero however tangled the article around it is:
+   * measured on 196 real documents, whole-document complexity averages 0.265
+   * and the prose those documents yield averages 0.082, with not one of them
+   * above 0.5.
+   *
+   * Routing on the batch therefore reports "simple" for the entire corpus and
+   * the complexity term stops discriminating at all — which is exactly what a
+   * live run showed before this was passed in: the openrouter half of the pool
+   * went 47-0 to the lowest-tolerance model.
+   *
+   * The document is the right unit anyway. What the model has to get right is
+   * the placeholders standing in for that structure, and how many there are is
+   * a property of the article, not of the slice.
+   */
+  complexity?: number;
   /** Per-batch template variables, on top of the task's own. */
   variables(batch: readonly LocalizationUnit[]): PromptVariables;
   /** Extra per-string validation, e.g. "every mask token survived". */
@@ -241,10 +264,11 @@ async function callOnce(
       estimatedInputTokens: context.estimator.estimateMessages(messages),
       // The answer repeats every key and runs longer than the source.
       expectedOutputTokens: Math.ceil(context.estimator.estimateText(payload) * 1.6) + 128,
-      // Measured on the strings themselves, not on the rendered prompt: the
-      // prompt's own boilerplate is identical on every call and would dilute
-      // every document towards the same middling score.
-      signals: { complexity: complexityOf(batch.map((unit) => unit.text).join('\n')) },
+      // The caller's document-level measurement when there is one; the batch
+      // itself only as a floor for a caller that has no document to measure.
+      // See {@link StringBatchSpec.complexity} for why these are not the same
+      // number.
+      signals: { complexity: spec.complexity ?? complexityOf(batch.map((unit) => unit.text).join('\n')) },
       signal: context.signal,
       validate: (response) => {
         parsed = undefined;

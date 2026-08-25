@@ -8,7 +8,11 @@
  * dial and get turned. The strategy is opt-in — no pool names it, nothing
  * changes — so the cost of being wrong here is bounded.
  *
- * `prior` values come from this repo's own run history (13 runs, 2691 attempts
+ * `priorThroughput` is **generated** tokens per second of wall clock, the unit
+ * {@link RecentCall} defines — not the prompt-inclusive figure an earlier
+ * version of this file carried, which overstated every entry by three- to
+ * five-fold and unevenly. Other `prior` values come from this repo's own run
+ * history (13 runs, 2691 attempts
  * in `.biomd/runs/*​/events.jsonl`), and exist to answer the cold-start
  * question: before a target has served anything in *this* run, what should we
  * assume? They are a starting point that live measurements overwrite, not a
@@ -32,10 +36,41 @@ export interface ModelProfile {
    * article towards another.
    */
   readonly tolerance: number;
+  /**
+   * How well this model renders prose, 0…1 — separate from `tolerance` and
+   * frequently its opposite.
+   *
+   * Added because without it the model cannot express the thing this
+   * deployment actually believes: that deepseek translates better and follows
+   * instructions worse. Speed, health and cost are all silent about
+   * translation quality, so with only those four axes the sole way for a
+   * fragile-but-good model to win was to be rewarded *for* its fragility — a
+   * low `tolerance` scoring as a positive on clean documents. That worked for
+   * deepseek against minimax by coincidence, and immediately misfired
+   * elsewhere: it also floated deepseek above `gpt-luna`, which is free,
+   * faster and healthier, on nothing but the claim that it breaks more easily.
+   *
+   * Like `tolerance` this is a judgement and not a measurement. There is no
+   * automated scorer for "reads well in Spanish" anywhere in this repo, and
+   * `npm run score` compares invariants rather than register.
+   */
+  readonly proseQuality: number;
   /** Cold-start throughput, tokens/sec, from historical runs. */
   readonly priorThroughput: number;
   /** Cold-start failure rate, 0…1, from historical runs. */
   readonly priorFailureRate: number;
+  /**
+   * Input tokens beyond which this target stops being a good use of itself.
+   * Absent for a target with no such ceiling, which is most of them.
+   *
+   * This is about a **budget**, not a context window — fitting is checked
+   * separately and much earlier. A free tier is metered in requests and tokens
+   * per day, so every large document it answers is several small ones it will
+   * refuse later; the ceiling is what keeps a scarce allowance pointed at the
+   * work it goes furthest on. The penalty ramps rather than cutting off, and
+   * never removes the target from the chain.
+   */
+  readonly maxComfortableTokens?: number;
 }
 
 /**
@@ -55,31 +90,68 @@ const PROFILES: Readonly<Record<string, ModelProfile>> = {
    * translates clean prose well and loses track of bookkeeping when the
    * document carries a lot of it, which is exactly what `tolerance` encodes.
    *
-   * The 4.7% prior is its rate under the current pinned-provider config, where
-   * the failures are timeouts rather than malformed tables.
+   * 81 generated tokens per second of wall clock, over 181 calls in four live
+   * runs. Independently corroborated: OpenRouter's own activity log for the same
+   * traffic reports a median of 85.5 tok/s across 54 records, all served by
+   * Together. The small gap is routing overhead, which their figure excludes and
+   * this one includes on purpose — see {@link RecentCall}.
+   *
+   * Failure rate is Laplace-smoothed over the combined history: 17 failures in
+   * 509 attempts.
    */
-  deepseek: { tolerance: 0.25, priorThroughput: 120, priorFailureRate: 0.0495 },
+  deepseek: { tolerance: 0.25, proseQuality: 0.95, priorThroughput: 81, priorFailureRate: 0.035 },
 
-  /** 53 attempts, 0 failures. Follows instructions; renders prose less well. */
-  'minimax-m3': { tolerance: 0.95, priorThroughput: 169, priorFailureRate: 0.0182 },
+  /**
+   * Follows instructions; renders prose less well. The fastest generator in this
+   * pool by a wide margin — 127 tok/s — but on only 12 calls, so the figure is
+   * shrunk hard towards whatever the run measures.
+   */
+  'minimax-m3': { tolerance: 0.95, proseQuality: 0.7, priorThroughput: 127, priorFailureRate: 0.0182 },
 
-  /** Same model, free tier: same behaviour, no bill, tighter upstream limits. */
-  'minimax-m3-free': { tolerance: 0.6, priorThroughput: 120, priorFailureRate: 0.03 },
+  /**
+   * Not the same deployment as the paid entry despite the shared name: a single
+   * GMICloud host at fp8, and a free-tier allowance metered per day.
+   *
+   * The lower tolerance is about the quantization, **not** about
+   * `structured_outputs`. The free variant does lack it — verified against
+   * OpenRouter's own model list — but no pipeline in this repo has ever asked
+   * for it: `extract`, `translate` and `websearch` all send
+   * `responseFormat: { type: 'json_object' }`, and `response_format` is
+   * supported here. The missing capability costs this target nothing today. It
+   * would start to matter the moment a pipeline asked for a schema.
+   *
+   * `maxComfortableTokens` is the real constraint. At 2400 it sits just above
+   * the median translate prompt this corpus produces (2347 tokens over 1177
+   * recorded calls), so the free allowance is spent on the smaller half of the
+   * work and the long articles go to something that is paid for anyway.
+   */
+  'minimax-m3-free': {
+    tolerance: 0.6,
+    proseQuality: 0.7,
+    priorThroughput: 78,
+    priorFailureRate: 0.05,
+    maxComfortableTokens: 2600,
+  },
 
   /** 420 attempts, 1 failure. The reliable generalist of this deployment. */
-  'gpt-luna': { tolerance: 0.85, priorThroughput: 221, priorFailureRate: 0.0047 },
+  'gpt-luna': { tolerance: 0.85, proseQuality: 0.85, priorThroughput: 51, priorFailureRate: 0.0047 },
 
-  /** 52 attempts, 0 failures, but one concurrent slot — the queue, not the model, is the risk. */
-  'gemma-local': { tolerance: 0.7, priorThroughput: 174, priorFailureRate: 0.0185 },
+  /**
+   * One concurrent slot, so the queue rather than the model is the risk — and
+   * that queue is inside this number, which is wall-clock delivery rather than
+   * raw generation.
+   */
+  'gemma-local': { tolerance: 0.7, proseQuality: 0.7, priorThroughput: 53, priorFailureRate: 0.0185 },
 
   /** No `response_format` support at all; JSON is prompt-only, so structure is fragile. */
-  nemotron: { tolerance: 0.35, priorThroughput: 150, priorFailureRate: 0.05 },
+  nemotron: { tolerance: 0.35, proseQuality: 0.7, priorThroughput: 60, priorFailureRate: 0.05 },
 };
 
 /** Neutral stance for a model nobody has characterised. */
 export const DEFAULT_PROFILE: ModelProfile = {
   tolerance: 0.5,
-  priorThroughput: 120,
+  proseQuality: 0.7,
+  priorThroughput: 60,
   priorFailureRate: 0.03,
 };
 

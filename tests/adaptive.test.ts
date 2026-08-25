@@ -5,8 +5,8 @@ import type { ModelTarget } from '../src/llm/types.js';
 import { Router } from '../src/routing/Router.js';
 import { RoutingStrategyRegistry } from '../src/routing/StrategyRegistry.js';
 import { TargetStatsRegistry } from '../src/routing/TargetStats.js';
-import type { OccupancyView } from '../src/routing/types.js';
-import { adaptive } from '../src/routing/strategies/adaptive/AdaptiveStrategy.js';
+import type { OccupancyView, RoutingContext } from '../src/routing/types.js';
+import { adaptive, scoreTargets } from '../src/routing/strategies/adaptive/AdaptiveStrategy.js';
 import { complexityOf, scoreComplexity } from '../src/routing/strategies/adaptive/ComplexityScorer.js';
 import { profileFor, profiledModelIds } from '../src/routing/strategies/adaptive/ModelProfiles.js';
 
@@ -67,6 +67,31 @@ function makeRouter(stats = new TargetStatsRegistry(), loads: Record<string, num
     fitting,
     occupancy(loads),
   );
+}
+
+/** A minimal RoutingContext, for asserting on the arithmetic rather than the winner. */
+function contextFor(complexity: number): RoutingContext {
+  const stats = new TargetStatsRegistry();
+  return {
+    candidates: [],
+    request: {
+      pipeline: 'translate',
+      estimatedInputTokens: 2000,
+      expectedOutputTokens: 2000,
+      requiredCapabilities: [],
+      signals: { complexity },
+    },
+    stats: (key) => stats.get(key),
+    fits: () => true,
+    headroom: () => 1000,
+    outputHeadroom: () => 1000,
+    estimatedCost: () => 0.001,
+    freeSlots: () => Number.POSITIVE_INFINITY,
+    inFlight: () => 0,
+    load: () => 0,
+    sequence: 0,
+    options: {},
+  };
 }
 
 const ask = (complexity?: number) => ({
@@ -166,11 +191,30 @@ describe('the adaptive strategy', () => {
     expect(easy[0]!.modelId).toBe('minimax-m3-free');
   });
 
-  it('demotes a target that is failing right now, whatever the document', () => {
+  it('demotes a target that is failing right now, even on the document it suits best', () => {
+    // The safety property that caps COMPLEXITY_PULL. A target whose last six
+    // calls all failed has health 0; no amount of "but this document needs its
+    // tolerance" may put it back at the head of the chain, because the hardest
+    // documents are precisely the ones a broken target handles worst.
     const stats = new TargetStatsRegistry();
     for (let i = 0; i < 6; i += 1) stats.recordFailure(minimax.key);
-    const order = makeRouter(stats).select([deepseek, minimax], { ...ask(0.95), pool: 'p' });
+    const order = makeRouter(stats).select([deepseek, minimax], { ...ask(1.0), pool: 'p' });
     expect(order[0]!.modelId).toBe('deepseek');
+  });
+
+  it('never rewards a model for being fragile', () => {
+    // Stated as the invariant rather than as a matchup, because a matchup
+    // depends on whichever profile numbers happen to hold today. Low tolerance
+    // is the absence of a virtue, so a below-neutral model must score no higher
+    // on a clean document than on a neutral one — its bend may cost it
+    // something on hard payloads and may never pay it anything on easy ones.
+    const scoreAt = (complexity: number): number => {
+      const rows = scoreTargets([deepseek], contextFor(complexity));
+      return rows[0]!.score;
+    };
+    expect(profileFor('deepseek').tolerance).toBeLessThan(0.5);
+    expect(scoreAt(0)).toBeCloseTo(scoreAt(0.5), 10);
+    expect(scoreAt(1)).toBeLessThan(scoreAt(0.5));
   });
 
   it('does not let one lucky fast call hand over the corpus', () => {
@@ -219,9 +263,15 @@ describe('the adaptive strategy', () => {
     expect(first.map((t) => t.key)).toEqual(second.map((t) => t.key));
   });
 
-  it('falls back to health and cost when no complexity was measured', () => {
-    const order = makeRouter().select([deepseek, minimax], { ...ask(), pool: 'p' });
-    expect(order[0]!.modelId).toBe('deepseek');
+  it('treats a missing complexity signal as the neutral midpoint, not as zero', () => {
+    // A caller that measured nothing must not be read as "this document is as
+    // simple as documents get" — that is a claim, and nobody made it.
+    const unmeasured = makeRouter().select([deepseek, minimax], { ...ask(), pool: 'p' });
+    const neutral = makeRouter().select([deepseek, minimax], { ...ask(0.5), pool: 'p' });
+    const easy = makeRouter().select([deepseek, minimax], { ...ask(0.0), pool: 'p' });
+
+    expect(unmeasured.map((t) => t.modelId)).toEqual(neutral.map((t) => t.modelId));
+    expect(easy[0]!.modelId).toBe('deepseek');
   });
 });
 
@@ -229,7 +279,7 @@ describe('the rolling window', () => {
   it('keeps only the last four successes', () => {
     const stats = new TargetStatsRegistry();
     for (let i = 1; i <= 6; i += 1) stats.recordSuccess('t', 1000, 0, i * 1000);
-    expect(stats.get('t').recent.map((c) => c.totalTokens)).toEqual([3000, 4000, 5000, 6000]);
+    expect(stats.get('t').recent.map((c) => c.completionTokens)).toEqual([3000, 4000, 5000, 6000]);
   });
 
   it('ignores a success with no usage rather than recording it as zero throughput', () => {
