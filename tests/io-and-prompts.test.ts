@@ -42,9 +42,11 @@ describe('MessageBuilder', () => {
     ]);
 
     expect(messages[0]).toMatchObject({ role: 'system', content: 'SYSTEM' });
-    const user = messages[1]?.content ?? '';
-    expect(user.indexOf('GLOSS')).toBeLessThan(user.indexOf('DOC'));
-    expect(user.startsWith('INSTRUCTIONS')).toBe(true);
+    expect(messages[1]).toMatchObject({ role: 'user', cacheBreakpoint: true });
+    expect(messages[1]?.content).toContain('GLOSS');
+    expect(messages[1]?.content.startsWith('INSTRUCTIONS')).toBe(true);
+    expect(messages[2]).toMatchObject({ role: 'user' });
+    expect(messages[2]?.content).toContain('DOC');
   });
 
   it('keeps the cache prefix byte-identical across documents', () => {
@@ -55,6 +57,20 @@ describe('MessageBuilder', () => {
     const prefixA = (a[1]?.content ?? '').slice(0, 'INSTRUCTIONS'.length);
     const prefixB = (b[1]?.content ?? '').slice(0, 'INSTRUCTIONS'.length);
     expect(prefixA).toBe(prefixB);
+  });
+});
+
+describe('prompt versioning', () => {
+  it('includes global prompt variables in the version hash', async () => {
+    const workspace = await Workspace.create();
+    try {
+      await workspace.writeDefaultPrompts();
+      const first = workspace.app({ prompts: { dir: 'prompts', variables: { projectName: 'A' } } });
+      const second = workspace.app({ prompts: { dir: 'prompts', variables: { projectName: 'B' } } });
+      await expect(first.prompts.versionOf('extract')).resolves.not.toBe(await second.prompts.versionOf('extract'));
+    } finally {
+      await workspace.destroy();
+    }
   });
 });
 
@@ -113,7 +129,7 @@ describe('reading a published catalogue', () => {
 
 describe('cost and tokens', () => {
   it('bills cached input tokens at the cache rate', () => {
-    const usage = { promptTokens: 1_000_000, completionTokens: 0, cachedPromptTokens: 900_000, reasoningTokens: 0, totalTokens: 1_000_000 };
+    const usage = { promptTokens: 1_000_000, completionTokens: 0, cachedPromptTokens: 900_000, cacheWritePromptTokens: 0, reasoningTokens: 0, totalTokens: 1_000_000 };
     const cost = estimateCost(usage, { inputPer1M: 10, outputPer1M: 0, cachedInputPer1M: 1 });
     expect(cost).toBeCloseTo(0.1 * 10 + 0.9 * 1, 6);
   });

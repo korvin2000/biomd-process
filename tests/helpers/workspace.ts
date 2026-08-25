@@ -165,7 +165,15 @@ export class FakeClient implements LlmClient {
 
     const outcome = this.behaviour(call, index);
     if (outcome instanceof Error) throw outcome;
-    return outcome;
+    if (!request.webSearch || outcome.webSearch) return outcome;
+    const urls = [...outcome.text.matchAll(/https?:\/\/[^"\s}]+/g)].map((match) => match[0] ?? '');
+    return {
+      ...outcome,
+      webSearch: {
+        performed: true,
+        sources: [...new Set(urls)].filter(Boolean).map((url) => ({ url })),
+      },
+    };
   }
 }
 
@@ -177,6 +185,7 @@ export function respond(text: string, overrides: Partial<CompletionResponse> = {
       promptTokens: 100,
       completionTokens: 50,
       cachedPromptTokens: 0,
+      cacheWritePromptTokens: 0,
       reasoningTokens: 0,
       totalTokens: 150,
     },

@@ -20,6 +20,8 @@ Full account: [docs/ref/prompts.md](../../docs/ref/prompts.md). Eta conventions:
   substitutions from 97 to 35 over thirteen articles.
 - **A `{hash: text}` template must return exactly the same keys.** Anything inviting merging,
   splitting or reordering surfaces as validation failures and retries.
+- **Stable instructions and volatile payload are separate user messages.** The stable message owns
+  the Responses cache breakpoint; never move document-specific content before it.
 - **Name a language once.** `<%= it.sourceLanguageName || it.sourceLanguage %>` is a fallback that
   can never fire and reads like two languages being offered.
 - **Check the text reached the model before blaming the prompt.** `extractTextSpans` plus a script

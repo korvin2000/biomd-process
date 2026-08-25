@@ -79,9 +79,10 @@ Two kinds are special:
   ran out of room, so re-asking buys the identical cut. Only a wider target or a smaller request
   changes anything; `isOutputTruncated` lets a caller that can shrink its request do so.
 
-One transport (`OpenAiCompatibleClient`) covers every OpenAI-compatible endpoint — LiteLLM,
-OmniRoute, 9router, vLLM, Ollama's shim, OpenRouter, OpenAI — via `baseUrl` plus per-endpoint
-`headers`/`query`. Reasoning is emitted in whichever dialect a model declares
+One transport (`OpenAiCompatibleClient`) covers Chat Completions and Responses on every
+OpenAI-compatible endpoint — LiteLLM, OmniRoute, 9router, vLLM, Ollama's shim, OpenRouter,
+OpenAI — via `baseUrl` plus per-endpoint `headers`/`query`. Hosted web search is a required
+Responses tool and returns provider call/source evidence. Reasoning is emitted in whichever dialect a model declares
 (`reasoning_effort` | `reasoning` | `thinking` | `none`).
 
 ## Routing

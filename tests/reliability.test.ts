@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ErrorClassifier } from '../src/reliability/ErrorClassifier.js';
 import { CircuitBreakerRegistry } from '../src/reliability/CircuitBreaker.js';
-import { AllTargetsFailedError, LlmCallError, isOutputTruncated } from '../src/reliability/errors.js';
+import {
+  AllTargetsFailedError,
+  LlmCallError,
+  countsTowardCircuit,
+  disablesTarget,
+  isOutputTruncated,
+} from '../src/reliability/errors.js';
 import { RetryPolicy } from '../src/reliability/RetryPolicy.js';
 import { TimeoutError } from '../src/shared/errors.js';
 import type { Clock } from '../src/shared/async.js';
@@ -91,6 +97,22 @@ describe('a cut-off answer', () => {
     expect(isOutputTruncated(exhausted)).toBe(true);
     expect(isOutputTruncated(new AllTargetsFailedError('down', [new LlmCallError('server', 'nope')]))).toBe(false);
     expect(isOutputTruncated(new Error('unrelated'))).toBe(false);
+  });
+});
+
+describe('target health classification', () => {
+  it('does not poison a circuit with request-specific failures', () => {
+    for (const kind of ['context_length', 'content_filter', 'response_format', 'output_truncated'] as const) {
+      expect(countsTowardCircuit(kind)).toBe(false);
+      expect(disablesTarget(kind)).toBe(false);
+    }
+  });
+
+  it('disables only conclusively unusable targets', () => {
+    expect(disablesTarget('auth')).toBe(true);
+    expect(disablesTarget('quota')).toBe(true);
+    expect(disablesTarget('model_unavailable')).toBe(true);
+    expect(disablesTarget('timeout')).toBe(false);
   });
 });
 

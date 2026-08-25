@@ -176,9 +176,12 @@ function journalObserver(app: App, store: RunStore): GatewayObserver {
     onTargetDown: (info) => {
       app.metrics.recordTargetDown(info.target, info.kind, info.message);
       app.progressLog.noteTargetDown(info);
+      const scope = info.kind === 'circuit_open'
+        ? 'is temporarily skipped until its circuit-breaker cooldown expires'
+        : 'is disabled for the rest of this run';
       app.logger.error(
-        `Model target "${info.target}" is being skipped for the rest of this run (${info.kind}). ` +
-          'Everything routed to it will be served by the next target in its pool — which may cost more. ' +
+        `Model target "${info.target}" ${scope} (${info.kind}). ` +
+          'Requests will use the next target in its pool while it is unavailable — which may cost more. ' +
           `Provider said: ${info.message}`,
         { target: info.target, pipeline: info.pipeline, kind: info.kind },
       );

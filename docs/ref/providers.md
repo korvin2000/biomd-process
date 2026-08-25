@@ -45,13 +45,13 @@ install.
 
 | Behaviour | Consequence for this project |
 |---|---|
-| the `cx/*` models report `api_format: responses` *(gateway)* | the gateway adapts the OpenAI Responses API onto `chat/completions`. It is the likeliest reason `temperature` is accepted and then discarded |
-| **`temperature` is validated and ignored** *(gateway)* — `3.5` → "must be between 0 and 2", yet `0` returns three different texts and 20 runs show no ordering by temperature | do not set it on a `cx/*` target. Writing it down records an intention the endpoint does not honour |
+| the `cx/*` models report `api_format: responses` *(gateway)* | ordinary tasks may use the Chat adapter; hosted web search uses `apiFormat: responses` and the real `/responses` tool path |
+| **`temperature` is validated and ignored by Chat, and rejected by Responses** *(gateway)* | do not set it on a `cx/*` target. Writing it down records an intention the endpoint does not honour |
 | **reasoning is on unless disabled** *(gateway)* — bare `cx/gpt-5.6-luna` spends 184 reasoning tokens on a control question | `reasoning: { enabled: false, dialect: reasoning_effort }`. `reasoning_effort: none` gives exactly 0 |
 | effort suffixes are monotone *(gateway)*: `terra-low` 14% → `luna-medium` 20% → `luna-high` 86% of output tokens | `-high` costs 7× the tokens and 7× the wall clock for this corpus's work |
 | **buffered overlap cross-talk** *(gateway)* — two overlapping non-streamed requests, the second gets the first's completion, 5 of 5 | **`stream: true`**. Correct 15 of 15 with it. `maxConcurrent > 1` is safe only because of it |
 | **response cache** *(gateway)* — an identical body returns in ~15–50 ms with no model attribution | add a nonce when probing, or a re-run looks implausibly fast and a "pass" is a cache hit |
-| `prompt_cache` is real *(gateway)* — 2816 of a 3704-token first call returned as `cached_tokens`, across runs *and* across models | keep the [cache-friendly message order](cost-mechanisms.md#1-cache-friendly-message-order--srcpromptsmessagebuilderts) intact |
+| `prompt_cache` is real *(gateway)* — 2816 of a 3704-token first call returned as `cached_tokens`, across runs *and* across models | Chat reports cached tokens additively, hence `usage.chatCachedTokens: additional`; the Responses bridge rejects explicit cache controls and uses its implicit cache |
 | intermittent `404 No active credentials for provider: omniroute` *(gateway)* | for a model listed in its own `/v1/models`, working minutes later. **A `/v1/models` listing is not a health check** |
 | `X-OmniRoute-Decision` and `X-OmniRoute-*` headers carry strategy, provider, latency and cost *(upstream)* | not consumed by this client; useful when probing with `curl -i` |
 | three resilience layers *(upstream)*: provider circuit breaker on 408/5xx, connection cooldown (5 s OAuth / 3 s API key), per-model 429 lockout | the gateway retries beneath this tool's own retry. A single slow call may be several upstream attempts |
@@ -141,17 +141,21 @@ Excluded: `mancer/fp8` ("No tokens generated" on a real payload) and `wafer/fast
 
 ### Getting a model that actually searches
 
-Three routes, in descending order of how little has to be true:
+Four routes, in descending order of preference:
 
-1. **a hosted search model** — `model: perplexity/sonar`
-2. **the `:online` suffix** — `model: openai/gpt-5.6-luna:online`, which bills a per-request search
+1. **Responses hosted search** — `apiFormat: responses`, `webSearchMode: responses_tool`, plus a request carrying
+   `tools: [{ type: web_search }]` and `tool_choice: required`. This is what the OmniRoute targets use.
+2. **a hosted search model** — `webSearchMode: hosted`, e.g. `model: perplexity/sonar`
+3. **the `:online` suffix** — `webSearchMode: online`, e.g. `model: openai/gpt-5.6-luna:online`, which bills a per-request search
    fee on top of tokens
-3. **the web plugin** — `params.extra: { plugins: [{ id: web, max_results: 5 }] }`
+4. **the web plugin** — `webSearchMode: plugin` plus `params.extra: { plugins: [{ id: web, max_results: 5 }] }`
 
-`tasks.websearch` routes on the declared `web_search` capability. Declaring it on a model that
-cannot search is how you get confident fiction with a fabricated citation.
+`tasks.websearch` routes on the declared `web_search` capability, but declaration is not proof:
+the response must contain a completed provider search call and every accepted source URL must be
+present in its source evidence. Ordinary `cx/gpt-5.6-luna` Chat Completions were measured fabricating
+a current GitHub SHA while citing the right URL; the Responses tool returned the exact live value.
 
-**`:online` and `json_object` are mutually exclusive.** OpenAI refuses the combination —
+**Web search and `json_object` are mutually exclusive on the configured gateways.** They refuse the combination —
 `400 Web Search cannot be used with JSON mode` — so `or-osearch`/`paid-search` must **omit
 `json_object` from its capability list**. The transport then sends no `response_format` and the
 target degrades to asking for JSON in the prompt, which the prompt already does.

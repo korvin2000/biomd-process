@@ -200,8 +200,8 @@ tasks:
     # The answer is a status (alive | dead | unknown), never a bare date, so
     # silence about a living person can never turn into a date of death.
     livenessAgeYears: 78
-    # Also ask for the exact day when only a year or a month is on record.
-    upgradePrecision: true
+    # Exact-date upgrades need corroboration/review; false avoids manufacturing precision.
+    upgradePrecision: false
     # What to do when the sourced answer disagrees with the date on record.
     #
     # An article that says "born about 1950" and a cited 25.07.1949 are not two
@@ -216,12 +216,12 @@ tasks:
     #   ignore  drop it (the behaviour before this setting existed)
     #
     # Whatever happens is in the run notes: `biomd report --notes conflict`.
-    onDateConflict: prefer-precise
+    onDateConflict: report
     # none | lead. The lead paragraph is how a namesake gets told apart.
     includeContext: lead
     contextChars: 600
-    # url: fill an empty metadata.url from the best source found.
-    recordSources: url
+    # none keeps provenance in notes; url promotes one result to metadata.url.
+    recordSources: none
 
   translate:
     enabled: true
@@ -654,50 +654,42 @@ llm:
         minP: 0.02
       tags: [remote, cheap]
 
-    # A model that actually searches. Three ways to get one on OpenRouter, in
-    # descending order of how little has to be true for it to work:
-    #   1. a hosted search model:   model: perplexity/sonar
-    #   2. the `:online` suffix:    model: openai/gpt-4o-mini:online
-    #   3. the web plugin:          params.extra.plugins (below)
-    # The `web_search` capability is what `tasks.websearch` routes on; declaring
-    # it on a model that cannot search is how you get confident fiction.
+    # OmniRoute exposes real hosted search through the Responses API. Both the
+    # declared mode and runtime `web_search_call` evidence are required.
     - id: or-search
       endpoint: omniroute
       model: cx/gpt-5.6-luna
-      contextWindow: 127000
-      maxOutputTokens: 4096
-      capabilities: [json_object, tools, web_search]
+      apiFormat: responses
+      webSearchMode: responses_tool
+      contextWindow: 272000
+      maxOutputTokens: 32768
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      params:
-        temperature: 0.1
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      reasoning: { enabled: false, dialect: reasoning_effort }
       tags: [remote, search, cheap]
 
     - id: or-search2
       endpoint: omniroute
-      model: cx/gpt-5.6-luna-medium
-      contextWindow: 127000
-      maxOutputTokens: 4096
-      capabilities: [json_object, tools, web_search]
+      model: cx/gpt-5.6-luna
+      apiFormat: responses
+      webSearchMode: responses_tool
+      contextWindow: 272000
+      maxOutputTokens: 32768
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      params:
-        temperature: 0.2
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      reasoning: { enabled: true, effort: medium, dialect: reasoning_effort }
       tags: [remote, search, cheap]
 
     - id: or-search3
       endpoint: omniroute
-      model: cx/gpt-5.6-terra-low
-      contextWindow: 127000
-      maxOutputTokens: 4096
-      capabilities: [json_object, tools, web_search]
+      model: cx/gpt-5.6-terra
+      apiFormat: responses
+      webSearchMode: responses_tool
+      contextWindow: 272000
+      maxOutputTokens: 32768
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      params:
-        temperature: 0.1
-        # For option 3, keep the model as it is and add:
-        # extra: { plugins: [{ id: web, max_results: 5 }] }
+      reasoning: { enabled: true, effort: low, dialect: reasoning_effort }
       tags: [remote, search, cheap]
 
     # The `:online` suffix is what makes this one *search*. Without it the model
@@ -708,6 +700,7 @@ llm:
     - id: or-osearch
       endpoint: openrouter
       model: openai/gpt-5.6-luna:online
+      webSearchMode: online
       contextWindow: 127000
       maxOutputTokens: 4096
       # `json_object` is deliberately absent, and its absence is what makes this
@@ -826,7 +819,7 @@ llm:
         strategy: least-busy
         maxConcurrent:
           local: 1
-          omniroute: 4
+          omniroute: 3
           openrouter: 3
         # Which model renders which language best, by target language code.
         # A reordering of the pool and never an addition to it: the models

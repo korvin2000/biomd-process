@@ -54,7 +54,11 @@ export function createReportCommand(): Command {
         `LLM         ${totals.llmRequests} requests · ${totals.retries} retries · ${totals.fallbacks} fallbacks\n`,
       );
       process.stdout.write(
-        `Tokens      ${formatTokens(totals.promptTokens)} in (${formatTokens(totals.cachedPromptTokens)} cached) · ` +
+        `Tokens      ${formatTokens(totals.promptTokens)} in (${formatTokens(totals.cachedPromptTokens)} cached` +
+          ((totals.cacheWritePromptTokens ?? 0) > 0
+            ? `, ${formatTokens(totals.cacheWritePromptTokens ?? 0)} cache-write`
+            : '') +
+          ') · ' +
           `${formatTokens(totals.completionTokens)} out` +
           (totals.reasoningTokens ? pc.dim(`, ${formatTokens(totals.reasoningTokens)} of it reasoning`) : '') +
           '\n',

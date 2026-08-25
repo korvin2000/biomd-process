@@ -2,6 +2,8 @@ import type { Capability, ReliabilityConfig } from '../config/schema.js';
 import {
   AllTargetsFailedError,
   CircuitBreakerRegistry,
+  countsTowardCircuit,
+  disablesTarget,
   ErrorClassifier,
   LlmCallError,
   RetryPolicy,
@@ -162,6 +164,8 @@ export class LlmGateway implements LlmPort {
   private readonly retry: RetryPolicy;
   /** Targets already announced as down, so the warning is one line and not one per call. */
   private readonly reportedDown = new Set<string>();
+  /** Targets conclusively unusable for the remainder of this run. */
+  private readonly unavailableTargets = new Set<string>();
 
   constructor(
     private readonly registry: ModelRegistry,
@@ -194,6 +198,14 @@ export class LlmGateway implements LlmPort {
     const failures: LlmCallError[] = [];
 
     for (const [index, target] of chain.entries()) {
+      if (this.unavailableTargets.has(target.key)) {
+        failures.push(
+          new LlmCallError('model_unavailable', `Target disabled for this run: ${target.key}`, {
+            target: target.key,
+          }),
+        );
+        continue;
+      }
       if (!this.breakers.canAttempt(target.key)) {
         // Skipping a target with an open breaker is correct and used to be
         // completely silent — which is how a whole run can be served by the
@@ -219,15 +231,17 @@ export class LlmGateway implements LlmPort {
       } catch (error: unknown) {
         const failure = this.classifier.classify(error, target.key);
         failures.push(failure);
-        this.breakers.recordFailure(target.key);
+        if (countsTowardCircuit(failure.kind)) this.breakers.recordFailure(target.key);
+        else this.breakers.recordSuccess(target.key);
 
-        // A configuration error looks exactly like a transient one at the call
-        // site — a wrong model id, a missing credential and an overloaded
-        // provider all arrive as an HTTP error. Naming the target the first time
-        // it is written off is what turns "the run was slower and dearer than
-        // expected" into a line the user can act on.
-        if (!failure.disposition.retryable || failure.kind === 'model_unavailable') {
+        // Announce only a target we really stop using. Request-specific failures
+        // prove the endpoint answered and must not poison its circuit or create
+        // a false TARGET DOWN event.
+        if (disablesTarget(failure.kind)) {
+          this.unavailableTargets.add(target.key);
           this.announceDown(target, options, request, failure.kind, failure.message);
+        } else if (this.breakers.stateOf(target.key) === 'open') {
+          this.announceDown(target, options, request, 'circuit_open', failure.message);
         }
 
         if (!this.shouldFallback(failure)) break;

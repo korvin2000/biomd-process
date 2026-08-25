@@ -35,6 +35,7 @@ export interface RunTotals {
   promptTokens: number;
   completionTokens: number;
   cachedPromptTokens: number;
+  cacheWritePromptTokens: number;
   /**
    * Part of `completionTokens`, not additional to it — but billed at the output
    * rate and routinely larger than the answer, so it is tracked separately. A run
@@ -169,6 +170,7 @@ export function emptyTotals(): RunTotals {
     promptTokens: 0,
     completionTokens: 0,
     cachedPromptTokens: 0,
+    cacheWritePromptTokens: 0,
     reasoningTokens: 0,
     costUsd: 0,
   };

@@ -21,6 +21,8 @@ provider quirks: [docs/ref/providers.md](../../docs/ref/providers.md).
   everything it may see is in `RoutingContext`.
 - **Fit is two windows.** A target must hold the prompt *and* emit the answer; `outputHeadroom ≥ 0`
   is half the test. Neither `onOverflow` value ever routes nowhere.
+- **A required capability is a boundary, not a preference.** If no target has it, return no route;
+  never fall back to an incapable model that can answer fluently anyway.
 - **Claims and semaphores are not interchangeable.** A lane is claimed in the *same synchronous
   tick* as the ranking that chose it, or three tasks starting together all read "the local model is
   free". The lane semaphore is acquired **before** the endpoint's, never after.

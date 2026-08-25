@@ -71,7 +71,7 @@ cli → app → core ─┬→ pipelines → io
 | File | Owns | Key exports |
 |---|---|---|
 | `llm/LlmGateway.ts` | budget → route → breaker → limiter → retry → classify | `LlmGateway` `LlmPort` `GatewayObserver` `AttemptTuning` `AttemptRecord` `ValidationVerdict` |
-| `llm/OpenAiCompatibleClient.ts` | the single transport for every OpenAI-compatible endpoint | `OpenAiCompatibleClient` `buildRequestBody` `toWireResponseFormat` `reasoningFields` `collectStream` |
+| `llm/OpenAiCompatibleClient.ts` | Chat Completions + Responses transport, hosted-search evidence and cache usage mapping | `OpenAiCompatibleClient` `buildRequestBody` `buildResponsesRequestBody` `collectStream` `collectResponsesStream` |
 | `llm/Lanes.ts` | a pool's share of an endpoint's concurrency | `LaneRegistry` |
 | `llm/types.ts` | wire types + capability test | `ModelTarget` `CompletionRequest` `hasCapabilities` `usableInputTokens` |
 | `llm/Budget.ts` · `CostCalculator.ts` · `ModelRegistry.ts` · `TokenEstimator.ts` | spend guard · pricing · target resolution · token estimate | `BudgetGuard` `estimateCost` `ModelRegistry` `HeuristicTokenEstimator` |

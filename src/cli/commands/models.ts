@@ -23,6 +23,8 @@ export function createModelsCommand(): Command {
         `${renderTable(app.models.all(), [
           { header: 'MODEL', value: (target) => target.modelId },
           { header: 'ENDPOINT', value: (target) => target.endpointId },
+          { header: 'API', value: (target) => target.apiFormat === 'responses' ? 'responses' : 'chat' },
+          { header: 'SEARCH', value: (target) => target.webSearchMode ?? pc.dim('—') },
           { header: 'WIRE NAME', value: (target) => target.modelName },
           { header: 'CONTEXT', value: (target) => formatTokens(target.contextWindow), align: 'right' },
           { header: 'MAX OUT', value: (target) => formatTokens(target.maxOutputTokens), align: 'right' },
@@ -105,7 +107,10 @@ async function probeTargets(app: App): Promise<boolean> {
   heading('Probe');
 
   const targets = app.models.all();
-  const results = await Promise.all(targets.map((target) => probeOne(app, target)));
+  // Deliberately sequential: this is a health check, not a throughput test, and
+  // bypassing the gateway's endpoint limiters must not create its own outage.
+  const results = [];
+  for (const target of targets) results.push(await probeOne(app, target));
   const failed = results.filter((result) => !result.ok);
 
   process.stdout.write(
@@ -145,20 +150,33 @@ interface ProbeResult {
 async function probeOne(app: App, target: ModelTarget): Promise<ProbeResult> {
   const startedAt = Date.now();
   try {
+    const searches = target.capabilities.includes('web_search');
+    const nonce = `${Date.now().toString(36)}-${target.modelId}`;
     const response = await app.clients.for(target.endpointId).complete(
       target,
       {
-        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
-        params: { ...target.params, maxOutputTokens: 16 },
+        messages: [{
+          role: 'user',
+          content: searches
+            ? `Open https://example.com/ using live web search and reply with its page title. Probe nonce ${nonce}.`
+            : `Reply with the single word OK. Probe nonce ${nonce}.`,
+        }],
+        params: { ...target.params, maxOutputTokens: searches ? 512 : 16 },
+        ...(searches ? { webSearch: { required: true as const, searchContextSize: 'low' as const } } : {}),
       },
       { timeoutMs: target.timeoutMs },
     );
+    if (searches && (!response.webSearch?.performed || response.webSearch.sources.length === 0)) {
+      throw new Error('completion answered but produced no provider web-search call with a consulted source');
+    }
     const text = response.text.trim().replace(/\s+/g, ' ');
     return {
       target,
       ok: true,
       latencyMs: Date.now() - startedAt,
-      detail: text ? truncate(text, 40) : `answered ${response.usage.completionTokens} token(s)`,
+      detail: searches
+        ? `searched ${response.webSearch?.sources.length ?? 0} source(s): ${truncate(text, 28)}`
+        : (text ? truncate(text, 40) : `answered ${response.usage.completionTokens} token(s)`),
     };
   } catch (error: unknown) {
     return {

@@ -80,7 +80,8 @@ npm run score -- input/ru out
   uncatchable downstream. `maxConcurrent: 3` on that endpoint is safe **only** because streaming is
   on; if streaming is ever turned off, it must go back to `1`.
 - **A model without web search answers search questions anyway**, fluently, with fabricated
-  citations. `requireWebSearchCapability` is only as honest as the capability list.
+  citations. Search targets therefore declare `webSearchMode`, and a result is accepted only with
+  provider search-call/source evidence; the capability list alone is not proof.
 - **Editing a prompt template invalidates every fingerprint** (both files hash into
   `promptVersion`) and re-plans the corpus. It also correctly starts a fresh translation-memory
   namespace — but a bad rendering already cached is re-served verbatim until then.

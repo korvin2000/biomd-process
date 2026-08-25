@@ -4,6 +4,7 @@ import { interpolateEnv } from '../src/config/env.js';
 import { deepMerge, pruneUndefined } from '../src/config/merge.js';
 import { appConfigSchema } from '../src/config/schema.js';
 import { createRunCommand } from '../src/cli/commands/run.js';
+import { ModelRegistry } from '../src/llm/ModelRegistry.js';
 import { minimalConfig } from './helpers/config.js';
 
 describe('env interpolation', () => {
@@ -46,6 +47,9 @@ describe('config schema', () => {
     expect(config.reliability.retry.maxAttempts).toBe(3);
     expect(config.context.strategy).toBe('truncation-first');
     expect(config.llm.models[0]?.contextWindow).toBe(128_000);
+    expect(config.tasks.websearch.upgradePrecision).toBe(false);
+    expect(config.tasks.websearch.onDateConflict).toBe('report');
+    expect(config.tasks.websearch.recordSources).toBe('none');
   });
 
   it('rejects a model pointing at an undeclared endpoint', () => {
@@ -149,6 +153,84 @@ describe('config schema', () => {
   it('rejects unknown top-level keys instead of ignoring a typo', () => {
     const input = { ...minimalConfig(), tsaks: {} };
     expect(appConfigSchema.safeParse(input).success).toBe(false);
+  });
+
+  it('rejects unknown nested keys instead of silently stripping a typo', () => {
+    const input = minimalConfig();
+    (input.llm.models[0] as unknown as Record<string, unknown>)['capabilites'] = ['web_search'];
+    const result = appConfigSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.some((issue) => issue.code === 'unrecognized_keys')).toBe(true);
+  });
+
+  it('rejects duplicate endpoint and model ids', () => {
+    const input = minimalConfig();
+    input.llm.endpoints.push({ id: 'local', baseUrl: 'http://localhost:5000/v1' });
+    input.llm.models.push({ id: 'small', endpoint: 'local', model: 'other-model' });
+    const result = appConfigSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message).join(' ')).toContain('Duplicate endpoint id');
+    expect(result.error?.issues.map((issue) => issue.message).join(' ')).toContain('Duplicate model id');
+  });
+
+  it('checks web-search capability inside the task pool, not elsewhere in the config', () => {
+    const input = minimalConfig();
+    input.tasks = { websearch: { enabled: true, pool: 'websearch', requireWebSearchCapability: true } };
+    input.llm.models.push({
+      id: 'searcher',
+      endpoint: 'local',
+      model: 'search-model',
+      apiFormat: 'responses',
+      webSearchMode: 'responses_tool',
+      capabilities: ['web_search'],
+    } as never);
+    input.llm.routing = { pools: { default: ['searcher'], websearch: ['small'] } };
+    const result = appConfigSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message).join(' ')).toContain('pool "websearch"');
+  });
+
+  it('rejects a web_search declaration without an activation mode', () => {
+    const input = minimalConfig();
+    input.llm.models[0] = {
+      ...input.llm.models[0]!,
+      apiFormat: 'responses',
+      capabilities: ['web_search'],
+    } as never;
+    const result = appConfigSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message).join(' ')).toContain('does not say how search is enabled');
+  });
+
+  it('rejects search modes whose activation mechanism is not configured', () => {
+    const input = minimalConfig();
+    input.llm.models[0] = {
+      ...input.llm.models[0]!,
+      capabilities: ['web_search'],
+      webSearchMode: 'online',
+    } as never;
+    let result = appConfigSchema.safeParse(input);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message).join(' ')).toContain('no :online suffix');
+
+    const pluginInput = minimalConfig();
+    pluginInput.llm.models[0] = {
+      ...pluginInput.llm.models[0]!,
+      capabilities: ['web_search'],
+      webSearchMode: 'plugin',
+      params: { extra: { plugins: [{ id: 'not-web' }] } },
+    } as never;
+    result = appConfigSchema.safeParse(pluginInput);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message).join(' ')).toContain('has no web plugin');
+  });
+
+  it('merges llm default params underneath model-specific params', () => {
+    const input = minimalConfig();
+    input.llm.defaults = { params: { temperature: 0.7, topP: 0.8 } };
+    (input.llm.models[0] as never as { params: { temperature: number } }).params = { temperature: 0.1 };
+    const config = appConfigSchema.parse(input);
+    expect(new ModelRegistry(config).get('small')?.params).toMatchObject({ temperature: 0.1, topP: 0.8 });
   });
 });
 

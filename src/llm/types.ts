@@ -21,6 +21,29 @@ export interface ChatMessage {
   cacheBreakpoint?: boolean;
 }
 
+export interface WebSearchRequest {
+  /** A response without provider evidence of a completed search is rejected. */
+  required: boolean;
+  searchContextSize?: 'low' | 'medium' | 'high';
+}
+
+export interface PromptCacheRequest {
+  /** Stable routing key for requests that reuse the same prompt prefix. */
+  key?: string;
+  /** Responses API cache placement. Explicit mode uses ChatMessage.cacheBreakpoint. */
+  mode?: 'implicit' | 'explicit';
+}
+
+export interface WebSearchSource {
+  url: string;
+  title?: string;
+}
+
+export interface WebSearchEvidence {
+  performed: boolean;
+  sources: WebSearchSource[];
+}
+
 export type ResponseFormat =
   | { type: 'text' }
   | { type: 'json_object' }
@@ -44,6 +67,8 @@ export interface CompletionRequest {
   messages: ChatMessage[];
   responseFormat?: ResponseFormat;
   params?: CompletionParams;
+  webSearch?: WebSearchRequest;
+  promptCache?: PromptCacheRequest;
   /** Opaque correlation data forwarded to providers that accept a `user`/`metadata` field. */
   correlationId?: string;
 }
@@ -53,6 +78,8 @@ export interface TokenUsage {
   completionTokens: number;
   /** Subset of `promptTokens` served from the provider's prompt cache. */
   cachedPromptTokens: number;
+  /** Subset of `promptTokens` written to the provider's prompt cache. */
+  cacheWritePromptTokens: number;
   reasoningTokens: number;
   totalTokens: number;
 }
@@ -61,6 +88,7 @@ export const EMPTY_USAGE: TokenUsage = {
   promptTokens: 0,
   completionTokens: 0,
   cachedPromptTokens: 0,
+  cacheWritePromptTokens: 0,
   reasoningTokens: 0,
   totalTokens: 0,
 };
@@ -76,6 +104,8 @@ export interface CompletionResponse {
   latencyMs: number;
   /** Cost reported by the gateway itself (OpenRouter does this); trusted over our estimate. */
   providerCostUsd?: number;
+  /** Provider-generated evidence, never inferred from URLs written in model prose. */
+  webSearch?: WebSearchEvidence;
 }
 
 /**
@@ -89,6 +119,8 @@ export interface ModelTarget {
   readonly endpointId: string;
   /** Model name to send on the wire. */
   readonly modelName: string;
+  readonly apiFormat: ModelConfig['apiFormat'];
+  readonly webSearchMode?: ModelConfig['webSearchMode'];
   readonly contextWindow: number;
   readonly maxOutputTokens: number;
   readonly maxTokensParam: 'max_tokens' | 'max_completion_tokens';

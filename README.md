@@ -77,8 +77,9 @@ npm run biomd -- models --probe
 npm run biomd -- run --dry-run
 ```
 
-`--probe` sends one tiny completion to every target and reports who answered —
-the only check that tells a *declared* model from a working one. A pool is a
+`--probe` sends one tiny completion to every target and reports who answered;
+for a `web_search` target it also requires a provider search call with a
+consulted source. A pool is a
 fallback chain, so a dead first choice is otherwise invisible until the bill
 arrives. `--dry-run` then plans the whole job — documents, tasks, the model
 chain each pipeline would use and an estimated cost — without issuing a single
@@ -93,7 +94,7 @@ request. Drop the flag to execute.
 | `config check` | Validate the config, resolve paths, load every prompt template. |
 | `config show` | Print the effective config with secrets redacted. |
 | `models` | List resolved model targets, pools, and a routing preview. |
-| `models --probe` | Call every target once and report who answered. Exits 1 if any fails. |
+| `models --probe` | Call every target once; search targets must prove a real search. Exits 1 if any fails. |
 | `prompts list` / `prompts show <task>` | Inspect and render templates without spending tokens. |
 | `report [runId]` | Summarize a finished run from its journal. `--notes` replays the decisions that produced no file — a refused web answer, a date conflict recorded rather than published. |
 | `portrait <who…>` | Search the image index for one entry and print the ranking with its reasoning (`--faces n` for an ensemble). Spends nothing. |
@@ -117,7 +118,8 @@ corpus ──► JobPlanner ──► tasks ──► Orchestrator ──► art
 
 **Models.** Any OpenAI-compatible endpoint: LiteLLM, OmniRoute, 9router, vLLM,
 Ollama's shim, OpenRouter, OpenAI. Per model you configure the wire name, context
-window, output ceiling, pricing, capabilities, reasoning effort and its dialect;
+window, output ceiling, Chat Completions vs Responses API, pricing, capabilities,
+reasoning effort and its dialect;
 per endpoint, whether answers are streamed.
 
 **Routing.** A strategy ranks an ordered chain of candidates per call —
@@ -141,8 +143,8 @@ that costs the entry a field, an edition or a row, never the catalogue.
 **Cost.** By default, translation and localization send **only the prose**, as a
 flat `{contentHash: text}` table — markup, code, URLs and a dossier's
 language-invariant fields never leave the machine and are spliced back after,
-and a fragment not written in the source language is not sent at all. Prompts
-are assembled stable-part-first so provider caches hit across the corpus,
+and a fragment not written in the source language is not sent at all. Stable
+prompt instructions and the volatile payload are separate messages so provider caches hit across the corpus,
 context strategies escalate cheapest-first, a partial answer is repaired
 key-by-key rather than re-sent whole, output already on disk is recognized
 before a model is called, and budgets in requests, tokens or USD stop a run
@@ -163,6 +165,9 @@ across editions by construction rather than by instruction.
 start stating one on the third context rung, so `websearch` asks a different
 source instead — only about fields genuinely missing, sending an eight-line
 identity card rather than the article, and nothing personal about a collective.
+Search targets use the Responses hosted `web_search` tool. A response is rejected
+unless the provider reports a completed search call, and a source URL is accepted
+only when it appears in the provider's search evidence.
 The portrait is chosen from an image index by name matching, the index's own
 classification and the pictures the article itself embeds — no model at all.
 
@@ -179,7 +184,8 @@ to be `tail -f`-able — and `grep ' ! ' progress.log` is the incident report.
 
 ## Configuration
 
-One YAML file, validated by Zod, layered `defaults < file < ${ENV} < CLI flags`.
+One YAML file, strictly validated by Zod at every fixed object layer, layered
+`defaults < file < ${ENV} < CLI flags`.
 Invalid config fails before any work starts, with the offending path named.
 `biomd.config.yaml` in the repo root is a documented working example, and
 [docs/ref/config-map.md](docs/ref/config-map.md) is the map of every setting.

@@ -102,6 +102,8 @@ function endpoint(id: string): EndpointConfig {
     requestsPerMinute: 0,
     minRequestSpacingMs: 0,
     stream: false,
+    responsesPromptCache: false,
+    usage: { chatCachedTokens: 'included' },
     enabled: true,
   };
 }
@@ -112,6 +114,7 @@ function target(modelId: string, ep: EndpointConfig, inputPer1M = 0): ModelTarge
     modelId,
     endpointId: ep.id,
     modelName: modelId,
+    apiFormat: 'chat_completions',
     contextWindow: 64_000,
     maxOutputTokens: 8192,
     maxTokensParam: 'max_tokens',

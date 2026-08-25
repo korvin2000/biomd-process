@@ -544,6 +544,32 @@ describe('the catalogue is updated, not rebuilt', () => {
     expect(names['1']).toContain('де Лусия Пако');
     expect(names['99']).toEqual(['Другая запись']);
   });
+
+  it('fails closed and preserves an unreadable existing index', async () => {
+    const broken = '[{"id":';
+    await workspace.writeFile('out/index.json', broken);
+
+    const outcome = await runJob(
+      workspace.app({ tasks: CATALOG_ONLY, output: { onExisting: 'overwrite' } }, FakeClient.happyPath()),
+    );
+
+    expect(outcome.summary.status).toBe('failed');
+    expect(outcome.summary.failures[0]?.message).toContain('refusing to replace');
+    expect(await readFile(workspace.path('out/index.json'), 'utf8')).toBe(broken);
+  });
+
+  it('fails closed and preserves an unreadable localized name index', async () => {
+    const broken = '{"1":';
+    await workspace.writeFile('out/index-ru.json', broken);
+
+    const outcome = await runJob(
+      workspace.app({ tasks: CATALOG_ONLY, output: { onExisting: 'overwrite' } }, FakeClient.happyPath()),
+    );
+
+    expect(outcome.summary.status).toBe('failed');
+    expect(outcome.summary.failures[0]?.message).toContain('localized name index is unreadable');
+    expect(await readFile(workspace.path('out/index-ru.json'), 'utf8')).toBe(broken);
+  });
 });
 
 describe('failure handling', () => {

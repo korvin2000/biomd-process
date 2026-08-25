@@ -227,7 +227,12 @@ async function callOnce(
   let parsed: Map<string, string> | undefined;
 
   const result = await context.llm.complete(
-    { messages, responseFormat: { type: 'json_object' }, correlationId: task.taskId },
+    {
+      messages,
+      responseFormat: { type: 'json_object' },
+      correlationId: task.taskId,
+      promptCache: { key: `${spec.promptId}:${prompt.version}`, mode: 'explicit' },
+    },
     {
       pipeline: task.pipeline,
       pool: spec.pool,

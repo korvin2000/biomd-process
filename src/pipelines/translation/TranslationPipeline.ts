@@ -22,6 +22,7 @@ import { languageName } from '../../domain/vocabulary.js';
 import type { DocumentSegment } from '../../documents/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
+import { hashStructure } from '../../shared/hash.js';
 import { keyOf, type LocalizationUnit } from '../localization/StringTable.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
 import { hasOwnScript, isTranslatable } from '../shared/script.js';
@@ -199,7 +200,7 @@ export class TranslationPipeline implements DocumentPipeline {
       // every fragment would be a hit, no model would be called, and the second
       // attempt would rebuild the identical broken document for free.
       ...(context.attempt > 1 ? {} : { memory: await context.memories.acquire(
-        `${PIPELINE_ID}-${await context.prompts.versionOf(SEGMENTS_PROMPT_ID)}`,
+        `${PIPELINE_ID}-${await context.prompts.versionOf(SEGMENTS_PROMPT_ID)}-${document.language}-${hashStructure(config.promptVariables, 10)}`,
         config.useTranslationMemory,
       ) }),
       variables: (part) => ({

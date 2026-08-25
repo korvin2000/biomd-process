@@ -79,7 +79,12 @@ describe('websearch', () => {
       );
     });
 
-    const outcome = await runJob(workspace.app({ tasks: TASKS }, client));
+    const outcome = await runJob(workspace.app({
+      tasks: {
+        ...TASKS,
+        websearch: { ...TASKS.websearch, recordSources: 'url' as const },
+      },
+    }, client));
     expect(outcome.summary.failures).toEqual([]);
 
     const dossier = await readDossier();
@@ -114,7 +119,12 @@ describe('websearch', () => {
 
     const asking = {
       ...TASKS,
-      websearch: { ...TASKS.websearch, upgradePrecision: true, fields: ['born' as const] },
+      websearch: {
+        ...TASKS.websearch,
+        upgradePrecision: true,
+        onDateConflict: 'prefer-precise' as const,
+        fields: ['born' as const],
+      },
     };
 
     it('prefers the more precise sourced date, and says that it did', async () => {
@@ -169,7 +179,7 @@ describe('websearch', () => {
       if (!isWebSearch(content)) return respond(JSON.stringify({}));
 
       // The instructions name the language the answer belongs in.
-      expect(content).toContain('Language: ru');
+      expect(call.request.messages.map((message) => message.content).join('\n')).toContain('Language: ru');
 
       // What a search model writes once it has been told countries are ISO
       // codes: the rule belongs to `country`, and it applies it to everything.
@@ -181,7 +191,8 @@ describe('websearch', () => {
       );
     });
 
-    await runJob(workspace.app({ tasks: TASKS }, client));
+    const outcome = await runJob(workspace.app({ tasks: TASKS }, client));
+    expect(outcome.summary.failures).toEqual([]);
 
     expect((await readDossier()).metadata['birthplace']).toBe('Melbourne, Австралия');
   });
@@ -273,7 +284,14 @@ describe('websearch', () => {
           endpoints: [{ id: 'fake', baseUrl: 'http://localhost:9/v1', apiKey: 'x' }],
           models: [
             { id: 'plain', endpoint: 'fake', model: 'plain-model' },
-            { id: 'searcher', endpoint: 'fake', model: 'search-model', capabilities: ['web_search'] },
+            {
+              id: 'searcher',
+              endpoint: 'fake',
+              model: 'search-model',
+              apiFormat: 'responses',
+              webSearchMode: 'responses_tool',
+              capabilities: ['web_search'],
+            },
           ],
           routing: { strategy: 'cost-optimized', pools: { default: ['plain', 'searcher'] } },
         },
@@ -288,5 +306,20 @@ describe('websearch', () => {
       requiredCapabilities: ['web_search'],
     });
     expect(targets.map((target) => target.modelId)).toEqual(['searcher']);
+  });
+
+  it('rejects a well-formed answer when the provider performed no search', async () => {
+    const client = new FakeClient((call) => {
+      const content = call.request.messages.at(-1)?.content ?? '';
+      if (!isWebSearch(content)) return respond(JSON.stringify({}));
+      return respond(
+        JSON.stringify({ born: { value: '21.02.1893', source: 'https://invented.example/a', confidence: 0.99 } }),
+        { webSearch: { performed: false, sources: [] } },
+      );
+    });
+
+    const outcome = await runJob(workspace.app({ tasks: TASKS }, client));
+    expect(outcome.summary.status).toBe('failed');
+    expect(outcome.summary.failures[0]?.message).toContain('no completed web_search_call');
   });
 });

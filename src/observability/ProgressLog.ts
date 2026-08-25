@@ -162,7 +162,8 @@ export class ProgressLog {
    * the bill from the model that was supposed to be the backup.
    */
   noteTargetDown(info: TargetDownInfo): void {
-    this.incident(info, `TARGET DOWN ${info.target} — ${info.kind}: ${info.message}`, false);
+    const state = info.kind === 'circuit_open' ? 'CIRCUIT OPEN' : 'TARGET DOWN';
+    this.incident(info, `${state} ${info.target} — ${info.kind}: ${info.message}`, false);
   }
 
   /**

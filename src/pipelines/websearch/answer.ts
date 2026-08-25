@@ -74,6 +74,10 @@ export interface AnswerOptions {
    * used, and when that is absent too, no place is rewritten.
    */
   country?: string;
+  /** URLs the provider reports actually consulting during this response. */
+  verifiedSources?: ReadonlySet<string>;
+  /** Reject model-authored URLs absent from provider search evidence. */
+  requireVerifiedSource?: boolean;
 }
 
 /**
@@ -165,7 +169,8 @@ function readStatus(root: Record<string, unknown>): LivenessStatus | undefined {
 type Verdict = { value: WebValue } | { reason: string };
 
 function accept(field: WebField, entry: RawEntry, options: AnswerOptions): Verdict {
-  const confidence = entry.confidence ?? 1;
+  if (entry.confidence === undefined) return { reason: 'confidence is missing' };
+  const confidence = entry.confidence;
   if (confidence < options.minConfidence) {
     return { reason: `confidence ${confidence.toFixed(2)} is below ${options.minConfidence.toFixed(2)}` };
   }
@@ -173,6 +178,9 @@ function accept(field: WebField, entry: RawEntry, options: AnswerOptions): Verdi
   const source = entry.source ? normalizeUrl(entry.source) : undefined;
   if (options.requireSource && !source) {
     return { reason: `no usable source URL (${entry.source ?? 'none given'})` };
+  }
+  if (source && options.requireVerifiedSource && !options.verifiedSources?.has(source)) {
+    return { reason: `source URL was not present in provider web-search evidence (${source})` };
   }
 
   const value = normalizeValue(field, entry.value, options);
@@ -300,6 +308,7 @@ function refines(field: WebField, current: string, candidate: string): boolean {
 }
 
 function numberOf(value: unknown): number | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return undefined;
   const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
   return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : undefined;
 }

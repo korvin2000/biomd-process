@@ -14,6 +14,7 @@ import { languageName } from '../../domain/vocabulary.js';
 import type { Dossier } from '../../domain/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
+import { hashStructure } from '../../shared/hash.js';
 import { readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import {
@@ -79,6 +80,7 @@ export class LocalizePipeline implements DocumentPipeline {
         sourceHash,
         extractVersion,
         websearchVersion,
+        promptVariables: config.promptVariables,
       },
       promptVersion,
       expectedOutputs: [{ channel: config.outputChannel, pathVars: this.pathVars(item, targetLang) }],
@@ -133,7 +135,7 @@ export class LocalizePipeline implements DocumentPipeline {
       // every fragment would be a hit, no model would be called, and the second
       // attempt would rebuild the identical broken document for free.
       ...(context.attempt > 1 ? {} : { memory: await context.memories.acquire(
-        `${PIPELINE_ID}-${await context.prompts.versionOf(PIPELINE_ID)}`,
+        `${PIPELINE_ID}-${await context.prompts.versionOf(PIPELINE_ID)}-${item.language}-${hashStructure(config.promptVariables, 10)}`,
         config.useTranslationMemory,
       ) }),
       variables: (part) => ({

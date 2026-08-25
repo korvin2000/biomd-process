@@ -16,6 +16,7 @@ import type { Artifact, ArtifactWriter } from '../../io/types.js';
 import { EMPTY_USAGE } from '../../llm/types.js';
 import type { NameRosterStore } from '../../roster/NameRosterStore.js';
 import type { RosterEntry } from '../../roster/types.js';
+import { PipelineError } from '../../shared/errors.js';
 import { pathExists, readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import { rosterEntryFor } from '../shared/roster.js';
@@ -178,7 +179,17 @@ export class CatalogPipeline implements CorpusPipeline {
     const file = this.indexPath(config, context.writer);
     if (!(await pathExists(file))) return CatalogIndex.load([], options);
 
-    const existing = await readJsonFile<unknown>(file).catch(() => undefined);
+    const existing = await readJsonFile<unknown>(file).catch((error: unknown) => {
+      throw new PipelineError(`Existing index.json is unreadable; refusing to replace it: ${file}`, {
+        cause: error,
+        details: { file },
+      });
+    });
+    if (!Array.isArray(existing)) {
+      throw new PipelineError(`Existing index.json is not an array; refusing to replace it: ${file}`, {
+        details: { file },
+      });
+    }
     return CatalogIndex.load(existing, options);
   }
 
@@ -195,8 +206,15 @@ export class CatalogPipeline implements CorpusPipeline {
     notes: string[],
   ): Promise<{ languages: string[]; dossierPath?: string }> {
     const { config, writer } = context;
+    const sourceArticle = this.pathOf(writer, config.tasks.translate.outputChannel, item, item.language);
+    const expectsCopiedSource = config.tasks.translate.enabled && config.tasks.translate.copySourceArticle;
+    if (expectsCopiedSource && !(await pathExists(sourceArticle))) {
+      notes.push(`${item.slug}: source article is missing from the catalogue output; no edition is declared (INV-8).`);
+      return { languages: [] };
+    }
     const sourceDossier = this.pathOf(writer, config.tasks.extract.outputChannel, item, item.language);
     const isBiography = await pathExists(sourceDossier);
+    if (isBiography) await this.requireJson(sourceDossier, `${item.slug}: source dossier`);
     const dossierPath = isBiography ? `/${basename(sourceDossier)}` : undefined;
 
     const languages = [item.language];
@@ -220,6 +238,7 @@ export class CatalogPipeline implements CorpusPipeline {
           notes.push(`${item.slug}: the ${lang} article exists but its dossier does not; edition not declared (INV-8).`);
           continue;
         }
+        await this.requireJson(dossier, `${item.slug}: ${lang} dossier`);
       }
       languages.push(lang);
     }
@@ -242,8 +261,18 @@ export class CatalogPipeline implements CorpusPipeline {
       const path = this.pathOf(context.writer, channel, item, lang);
       if (!(await pathExists(path))) continue;
 
-      const dossier = await readJsonFile<DossierNames>(path).catch(() => undefined);
-      if (dossier) dossiers.set(lang, dossier);
+      const dossier = await readJsonFile<DossierNames>(path).catch((error: unknown) => {
+        throw new PipelineError(`Dossier became unreadable while building the catalogue: ${path}`, {
+          cause: error,
+          details: { path },
+        });
+      });
+      if (!dossier || typeof dossier !== 'object' || Array.isArray(dossier)) {
+        throw new PipelineError(`Dossier is not a JSON object; refusing to index it: ${path}`, {
+          details: { path },
+        });
+      }
+      dossiers.set(lang, dossier);
     }
     return dossiers;
   }
@@ -389,10 +418,19 @@ export class CatalogPipeline implements CorpusPipeline {
       // display name can never be *corrected*: `mergeNameIndex` treats every
       // existing `[0]` as hand-authored — which is right, and which also makes
       // a fix to this producer invisible until the file is deleted by hand.
-      const existing =
-        config.merge && (await pathExists(path))
-          ? await readJsonFile<unknown>(path).catch(() => undefined)
-          : undefined;
+      const existing = config.merge && (await pathExists(path))
+        ? await readJsonFile<unknown>(path).catch((error: unknown) => {
+            throw new PipelineError(`Existing localized name index is unreadable; refusing to replace it: ${path}`, {
+              cause: error,
+              details: { path },
+            });
+          })
+        : undefined;
+      if (existing !== undefined && (!existing || typeof existing !== 'object' || Array.isArray(existing))) {
+        throw new PipelineError(`Existing localized name index is not an object; refusing to replace it: ${path}`, {
+          details: { path },
+        });
+      }
 
       const merged = mergeNameIndex(existing, entries, {
         titles,
@@ -421,6 +459,15 @@ export class CatalogPipeline implements CorpusPipeline {
       allowUnknownTypes: config.catalogue.allowUnknownTypes,
       refresh: config.tasks.catalog.refresh,
     };
+  }
+
+  private async requireJson(path: string, label: string): Promise<void> {
+    const value = await readJsonFile<unknown>(path).catch((error: unknown) => {
+      throw new PipelineError(`${label} is unreadable JSON: ${path}`, { cause: error, details: { path } });
+    });
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new PipelineError(`${label} is not a JSON object: ${path}`, { details: { path } });
+    }
   }
 
   private editionLanguages(config: AppConfig): string[] {

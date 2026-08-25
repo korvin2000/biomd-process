@@ -57,7 +57,7 @@ export const reasoningSchema = z.object({
   maxTokens: z.number().int().positive().optional(),
   /** Keep reasoning traces out of the parsed answer. Does not make them free. */
   exclude: z.boolean().default(true),
-});
+}).strict();
 
 export const capabilitySchema = z.enum([
   'json_schema',
@@ -82,8 +82,10 @@ export const pricingSchema = z.object({
   outputPer1M: z.number().nonnegative().default(0),
   /** Price of a cache hit on input tokens; defaults to `inputPer1M` when absent. */
   cachedInputPer1M: z.number().nonnegative().optional(),
+  /** Price of input written to a cache; defaults to the ordinary input rate. */
+  cacheWriteInputPer1M: z.number().nonnegative().optional(),
   reasoningPer1M: z.number().nonnegative().optional(),
-});
+}).strict();
 
 export const endpointSchema = z.object({
   id: identifier,
@@ -125,8 +127,20 @@ export const endpointSchema = z.object({
    * same shape, usage and finish reason included.
    */
   stream: z.boolean().default(false),
+  /** Send Responses prompt_cache_key/options/breakpoints; false for gateways that reject them. */
+  responsesPromptCache: z.boolean().default(false),
+  usage: z
+    .object({
+      /**
+       * Standard APIs report cached tokens inside prompt_tokens. Some gateways
+       * add them a second time; declare that quirk so accounting can normalize it.
+       */
+      chatCachedTokens: z.enum(['included', 'additional']).default('included'),
+    })
+    .strict()
+    .default({}),
   enabled: z.boolean().default(true),
-});
+}).strict();
 
 /**
  * Provider preference, for a gateway that serves one model name from many
@@ -179,6 +193,7 @@ export const providerRoutingSchema = z
     /** Accept only these weight quantizations, e.g. `[bf16, fp8]`. */
     quantizations: z.array(z.string().min(1)).default([]),
   })
+  .strict()
   .default({})
   .superRefine((provider, ctx) => {
     // A slug that is both required and forbidden is a typo with a silent
@@ -204,6 +219,10 @@ export const modelSchema = z.object({
   endpoint: identifier,
   /** Model name as the endpoint knows it, e.g. "openai/gpt-4o-mini". */
   model: z.string().min(1),
+  /** Wire API used for this target. Web-search tools require Responses. */
+  apiFormat: z.enum(['chat_completions', 'responses']).default('chat_completions'),
+  /** How this target obtains web results; required when `web_search` is declared. */
+  webSearchMode: z.enum(['responses_tool', 'hosted', 'online', 'plugin']).optional(),
   contextWindow: z.number().int().positive().default(128_000),
   maxOutputTokens: z.number().int().positive().default(4096),
   /** Reasoning-era models reject `max_tokens`; some gateways reject the new name. */
@@ -234,11 +253,12 @@ export const modelSchema = z.object({
       /** Escape hatch for endpoint-specific parameters. */
       extra: z.record(z.unknown()).optional(),
     })
+    .strict()
     .default({}),
   /** Relative preference for strategies that need a tie-break. Higher wins. */
   weight: z.number().default(1),
   enabled: z.boolean().default(true),
-});
+}).strict();
 
 /**
  * One routing pool: the models a task may use, plus the three things that are
@@ -287,7 +307,7 @@ const poolSchema = z.object({
    * pool does not allow, and the rest of the pool remains the fallback chain.
    */
   prefer: z.record(z.array(identifier)).default({}),
-});
+}).strict();
 
 /** A pool is either a bare model list (the shorthand) or the expanded object. */
 const poolEntrySchema = z
@@ -322,7 +342,7 @@ export const routingSchema = z.object({
   onOverflow: z.enum(['demote', 'skip']).default('demote'),
   /** Strategy-specific knobs, validated by the strategy itself. */
   options: z.record(z.unknown()).default({}),
-});
+}).strict();
 
 export type PoolConfig = z.infer<typeof poolSchema>;
 
@@ -335,13 +355,15 @@ export const llmSchema = z.object({
       timeoutMs: z.number().int().positive().default(120_000),
       params: z
         .object({
-          temperature: z.number().min(0).max(2).default(0.2),
+          temperature: z.number().min(0).max(2).optional(),
           topP: z.number().min(0).max(1).optional(),
         })
+        .strict()
         .default({}),
     })
+    .strict()
     .default({}),
-});
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Reliability
@@ -360,6 +382,7 @@ export const reliabilitySchema = z
         /** Honour a server-provided Retry-After header over the computed backoff. */
         respectRetryAfter: z.boolean().default(true),
       })
+      .strict()
       .default({}),
     fallback: z
       .object({
@@ -368,6 +391,7 @@ export const reliabilitySchema = z
         /** Try the next target when the response fails domain validation. */
         onValidationFailure: z.boolean().default(true),
       })
+      .strict()
       .default({}),
     /**
      * Fallback one level up from a call: re-run a whole **task** on a different
@@ -400,8 +424,10 @@ export const reliabilitySchema = z
             strategy: identifier.optional(),
             temperature: z.number().min(0).max(2).optional(),
           })
+          .strict()
           .default({}),
       })
+      .strict()
       .default({}),
     circuitBreaker: z
       .object({
@@ -410,8 +436,10 @@ export const reliabilitySchema = z
         resetAfterMs: z.number().int().positive().default(30_000),
         halfOpenMaxCalls: z.number().int().min(1).default(1),
       })
+      .strict()
       .default({}),
   })
+  .strict()
   .default({});
 
 // ---------------------------------------------------------------------------
@@ -427,9 +455,11 @@ export const costSchema = z
         maxTotalTokens: z.number().int().nonnegative().default(0),
         maxCostUsd: z.number().nonnegative().default(0),
       })
+      .strict()
       .default({}),
     onExceeded: z.enum(['stop', 'warn']).default('stop'),
   })
+  .strict()
   .default({});
 
 // ---------------------------------------------------------------------------
@@ -446,6 +476,7 @@ export const contextSchema = z
         /** Average characters per token; latin ≈ 4, cyrillic/cjk are denser. */
         charsPerToken: z.number().positive().default(3.2),
       })
+      .strict()
       .default({}),
     /** Output tokens reserved inside the context window before fitting input. */
     reserveOutputTokens: z.number().int().nonnegative().default(2048),
@@ -456,6 +487,7 @@ export const contextSchema = z
         headTokens: z.number().int().positive().default(1500),
         tailTokens: z.number().int().nonnegative().default(0),
       })
+      .strict()
       .default({}),
     chunking: z
       .object({
@@ -464,9 +496,11 @@ export const contextSchema = z
         /** Preferred split boundary; falls back down the list when needed. */
         splitOn: z.enum(['heading', 'paragraph', 'line']).default('heading'),
       })
+      .strict()
       .default({}),
     options: z.record(z.unknown()).default({}),
   })
+  .strict()
   .default({});
 
 // ---------------------------------------------------------------------------
@@ -488,7 +522,7 @@ export const inputSchema = z.object({
   encoding: z.enum(['utf8']).default('utf8'),
   /** 0 = no limit. Useful for a cheap first pass over a big corpus. */
   limit: z.number().int().nonnegative().default(0),
-});
+}).strict();
 
 /**
  * The name roster — a second input source, beside the corpus and the image
@@ -539,6 +573,7 @@ export const rosterSchema = z
      */
     reportConflicts: z.boolean().default(false),
   })
+  .strict()
   .default({});
 
 export const outputSchema = z.object({
@@ -569,7 +604,7 @@ export const outputSchema = z.object({
   jsonIndent: z.number().int().min(0).max(8).default(2),
   /** Trailing newline on every written artifact. */
   finalNewline: z.boolean().default(true),
-});
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Tasks
@@ -634,7 +669,7 @@ const taskBase = z.object({
   contextStrategy: identifier.optional(),
   /** Extra variables handed to this task's prompt templates. */
   promptVariables: z.record(z.unknown()).default({}),
-});
+}).strict();
 
 export const extractTaskSchema = taskBase
   .extend({
@@ -703,6 +738,7 @@ export const extractTaskSchema = taskBase
         /** Ceiling per list — a discography table can hold a hundred rows. */
         maxItems: z.number().int().positive().default(60),
       })
+      .strict()
       .default({}),
     /**
      * Write the classification a model noticed but a dossier may not keep
@@ -713,6 +749,7 @@ export const extractTaskSchema = taskBase
     emitCatalogHints: z.boolean().default(true),
     hintsChannel: z.string().default('catalogHints'),
   })
+  .strict()
   .default({});
 
 export const translateTaskSchema = taskBase
@@ -877,11 +914,11 @@ export const webSearchTaskSchema = taskBase
      * of equal standing: one is a decade-rounded approximation and the other is
      * a full date with a page behind it.
      *
-     *  - `prefer-precise` (the default) lets a **strictly more precise** sourced
+     *  - `prefer-precise` lets a **strictly more precise** sourced
      *    date replace the coarser one, disagreeing year included. A date of the
      *    same precision, or a coarser one, never overwrites anything: two
      *    day-precision dates that disagree are a real conflict, not an upgrade.
-     *  - `report` never overwrites. The dossier keeps what the article said and
+     *  - `report` (the default) never overwrites. The dossier keeps what the article said and
      *    the rejected candidate is written to the hint file with its source, so
      *    a human can settle it.
      *  - `ignore` drops a contradicting answer without recording it — the
@@ -889,7 +926,7 @@ export const webSearchTaskSchema = taskBase
      *
      * Every branch says what it did in the run notes; none of them is silent.
      */
-    onDateConflict: z.enum(['prefer-precise', 'report', 'ignore']).default('prefer-precise'),
+    onDateConflict: z.enum(['prefer-precise', 'report', 'ignore']).default('report'),
     /**
      * `lead` sends the article's opening paragraph so a namesake can be told
      * apart; `none` sends only the fact table. The article itself is never sent.
@@ -897,7 +934,7 @@ export const webSearchTaskSchema = taskBase
     includeContext: z.enum(['none', 'lead']).default('lead'),
     contextChars: z.number().int().nonnegative().default(600),
     /** `url` fills an empty `metadata.url` from the best source; `none` keeps provenance in the run log only. */
-    recordSources: z.enum(['none', 'url']).default('url'),
+    recordSources: z.enum(['none', 'url']).default('none'),
   })
   .default({});
 
@@ -953,8 +990,10 @@ export const portraitTaskSchema = z
         f: z.string().default('photos/default-female.svg'),
         mixed: z.string().default('photos/default-mixed.svg'),
       })
+      .strict()
       .default({}),
   })
+  .strict()
   .default({});
 
 /**
@@ -1038,6 +1077,7 @@ export const catalogTaskSchema = z
       .array(z.enum(['img', 'title', 'type', 'gender', 'country', 'displayNames']))
       .default([]),
   })
+  .strict()
   .default({});
 
 export const tasksSchema = z
@@ -1049,6 +1089,7 @@ export const tasksSchema = z
     portrait: portraitTaskSchema,
     catalog: catalogTaskSchema,
   })
+  .strict()
   .default({});
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1144,7 @@ export const catalogueSchema = z
      */
     allowUnknownTypes: z.boolean().default(false),
   })
+  .strict()
   .default({});
 
 /** Tasks that drive an LLM and therefore require prompt templates. */
@@ -1116,7 +1158,7 @@ export const promptsSchema = z
   .object({
     dir: z.string().default('prompts'),
     templates: z
-      .record(z.object({ system: z.string().min(1), user: z.string().min(1) }))
+      .record(z.object({ system: z.string().min(1), user: z.string().min(1) }).strict())
       .default({
         extract: { system: 'extraction/system.md', user: 'extraction/user.md' },
         websearch: { system: 'websearch/system.md', user: 'websearch/user.md' },
@@ -1127,6 +1169,7 @@ export const promptsSchema = z
     /** Variables available to every template. */
     variables: z.record(z.unknown()).default({}),
   })
+  .strict()
   .default({});
 
 export const runSchema = z
@@ -1143,6 +1186,7 @@ export const runSchema = z
     /** Skip planning a task whose output file already exists. */
     skipExistingOutputs: z.boolean().default(false),
   })
+  .strict()
   .default({});
 
 export const loggingSchema = z
@@ -1169,6 +1213,7 @@ export const loggingSchema = z
      */
     progressIntervalMs: z.number().int().min(0).default(30_000),
   })
+  .strict()
   .default({});
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1229,7 @@ export const appConfigSchema = z
         /** All relative paths resolve against this, itself relative to the config file. */
         rootDir: z.string().default('.'),
       })
+      .strict()
       .default({}),
     input: inputSchema.default({}),
     roster: rosterSchema,
@@ -1236,6 +1282,69 @@ export type Pricing = z.infer<typeof pricingSchema>;
 function crossFieldChecks(config: z.infer<typeof rawShape>, ctx: z.RefinementCtx): void {
   const endpointIds = new Set(config.llm.endpoints.map((e) => e.id));
   const modelIds = new Set(config.llm.models.map((m) => m.id));
+
+  const seenEndpoints = new Set<string>();
+  config.llm.endpoints.forEach((endpoint, index) => {
+    if (seenEndpoints.has(endpoint.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'endpoints', index, 'id'],
+        message: `Duplicate endpoint id "${endpoint.id}". Endpoint ids must be unique.`,
+      });
+    }
+    seenEndpoints.add(endpoint.id);
+  });
+
+  const seenModels = new Set<string>();
+  config.llm.models.forEach((model, index) => {
+    if (seenModels.has(model.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models', index, 'id'],
+        message: `Duplicate model id "${model.id}". Model ids must be unique across endpoints.`,
+      });
+    }
+    seenModels.add(model.id);
+    if (model.capabilities.includes('web_search') && !model.webSearchMode) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models', index, 'webSearchMode'],
+        message: `Model "${model.id}" declares web_search but does not say how search is enabled.`,
+      });
+    }
+    if (model.webSearchMode === 'responses_tool' && model.apiFormat !== 'responses') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models', index, 'apiFormat'],
+        message: `Model "${model.id}" uses responses_tool search and therefore needs apiFormat: responses.`,
+      });
+    }
+    if (
+      model.capabilities.includes('web_search') &&
+      model.apiFormat === 'responses' &&
+      model.webSearchMode !== 'responses_tool'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models', index, 'webSearchMode'],
+        message: `Responses model "${model.id}" must use webSearchMode: responses_tool for verifiable search.`,
+      });
+    }
+    if (model.webSearchMode === 'online' && !model.model.endsWith(':online')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models', index, 'model'],
+        message: `Model "${model.id}" uses webSearchMode: online but its wire model has no :online suffix.`,
+      });
+    }
+    if (model.webSearchMode === 'plugin' && !hasWebPlugin(model.params.extra)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['llm', 'models', index, 'params', 'extra', 'plugins'],
+        message: `Model "${model.id}" uses webSearchMode: plugin but params.extra.plugins has no web plugin.`,
+      });
+    }
+  });
 
   config.llm.models.forEach((model, index) => {
     if (!endpointIds.has(model.endpoint)) {
@@ -1387,20 +1496,32 @@ function crossFieldChecks(config: z.infer<typeof rawShape>, ctx: z.RefinementCtx
   if (config.tasks.websearch.enabled) {
     requireChannel('websearch', config.tasks.websearch.hintsChannel);
 
-    const searchable = config.llm.models.filter(
-      (model) => model.enabled && model.capabilities.includes('web_search'),
-    );
+    const poolName = config.tasks.websearch.pool ?? 'default';
+    const pool = routing.pools[poolName] ?? routing.pools['default'];
+    const members = pool?.models.length ? new Set(pool.models) : undefined;
+    const enabledEndpoints = new Set(config.llm.endpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => endpoint.id));
+    const searchable = config.llm.models.filter((model) => {
+      if (!model.enabled || !enabledEndpoints.has(model.endpoint)) return false;
+      if (members && !members.has(model.id)) return false;
+      return model.capabilities.includes('web_search') && model.webSearchMode !== undefined;
+    });
     if (config.tasks.websearch.requireWebSearchCapability && searchable.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ['llm', 'models'],
+        path: ['llm', 'routing', 'pools', poolName],
         message:
-          'Task "websearch" routes only to models declaring the `web_search` capability, and none does. ' +
-          'Add it to a search-capable model (a hosted search model, or one with an `:online`/web-plugin ' +
-          'gateway setting), or set tasks.websearch.requireWebSearchCapability: false.',
+          `Task "websearch" uses pool "${poolName}", but that pool has no enabled, verifiable web-search target. ` +
+          'Use apiFormat: responses with the hosted web_search tool, or an explicitly hosted/:online search model.',
       });
     }
   }
+}
+
+function hasWebPlugin(extra: Record<string, unknown> | undefined): boolean {
+  const plugins = extra?.['plugins'];
+  return Array.isArray(plugins) && plugins.some(
+    (plugin) => plugin !== null && typeof plugin === 'object' && (plugin as Record<string, unknown>)['id'] === 'web',
+  );
 }
 
 /** Shape helper so `crossFieldChecks` can be typed without a circular reference. */

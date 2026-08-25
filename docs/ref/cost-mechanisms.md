@@ -5,9 +5,10 @@ where an innocuous edit silently multiplies the corpus bill or the wall-clock.
 
 ## 1. Cache-friendly message order — `src/prompts/MessageBuilder.ts`
 
-Always `[stable system][stable instructions][volatile document]`. The document body (or the
-`{hash: text}` table) is **never** a template variable; it is appended last so provider caches
-hit across the whole corpus.
+Always `[stable system][stable instructions + cache breakpoint][volatile document message]`.
+The document body (or the `{hash: text}` table) is **never** a template variable; it is sent last
+so provider caches hit across the whole corpus. Cache reads and writes are recorded separately;
+a gateway that adds cached tokens twice is normalized by endpoint configuration.
 
 > Putting anything document-specific — a filename, a counter, a timestamp — into a template
 > breaks this for every document that follows.

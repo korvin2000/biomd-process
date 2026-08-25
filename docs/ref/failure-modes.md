@@ -30,13 +30,15 @@ its requests, and `grep ' ! ' progress.log` for the incident list.
 | **`omniroute` intermittently 404s** `No active credentials for provider: omniroute` | for a model present in its own `/v1/models` listing, working again minutes later. Once took `or-search` out mid-run, opened the breaker, and sent 37 web searches to the paid `or-osearch` with no line saying so | this is the failure `--probe` and the target-health table exist to make audible |
 | **`openai/*:online` models reject `response_format`** (measured on `openai/gpt-5.6-luna:online`) | `400 Web Search cannot be used with JSON mode`; `websearch` sends `json_object` on every call, so the paid fallback failed 100% of the time | the transport now sends `response_format` only to a target that **declares** the matching capability (`json_object` / `json_schema`). Take `json_object` off `or-osearch` and it works — the prompt asks for JSON and every parser here strips a fence |
 | **`google/gemini-3.7-flash` has no web search** | asked for Gérard Abiton's date of birth it returned `18.06.1954`, confidence 0.95, sourced to a `data.bnf.fr` URL that resolves to a record for somebody else and carries no date at all, while French Wikipedia states only the year. In the same twelve-document test it "found" more fields than any real search model, because inventing is faster than searching | keep `web_search` off its capability list. `tasks.websearch.requireWebSearchCapability` is the gate, and **it is only as honest as the capability list** |
+| **a `web_search` capability on ordinary Chat did not enable search** | `search-std` fabricated a current GitHub SHA and cited the exact API URL it had not opened; `search-mx` and `search-safe` admitted live access was unavailable | fixed: OmniRoute search targets use Responses with a required hosted tool; no completed `web_search_call` means validation failure, and model-authored URLs must occur in provider source evidence |
 
 The crosstalk damage is worth understanding rather than just preventing: on 2026-08-23 Aguado's
 date of death and Spanish Wikipedia URL were written into Anido's and Amigo's dossiers at
 confidence 0.98, citing a page about the wrong man. `translate` catches crosstalk incidentally —
 content-hash keys stop matching, surfacing as `response_format`. **`websearch` cannot**: the
-answer is well-formed sourced prose about a real guitarist, just the wrong one, and
-`onDateConflict: prefer-precise` will let it *overwrite* a correct coarser date.
+answer is well-formed sourced prose about a real guitarist, just the wrong one. Runtime tool evidence
+now rejects a non-search answer, and the live configuration records date conflicts instead of
+letting a sharper candidate overwrite a coarser article date.
 
 ## Questions that should never be asked
 

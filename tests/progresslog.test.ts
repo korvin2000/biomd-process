@@ -457,7 +457,9 @@ describe('a real run', () => {
     const lines = await read(workspace.path('progress.log'));
     const incidents = lines.filter((line) => line.includes(' ! '));
 
-    expect(incidents.some((line) => line.includes('TARGET DOWN fake:primary'))).toBe(true);
+    // An unknown per-request error falls back, but does not falsely claim the
+    // target has been disabled or poison its health circuit.
+    expect(incidents.some((line) => line.includes('TARGET DOWN fake:primary'))).toBe(false);
     expect(
       incidents.some(
         (line) => line.includes('fallback fake:primary → fake:secondary') && line.includes('the primary is unwell'),

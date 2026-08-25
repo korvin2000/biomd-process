@@ -10,8 +10,10 @@ const PER_TOKEN = 1_000_000;
  */
 export function estimateCost(usage: TokenUsage, pricing: Pricing): number {
   const cached = Math.min(usage.cachedPromptTokens, usage.promptTokens);
-  const fresh = usage.promptTokens - cached;
+  const cacheWrite = Math.min(usage.cacheWritePromptTokens ?? 0, Math.max(0, usage.promptTokens - cached));
+  const fresh = Math.max(0, usage.promptTokens - cached - cacheWrite);
   const cachedRate = pricing.cachedInputPer1M ?? pricing.inputPer1M;
+  const cacheWriteRate = pricing.cacheWriteInputPer1M ?? pricing.inputPer1M;
   const reasoningRate = pricing.reasoningPer1M ?? pricing.outputPer1M;
 
   // Providers report reasoning tokens inside completion tokens; only charge the
@@ -21,6 +23,7 @@ export function estimateCost(usage: TokenUsage, pricing: Pricing): number {
   return (
     (fresh * pricing.inputPer1M +
       cached * cachedRate +
+      cacheWrite * cacheWriteRate +
       billableCompletion * pricing.outputPer1M +
       usage.reasoningTokens * reasoningRate) /
     PER_TOKEN
@@ -37,6 +40,7 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
     cachedPromptTokens: a.cachedPromptTokens + b.cachedPromptTokens,
+    cacheWritePromptTokens: (a.cacheWritePromptTokens ?? 0) + (b.cacheWritePromptTokens ?? 0),
     reasoningTokens: a.reasoningTokens + b.reasoningTokens,
     totalTokens: a.totalTokens + b.totalTokens,
   };

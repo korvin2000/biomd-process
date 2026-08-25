@@ -1,4 +1,11 @@
-export { LlmCallError, AllTargetsFailedError, dispositionOf, isOutputTruncated } from './errors.js';
+export {
+  LlmCallError,
+  AllTargetsFailedError,
+  dispositionOf,
+  countsTowardCircuit,
+  disablesTarget,
+  isOutputTruncated,
+} from './errors.js';
 export type { LlmErrorKind, Disposition } from './errors.js';
 export { ErrorClassifier } from './ErrorClassifier.js';
 export { RetryPolicy } from './RetryPolicy.js';

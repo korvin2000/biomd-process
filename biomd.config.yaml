@@ -85,7 +85,7 @@ tasks:
     minConfidence: 0.7
     # Age threshold for querying alive/dead/unknown when death is missing.
     livenessAgeYears: 78
-    upgradePrecision: true # upgrade year/month to exact date when available
+    upgradePrecision: true # exact-date upgrades require corroboration/review
     # prefer-precise | report | ignore; equal-precision conflicts are reported.
     onDateConflict: prefer-precise
     includeContext: lead # none | lead
@@ -171,6 +171,9 @@ llm:
       maxConcurrent: 3
       minRequestSpacingMs: 350 # enforce inter-request spacing
       stream: true
+      usage:
+        # OmniRoute's Chat adapter adds cached tokens to prompt_tokens a second time.
+        chatCachedTokens: additional
 
     - id: openrouter
       baseUrl: https://openrouter.ai/api/v1
@@ -219,11 +222,16 @@ llm:
       reasoning: { enabled: false, dialect: reasoning }
       params:
         temperature: 0.36
+      # Provider pin; allowFallbacks=false fails instead of routing elsewhere.
+      # I am not sure, what is a correct way to configure provider?
         # Provider pin; allow_fallbacks=false fails instead of routing elsewhere.
         extra:
           provider:
             order: [CoreWeave, Parasail, DeepInfra]
-            allow_fallbacks: false
+            allow_fallbacks: false        
+      provider: # or this way?
+        order: [CoreWeave, Parasail, DeepInfra]
+        allowFallbacks: false        
       tags: [remote, cheap]
 
     - id: deepseek
@@ -247,47 +255,49 @@ llm:
         minP: 0.02
       tags: [remote, cheap]
 
-    # Search routing relies on declared `web_search`; declare it only for real search targets.
+    # Search routing relies on declared `web_search`; these use Responses with a required tool.
+    # The configured gateways reject web search combined with JSON mode, so omit `json_object`.
     - id: search-std
       endpoint: omniroute
       model: cx/gpt-5.6-luna
+      apiFormat: responses
+      webSearchMode: responses_tool
       contextWindow: 272000
       maxOutputTokens: 32768
-      capabilities: [json_object, tools, web_search]
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
       reasoning: { enabled: false, dialect: reasoning_effort }
-      params:
-        temperature: 0.1
       tags: [remote, search, cheap]
 
     - id: search-mx
       endpoint: omniroute
-      model: cx/gpt-5.6-luna-medium
+      model: cx/gpt-5.6-luna
+      apiFormat: responses
+      webSearchMode: responses_tool
       contextWindow: 272000
       maxOutputTokens: 32768
-      capabilities: [json_object, tools, web_search]
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      reasoning: { enabled: false, dialect: reasoning_effort }
-      params:
-        temperature: 0.2
+      reasoning: { enabled: true, effort: medium, dialect: reasoning_effort }
       tags: [remote, search, cheap]
 
     - id: search-safe
       endpoint: omniroute
-      model: cx/gpt-5.6-terra-low
+      model: cx/gpt-5.6-terra
+      apiFormat: responses
+      webSearchMode: responses_tool
       contextWindow: 272000
       maxOutputTokens: 32768
-      capabilities: [json_object, tools, web_search]
+      capabilities: [tools, web_search]
       pricing: { inputPer1M: 0, outputPer1M: 0 }
-      reasoning: { enabled: false, dialect: reasoning_effort }
-      params:
-        temperature: 0.1
+      reasoning: { enabled: true, effort: low, dialect: reasoning_effort }
       tags: [remote, search, cheap]
 
     # `:online` enables provider web search and adds a per-request search fee.
     - id: paid-search
       endpoint: openrouter
       model: openai/gpt-5.6-luna:online
+      webSearchMode: online
       contextWindow: 127000
       maxOutputTokens: 4096
       # No json_object: OpenAI web search is incompatible with JSON mode here.
@@ -316,6 +326,10 @@ llm:
       translate:
         models: [gemma-local, gpt-luna, deepseek, minimax-m3]
         strategy: least-busy
+        maxConcurrent:
+          local: 1
+          omniroute: 3
+          openrouter: 4
         # Language preferences reorder candidates; they never remove fallbacks.
         # Preferences outrank the normal pool ranking.
         prefer:

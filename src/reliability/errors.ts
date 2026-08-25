@@ -68,6 +68,26 @@ export function dispositionOf(kind: LlmErrorKind): Disposition {
   return DISPOSITIONS[kind];
 }
 
+/** Failures that say the target is unhealthy, rather than that one request was unsuitable. */
+const CIRCUIT_FAILURES = new Set<LlmErrorKind>([
+  'rate_limit',
+  'timeout',
+  'network',
+  'server',
+  'auth',
+  'quota',
+  'model_unavailable',
+]);
+
+export function countsTowardCircuit(kind: LlmErrorKind): boolean {
+  return CIRCUIT_FAILURES.has(kind);
+}
+
+/** Target-scoped failures for which another request in the same run cannot help. */
+export function disablesTarget(kind: LlmErrorKind): boolean {
+  return kind === 'auth' || kind === 'quota' || kind === 'model_unavailable';
+}
+
 export class LlmCallError extends AppError {
   readonly code = 'E_LLM_CALL';
 

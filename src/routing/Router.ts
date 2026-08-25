@@ -81,16 +81,16 @@ export class Router {
   }
 
   /**
-   * Ordered fallback chain for one logical call. Never empty as long as the pool
-   * is non-empty: when no candidate satisfies the required capabilities we fall
-   * back to the raw pool so the caller gets a real provider error instead of a
-   * silent "no route" that hides a config mistake.
+   * Ordered fallback chain for one logical call. A required capability is a
+   * safety boundary, not a preference: when no candidate satisfies it, routing
+   * returns no target rather than asking an incapable model to improvise.
    */
   select(candidates: readonly ModelTarget[], request: RoutingRequest): ModelTarget[] {
     if (candidates.length === 0) return [];
 
     const capable = candidates.filter((target) => hasCapabilities(target, request.requiredCapabilities));
-    const pool = capable.length > 0 ? capable : [...candidates];
+    if (request.requiredCapabilities.length > 0 && capable.length === 0) return [];
+    const pool = request.requiredCapabilities.length > 0 ? capable : [...candidates];
     const context = this.buildContext(pool, request);
 
     const ranked = this.strategyFor(request.pool, request.strategy).select(context);
@@ -202,6 +202,7 @@ export class Router {
             promptTokens: request.estimatedInputTokens,
             completionTokens: request.expectedOutputTokens,
             cachedPromptTokens: 0,
+            cacheWritePromptTokens: 0,
             reasoningTokens: 0,
             totalTokens: request.estimatedInputTokens + request.expectedOutputTokens,
           },

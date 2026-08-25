@@ -166,7 +166,12 @@ async function callSegment<T>(
   let parsed: ParsedOk<T> | undefined;
 
   const result = await context.llm.complete(
-    { messages, responseFormat: spec.responseFormat, correlationId: task.taskId },
+    {
+      messages,
+      responseFormat: spec.responseFormat,
+      correlationId: task.taskId,
+      promptCache: { key: `${spec.promptId}:${prompt.version}`, mode: 'explicit' },
+    },
     {
       pipeline: task.pipeline,
       pool: spec.pool,

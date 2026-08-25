@@ -60,6 +60,7 @@ export function printPlan(app: App, plan: JobPlan): void {
             promptTokens: inputTokens,
             completionTokens: tasks.length * 1024,
             cachedPromptTokens: 0,
+            cacheWritePromptTokens: 0,
             reasoningTokens: 0,
             totalTokens: inputTokens,
           },
@@ -142,7 +143,11 @@ export function printSummary(
       : '';
   OUT.write(
     `Tokens      ${formatTokens(snapshot.promptTokens)} in ` +
-      `(${formatTokens(snapshot.cachedPromptTokens)} cached) · ` +
+      `(${formatTokens(snapshot.cachedPromptTokens)} cached` +
+      (snapshot.cacheWritePromptTokens > 0
+        ? `, ${formatTokens(snapshot.cacheWritePromptTokens)} cache-write`
+        : '') +
+      ') · ' +
       `${formatTokens(snapshot.completionTokens)} out${reasoning}\n`,
   );
   OUT.write(`Cost        ${formatCost(snapshot.costUsd)}\n`);

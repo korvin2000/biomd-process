@@ -29,13 +29,17 @@ export class MessageBuilder {
     const stable = sections.filter((section) => !section.volatile);
     const volatileSections = sections.filter((section) => section.volatile);
 
-    const userContent = [prompt.instructions, ...[...stable, ...volatileSections].map(renderSection)]
+    const stableContent = [prompt.instructions, ...stable.map(renderSection)]
       .filter((part) => part.length > 0)
       .join('\n\n');
+    const volatileContent = volatileSections.map(renderSection).filter(Boolean).join('\n\n');
 
     return [
-      { role: 'system', content: prompt.system, cacheBreakpoint: true },
-      { role: 'user', content: userContent },
+      { role: 'system', content: prompt.system },
+      // The explicit breakpoint includes the system message and every stable
+      // instruction while excluding the per-document payload that follows.
+      { role: 'user', content: stableContent, cacheBreakpoint: true },
+      ...(volatileContent ? [{ role: 'user' as const, content: volatileContent }] : []),
     ];
   }
 }

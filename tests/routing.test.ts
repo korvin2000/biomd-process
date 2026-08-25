@@ -118,9 +118,9 @@ describe('routing strategies', () => {
     expect(order.map((t) => t.modelId)).toEqual(['structured']);
   });
 
-  it('falls back to the raw pool when nothing has the capability, rather than routing nowhere', () => {
+  it('refuses to route when no target has a required capability', () => {
     const order = router('cost-optimized').select([cheap, mid], request(1000, ['vision']));
-    expect(order.length).toBe(2);
+    expect(order).toEqual([]);
   });
 
   it('accepts a custom strategy registered by id', () => {

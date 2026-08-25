@@ -10,7 +10,7 @@ import {
   type WorkItem,
 } from '../../core/types.js';
 import { mergeDossier, orderDossier, sanitizeDossier, type DossierOptions } from '../../domain/dossier.js';
-import { sharpensDate } from '../../domain/values.js';
+import { normalizeUrl, sharpensDate } from '../../domain/values.js';
 import type { CatalogHints, Dossier } from '../../domain/types.js';
 import type { Artifact } from '../../io/types.js';
 import { MessageBuilder } from '../../prompts/MessageBuilder.js';
@@ -82,6 +82,7 @@ export class WebSearchPipeline implements DocumentPipeline {
           onDateConflict: config.onDateConflict,
           includeContext: config.includeContext,
           recordSources: config.recordSources,
+          promptVariables: config.promptVariables,
           datePrecision: context.config.catalogue.datePrecision,
           collective: resolveEnsemble(readTitle(item.content).lines.join(' | ')).group,
         },
@@ -188,7 +189,13 @@ export class WebSearchPipeline implements DocumentPipeline {
 
     let parsed: WebAnswer | undefined;
     const result = await context.llm.complete(
-      { messages, responseFormat: { type: 'json_object' }, correlationId: task.taskId },
+      {
+        messages,
+        responseFormat: { type: 'json_object' },
+        correlationId: task.taskId,
+        webSearch: { required: true, searchContextSize: 'medium' },
+        promptCache: { key: `${PIPELINE_ID}:${prompt.version}`, mode: 'explicit' },
+      },
       {
         pipeline: task.pipeline,
         pool: config.pool,
@@ -198,6 +205,19 @@ export class WebSearchPipeline implements DocumentPipeline {
         expectedOutputTokens: EXPECTED_OUTPUT_TOKENS,
         signal: context.signal,
         validate: (response) => {
+          if (!response.webSearch?.performed) {
+            parsed = undefined;
+            return {
+              ok: false,
+              retryable: false,
+              reason: 'provider returned no completed web_search_call or citation evidence',
+            };
+          }
+          const verifiedSources = new Set(
+            response.webSearch.sources
+              .map((source) => normalizeUrl(source.url))
+              .filter((source): source is string => source !== undefined),
+          );
           parsed = parseWebAnswer(response.text, {
             asked,
             datePrecision: context.config.catalogue.datePrecision,
@@ -207,6 +227,8 @@ export class WebSearchPipeline implements DocumentPipeline {
             // The dossier being completed is this item's own edition, so a
             // prose value belongs in its language.
             language: item.language,
+            verifiedSources,
+            requireVerifiedSource: config.requireSource,
             ...(hints.country ? { country: hints.country } : {}),
           });
           if (!parsed) return { ok: false, reason: 'the answer was not a JSON object' };

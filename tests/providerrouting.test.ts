@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { modelSchema, providerRoutingSchema } from '../src/config/schema.js';
-import { buildRequestBody, toWireProvider } from '../src/llm/OpenAiCompatibleClient.js';
+import { buildRequestBody, buildResponsesRequestBody, toWireProvider } from '../src/llm/OpenAiCompatibleClient.js';
 import type { EndpointConfig } from '../src/config/schema.js';
 import type { ModelTarget } from '../src/llm/types.js';
 
@@ -26,6 +26,8 @@ const endpoint: EndpointConfig = {
   requestsPerMinute: 0,
   minRequestSpacingMs: 0,
   stream: false,
+  responsesPromptCache: false,
+  usage: { chatCachedTokens: 'included' },
   enabled: true,
 };
 
@@ -48,6 +50,7 @@ function target(overrides: Partial<ModelTarget> = {}): ModelTarget {
     timeoutMs: 1000,
     endpoint,
     ...overrides,
+    apiFormat: overrides.apiFormat ?? 'chat_completions',
   };
 }
 
@@ -84,6 +87,40 @@ describe('toWireProvider', () => {
   it('keeps allowFallbacks: false, which is a value and not an absence', () => {
     const wire = toWireProvider({ order: ['x'], only: [], ignore: [], quantizations: [], allowFallbacks: false });
     expect(wire).toHaveProperty('allow_fallbacks', false);
+  });
+});
+
+describe('Responses request body', () => {
+  it('requires web search and marks the end of the stable cache prefix', () => {
+    const body = buildResponsesRequestBody(
+      target({
+        apiFormat: 'responses',
+        webSearchMode: 'responses_tool',
+        capabilities: ['json_object', 'web_search'],
+        endpoint: { ...endpoint, responsesPromptCache: true },
+      }),
+      {
+        messages: [
+          { role: 'system', content: 'stable system' },
+          { role: 'user', content: 'stable instructions', cacheBreakpoint: true },
+          { role: 'user', content: 'volatile person' },
+        ],
+        responseFormat: { type: 'json_object' },
+        webSearch: { required: true, searchContextSize: 'medium' },
+        promptCache: { key: 'websearch:v1', mode: 'explicit' },
+      },
+      true,
+    );
+
+    expect(body['tools']).toEqual([{ type: 'web_search', search_context_size: 'medium' }]);
+    expect(body['tool_choice']).toBe('required');
+    expect(body['prompt_cache_key']).toBe('websearch:v1');
+    expect(body['prompt_cache_options']).toEqual({ mode: 'explicit' });
+    expect(body['text']).toEqual({ format: { type: 'json_object' } });
+    const input = body['input'] as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    expect(input[0]?.role).toBe('developer');
+    expect(input[1]?.content[0]?.['prompt_cache_breakpoint']).toEqual({ mode: 'explicit' });
+    expect(input[2]?.content[0]?.['prompt_cache_breakpoint']).toBeUndefined();
   });
 });
 

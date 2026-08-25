@@ -155,6 +155,29 @@ describe('reading a web answer', () => {
     expect(answer?.rejected.join(' ')).toContain('below 0.70');
   });
 
+  it('refuses missing confidence instead of treating it as certainty', () => {
+    const answer = parseWebAnswer(
+      JSON.stringify({ born: { value: '21.02.1893', source: 'https://example.org/a' } }),
+      { ...answerOptions, asked: ['born'] },
+    );
+    expect(answer?.values).toEqual([]);
+    expect(answer?.rejected[0]).toContain('confidence is missing');
+  });
+
+  it('accepts only a source present in provider search evidence', () => {
+    const answer = parseWebAnswer(
+      JSON.stringify({ born: { value: '21.02.1893', source: 'https://invented.example/a', confidence: 0.99 } }),
+      {
+        ...answerOptions,
+        asked: ['born'],
+        requireVerifiedSource: true,
+        verifiedSources: new Set(['https://consulted.example/a']),
+      },
+    );
+    expect(answer?.values).toEqual([]);
+    expect(answer?.rejected[0]).toContain('not present in provider web-search evidence');
+  });
+
   it('marks a date that contradicts the record instead of discarding it', () => {
     // Not a rejection: an article that says "about 1950" and a cited 25.07.1949
     // are a fact worth surfacing. Which one wins is `onDateConflict`'s call, and

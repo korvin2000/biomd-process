@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { collectStream } from '../src/llm/OpenAiCompatibleClient.js';
+import {
+  collectResponsesStream,
+  collectStream,
+  mapChatUsage,
+  mapResponsesUsage,
+} from '../src/llm/OpenAiCompatibleClient.js';
 
 /**
  * Reassembling a streamed completion.
@@ -67,5 +72,58 @@ describe('collectStream', () => {
 
     expect(completion.usage).toBeUndefined();
     expect(completion.choices?.[0]?.finish_reason).toBeNull();
+  });
+});
+
+describe('Responses streaming and usage', () => {
+  it('keeps the completed response containing tool evidence and usage', async () => {
+    const response = await collectResponsesStream(
+      chunks(
+        { type: 'response.output_text.delta', delta: '{"born":' },
+        {
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [
+              { type: 'web_search_call', status: 'completed', action: { type: 'open_page', url: 'https://example.org/a' } },
+              { type: 'message', content: [{ type: 'output_text', text: '{"born":"1893"}' }] },
+            ],
+            usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+          },
+        },
+      ),
+    );
+    expect(response.status).toBe('completed');
+    expect(response.output?.[0]?.type).toBe('web_search_call');
+    expect(response.usage?.total_tokens).toBe(110);
+  });
+
+  it('normalizes OmniRoute Chat cache tokens that were added twice', () => {
+    const usage = mapChatUsage(
+      {
+        prompt_tokens: 26_271,
+        completion_tokens: 5,
+        total_tokens: 26_276,
+        prompt_tokens_details: { cached_tokens: 13_056 },
+      },
+      'additional',
+    );
+    expect(usage.promptTokens).toBe(13_215);
+    expect(usage.cachedPromptTokens).toBe(13_056);
+    expect(usage.totalTokens).toBe(13_220);
+  });
+
+  it('records Responses cache reads and writes separately', () => {
+    const usage = mapResponsesUsage({
+      input_tokens: 1200,
+      output_tokens: 20,
+      total_tokens: 1220,
+      input_tokens_details: { cached_tokens: 800, cache_write_tokens: 300 },
+    });
+    expect(usage).toMatchObject({
+      promptTokens: 1200,
+      cachedPromptTokens: 800,
+      cacheWritePromptTokens: 300,
+    });
   });
 });

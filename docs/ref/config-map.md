@@ -40,8 +40,9 @@ Both because several tasks have to agree about them.
 | `llm.routing.pools.<pool>.maxConcurrent.<endpoint>` | `{}` | a **lane**: this pool's share of that endpoint's cap. The schema refuses lanes summing above the cap |
 | `llm.routing.pools.<pool>.prefer.<variant>` | `{}` | a language naming its own model. Reordering, never a filter; naming a model outside the pool is a **config error** |
 | `llm.routing.onOverflow` | `demote` | `demote` ranks a non-fitting target last but still calls it; `skip` drops it |
-| `llm.models[].contextWindow` · `maxOutputTokens` · `capabilities` | — | a target must both **hold** the prompt and **emit** the answer; `capabilities` is what the transport and the `web_search` gate believe |
-| `llm.endpoints[].maxConcurrent` · `minRequestSpacingMs` · `stream` | `0` · `0` · `false` | facts about the provider. **`stream: true` is a correctness setting on `omniroute`** — see [failure-modes](failure-modes.md#endpoint-faults) |
+| `llm.models[].apiFormat` · `webSearchMode` · `capabilities` | `chat_completions` · — · `[]` | `responses_tool` requires Responses; `online` requires a `:online` model; `plugin` requires `params.extra.plugins[].id: web` |
+| `llm.models[].contextWindow` · `maxOutputTokens` | — | a target must both **hold** the prompt and **emit** the answer |
+| `llm.endpoints[].maxConcurrent` · `minRequestSpacingMs` · `stream` · `usage.chatCachedTokens` | `0` · `0` · `false` · `included` | provider facts. OmniRoute Chat uses `additional` cache accounting; **`stream: true` is a correctness setting** |
 | `context.strategy` | `truncation-first` | the escalation ladder's starting rung |
 | `reliability.taskFallback` | — | re-run a task whose *answer* was wrong; `lastAttempt.strategy` / `.temperature` |
 
@@ -85,7 +86,7 @@ A task declaring `mergesOutput` (`catalog`, `websearch`) is exempt from the firs
 |---|---|---|
 | `requireWebSearchCapability` | `true` | only as honest as the capability list |
 | `livenessAgeYears` | `78` | born this long ago with no `died` → the absence becomes a question |
-| `onDateConflict` | `prefer-precise` | vs `report` (writes `conflicts[]` to the hint file) / `ignore` |
+| `onDateConflict` | `report` | keeps the authored value and writes `conflicts[]`; `prefer-precise` is an explicit overwrite policy |
 | `contextChars` | `600` | the lead paragraph, for telling namesakes apart |
 
 ### `tasks.portrait`

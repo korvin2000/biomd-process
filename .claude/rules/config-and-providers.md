@@ -15,10 +15,10 @@ throughput: [docs/ref/throughput.md](../../docs/ref/throughput.md).
 `src/config/schema.ts` is the authority on every setting, and carries a doc comment on nearly all
 of them. Read the comment, not just the type.
 
-- **A declared capability is believed.** The transport sends `response_format` only to a target
-  declaring `json_object`/`json_schema`, and `tasks.websearch` routes only on declared
-  `web_search`. Declaring a capability a model lacks is how you get confident fiction with a
-  fabricated citation — nothing downstream can catch it.
+- **A declared capability is only the routing gate.** A `web_search` model must also declare
+  `webSearchMode`; Responses-tool targets must use `apiFormat: responses`. Runtime validation
+  requires a completed provider search call and source evidence, so model-authored URLs alone are
+  never proof of browsing.
 - **A pool of one has no fallback chain.** `All 1 model target(s) failed` is what that shape looks
   like from the outside.
 - **Lanes divide an endpoint's cap; they never raise one.** `config check` rejects lanes summing

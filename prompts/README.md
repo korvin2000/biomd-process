@@ -32,9 +32,10 @@ worth knowing before editing one:
   before an open parenthesis. Start with a keyword instead —
   `<% var card = it.fields || []; card.forEach(… %>`.
 
-**System = stable, user = instructions, payload = appended.** The document body —
+**System = stable, user = instructions, payload = a later message.** The document body —
 or, in the batch modes, the `{hash: text}` table — is *never* a template variable.
-`MessageBuilder` appends it after everything the templates produce, which keeps
+`MessageBuilder` puts it in a separate final user message after everything the
+templates produce. The stable user message carries the cache breakpoint, which keeps
 the prompt-cache prefix byte-identical across the whole corpus. Putting anything
 document-specific into a template — a filename, a counter, a timestamp — silently
 destroys that and multiplies input cost.

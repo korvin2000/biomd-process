@@ -10,6 +10,7 @@ import type {
   ModelTarget,
   ResponseFormat,
   TokenUsage,
+  WebSearchSource,
 } from './types.js';
 import { EMPTY_USAGE } from './types.js';
 
@@ -28,10 +29,12 @@ export class OpenAiCompatibleClient implements LlmClient {
   readonly endpointId: string;
   private readonly client: OpenAI;
   private readonly stream: boolean;
+  private readonly chatCachedTokens: EndpointConfig['usage']['chatCachedTokens'];
 
   constructor(endpoint: EndpointConfig) {
     this.endpointId = endpoint.id;
     this.stream = endpoint.stream;
+    this.chatCachedTokens = endpoint.usage.chatCachedTokens;
     this.client = new OpenAI({
       baseURL: endpoint.baseUrl,
       // Local gateways often accept any non-empty key; the SDK requires one.
@@ -48,6 +51,16 @@ export class OpenAiCompatibleClient implements LlmClient {
     request: CompletionRequest,
     options: { signal?: AbortSignal; timeoutMs: number },
   ): Promise<CompletionResponse> {
+    return target.apiFormat === 'responses'
+      ? this.completeResponses(target, request, options)
+      : this.completeChat(target, request, options);
+  }
+
+  private async completeChat(
+    target: ModelTarget,
+    request: CompletionRequest,
+    options: { signal?: AbortSignal; timeoutMs: number },
+  ): Promise<CompletionResponse> {
     const startedAt = Date.now();
     const body = buildRequestBody(target, request, this.stream);
 
@@ -58,17 +71,48 @@ export class OpenAiCompatibleClient implements LlmClient {
     const completion = this.stream
       ? await collectStream(raw as unknown as AsyncIterable<ChatCompletionChunkLike>)
       : (raw as ChatCompletionLike);
+    const evidence = chatWebSearchEvidence(completion);
 
     return {
       text: extractText(completion),
       finishReason: mapFinishReason(completion.choices?.[0]?.finish_reason),
-      usage: mapUsage(completion.usage),
+      usage: mapChatUsage(completion.usage, this.chatCachedTokens),
       reportedModel: completion.model ?? target.modelName,
       latencyMs: Date.now() - startedAt,
       providerCostUsd: typeof completion.usage?.cost === 'number' ? completion.usage.cost : undefined,
+      ...(evidence ? { webSearch: evidence } : {}),
     };
   }
 
+  private async completeResponses(
+    target: ModelTarget,
+    request: CompletionRequest,
+    options: { signal?: AbortSignal; timeoutMs: number },
+  ): Promise<CompletionResponse> {
+    const startedAt = Date.now();
+    const body = buildResponsesRequestBody(target, request, this.stream);
+    const raw = await this.client.responses.create(body as never, {
+      signal: options.signal,
+      timeout: options.timeoutMs,
+    });
+    const response = this.stream
+      ? await collectResponsesStream(raw as unknown as AsyncIterable<ResponseStreamEventLike>)
+      : (raw as unknown as ResponseLike);
+    if (response.status === 'failed') {
+      throw new Error(response.error?.message ?? 'Responses API request failed');
+    }
+    const evidence = responsesWebSearchEvidence(response);
+
+    return {
+      text: extractResponsesText(response),
+      finishReason: mapResponsesFinishReason(response),
+      usage: mapResponsesUsage(response.usage),
+      reportedModel: response.model ?? target.modelName,
+      latencyMs: Date.now() - startedAt,
+      providerCostUsd: typeof response.usage?.cost === 'number' ? response.usage.cost : undefined,
+      ...(evidence ? { webSearch: evidence } : {}),
+    };
+  }
 }
 
 
@@ -119,7 +163,62 @@ export function buildRequestBody(
   const provider = toWireProvider(target.provider);
   if (provider) body['provider'] = provider;
 
-  Object.assign(body, reasoningFields(target), params.extra ?? {}, target.params.extra ?? {});
+  if (request.webSearch && target.webSearchMode === 'online') {
+    body['web_search_options'] = {
+      ...(request.webSearch.searchContextSize ? { search_context_size: request.webSearch.searchContextSize } : {}),
+    };
+  }
+
+  Object.assign(body, reasoningFields(target), target.params.extra ?? {}, params.extra ?? {});
+  return body;
+}
+
+/** Responses API body. Search tools and explicit prompt-cache breakpoints live here. */
+export function buildResponsesRequestBody(
+  target: ModelTarget,
+  request: CompletionRequest,
+  stream: boolean,
+): Record<string, unknown> {
+  const params = request.params ?? {};
+  const body: Record<string, unknown> = {
+    model: target.modelName,
+    input: request.messages.map((message) => toResponsesMessage(message, target.endpoint.responsesPromptCache)),
+    stream,
+    store: false,
+    max_output_tokens: Math.min(params.maxOutputTokens ?? target.maxOutputTokens, target.maxOutputTokens),
+  };
+
+  assignDefined(body, {
+    temperature: params.temperature,
+    top_p: params.topP,
+    frequency_penalty: params.frequencyPenalty,
+    presence_penalty: params.presencePenalty,
+  });
+
+  const format = toResponsesTextFormat(request.responseFormat, target);
+  if (format) body['text'] = { format };
+
+  const reasoning = responsesReasoning(target);
+  if (reasoning) body['reasoning'] = reasoning;
+
+  if (request.webSearch && target.webSearchMode === 'responses_tool') {
+    body['tools'] = [
+      {
+        type: 'web_search',
+        ...(request.webSearch.searchContextSize ? { search_context_size: request.webSearch.searchContextSize } : {}),
+      },
+    ];
+    body['tool_choice'] = request.webSearch.required ? 'required' : 'auto';
+    body['include'] = ['web_search_call.action.sources'];
+  }
+
+  if (target.endpoint.responsesPromptCache) {
+    if (request.promptCache?.key) body['prompt_cache_key'] = request.promptCache.key;
+    if (request.promptCache?.mode) body['prompt_cache_options'] = { mode: request.promptCache.mode };
+  }
+  const provider = toWireProvider(target.provider);
+  if (provider) body['provider'] = provider;
+  Object.assign(body, target.params.extra ?? {}, params.extra ?? {});
   return body;
 }
 
@@ -149,6 +248,21 @@ function toWireMessage(message: ChatMessage): { role: string; content: string } 
   return { role: message.role, content: message.content };
 }
 
+function toResponsesMessage(message: ChatMessage, explicitCacheControls: boolean): Record<string, unknown> {
+  return {
+    role: message.role === 'system' ? 'developer' : message.role,
+    content: [
+      {
+        type: 'input_text',
+        text: message.content,
+        ...(explicitCacheControls && message.cacheBreakpoint
+          ? { prompt_cache_breakpoint: { mode: 'explicit' } }
+          : {}),
+      },
+    ],
+  };
+}
+
 /**
  * `response_format`, but only for a target that says it understands one.
  *
@@ -176,6 +290,23 @@ export function toWireResponseFormat(format: ResponseFormat | undefined, target:
   return {
     type: 'json_schema',
     json_schema: { name: format.name, schema: format.schema, strict: format.strict ?? true },
+  };
+}
+
+export function toResponsesTextFormat(
+  format: ResponseFormat | undefined,
+  target: ModelTarget,
+): Record<string, unknown> | undefined {
+  if (!format || format.type === 'text') return undefined;
+  if (format.type === 'json_object') {
+    return target.capabilities.includes('json_object') ? { type: 'json_object' } : undefined;
+  }
+  if (!target.capabilities.includes('json_schema')) return undefined;
+  return {
+    type: 'json_schema',
+    name: format.name,
+    schema: format.schema,
+    strict: format.strict ?? true,
   };
 }
 
@@ -219,6 +350,14 @@ export function reasoningFields(target: Pick<ModelTarget, 'reasoning'>): Record<
   }
 }
 
+function responsesReasoning(target: Pick<ModelTarget, 'reasoning'>): Record<string, unknown> | undefined {
+  const { reasoning } = target;
+  if (reasoning.dialect === 'none') return undefined;
+  return {
+    effort: reasoning.enabled ? reasoning.effort : 'none',
+  };
+}
+
 function effortToBudget(effort: string): number {
   return { minimal: 1024, low: 2048, medium: 8192, high: 16384 }[effort] ?? 8192;
 }
@@ -238,29 +377,81 @@ interface UsageLike {
   completion_tokens?: number;
   total_tokens?: number;
   cost?: number;
-  prompt_tokens_details?: { cached_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
   cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+interface CitationLike {
+  type?: string;
+  url?: string;
+  title?: string;
+  url_citation?: { url?: string; title?: string };
 }
 
 interface ChatCompletionLike {
   model?: string;
   usage?: UsageLike;
+  citations?: Array<string | CitationLike>;
   choices?: Array<{
     finish_reason?: string | null;
-    message?: { content?: string | Array<{ type?: string; text?: string }> | null };
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }> | null;
+      annotations?: CitationLike[];
+    };
   }>;
 }
 
 interface ChatCompletionChunkLike {
   model?: string;
   usage?: UsageLike | null;
+  citations?: Array<string | CitationLike>;
   choices?: Array<{
     finish_reason?: string | null;
-    delta?: { content?: string | null };
+    delta?: { content?: string | null; annotations?: CitationLike[] };
     /** Some gateways emit a whole message on the final chunk instead of a delta. */
-    message?: { content?: string | null };
+    message?: { content?: string | null; annotations?: CitationLike[] };
   }>;
+}
+
+interface ResponsesUsageLike {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
+  input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+  output_tokens_details?: { reasoning_tokens?: number };
+}
+
+interface ResponseOutputItemLike {
+  type?: string;
+  status?: string;
+  action?: {
+    type?: string;
+    url?: string;
+    sources?: Array<string | CitationLike>;
+  };
+  content?: Array<{
+    type?: string;
+    text?: string;
+    annotations?: CitationLike[];
+  }>;
+}
+
+interface ResponseLike {
+  model?: string;
+  status?: string;
+  error?: { message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+  usage?: ResponsesUsageLike;
+  output?: ResponseOutputItemLike[];
+}
+
+interface ResponseStreamEventLike {
+  type?: string;
+  delta?: string;
+  response?: ResponseLike;
 }
 
 /**
@@ -280,14 +471,19 @@ export async function collectStream(
   let finishReason: string | null | undefined;
   let usage: UsageLike | undefined;
   let model: string | undefined;
+  let citations: Array<string | CitationLike> | undefined;
+  let annotations: CitationLike[] | undefined;
 
   for await (const chunk of stream) {
     if (chunk.model) model = chunk.model;
     if (chunk.usage) usage = chunk.usage;
+    if (chunk.citations?.length) citations = chunk.citations;
 
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     if (choice.finish_reason) finishReason = choice.finish_reason;
+    if (choice.delta?.annotations?.length) annotations = choice.delta.annotations;
+    if (choice.message?.annotations?.length) annotations = choice.message.annotations;
     if (choice.delta?.content) delta += choice.delta.content;
     else if (choice.message?.content) whole += choice.message.content;
   }
@@ -295,7 +491,27 @@ export async function collectStream(
   return {
     model,
     usage,
-    choices: [{ finish_reason: finishReason ?? null, message: { content: delta || whole } }],
+    ...(citations ? { citations } : {}),
+    choices: [{
+      finish_reason: finishReason ?? null,
+      message: { content: delta || whole, ...(annotations ? { annotations } : {}) },
+    }],
+  };
+}
+
+export async function collectResponsesStream(stream: AsyncIterable<ResponseStreamEventLike>): Promise<ResponseLike> {
+  let completed: ResponseLike | undefined;
+  let text = '';
+
+  for await (const event of stream) {
+    if (event.type === 'response.output_text.delta' && event.delta) text += event.delta;
+    if (event.type === 'response.completed' && event.response) completed = event.response;
+    if (event.type === 'response.failed' && event.response) completed = event.response;
+  }
+  if (completed) return completed;
+  return {
+    status: 'incomplete',
+    output: [{ type: 'message', content: [{ type: 'output_text', text }] }],
   };
 }
 
@@ -310,18 +526,115 @@ function extractText(completion: ChatCompletionLike): string {
   return '';
 }
 
-function mapUsage(usage: UsageLike | undefined): TokenUsage {
+export function mapChatUsage(
+  usage: UsageLike | undefined,
+  cachedMode: EndpointConfig['usage']['chatCachedTokens'],
+): TokenUsage {
   if (!usage) return { ...EMPTY_USAGE };
 
-  const promptTokens = usage.prompt_tokens ?? 0;
+  const reportedPromptTokens = usage.prompt_tokens ?? 0;
   const completionTokens = usage.completion_tokens ?? 0;
+  const cachedPromptTokens = usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0;
+  const cacheWritePromptTokens =
+    usage.prompt_tokens_details?.cache_write_tokens ?? usage.cache_creation_input_tokens ?? 0;
+  const promptTokens =
+    cachedMode === 'additional'
+      ? Math.max(0, reportedPromptTokens - cachedPromptTokens)
+      : reportedPromptTokens;
   return {
     promptTokens,
     completionTokens,
-    cachedPromptTokens: usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens ?? 0,
+    cachedPromptTokens,
+    cacheWritePromptTokens,
     reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
+    totalTokens:
+      cachedMode === 'additional'
+        ? promptTokens + completionTokens
+        : (usage.total_tokens ?? promptTokens + completionTokens),
+  };
+}
+
+export function mapResponsesUsage(usage: ResponsesUsageLike | undefined): TokenUsage {
+  if (!usage) return { ...EMPTY_USAGE };
+  const promptTokens = usage.input_tokens ?? 0;
+  const completionTokens = usage.output_tokens ?? 0;
+  return {
+    promptTokens,
+    completionTokens,
+    cachedPromptTokens: usage.input_tokens_details?.cached_tokens ?? 0,
+    cacheWritePromptTokens: usage.input_tokens_details?.cache_write_tokens ?? 0,
+    reasoningTokens: usage.output_tokens_details?.reasoning_tokens ?? 0,
     totalTokens: usage.total_tokens ?? promptTokens + completionTokens,
   };
+}
+
+function extractResponsesText(response: ResponseLike): string {
+  return (response.output ?? [])
+    .flatMap((item) => item.content ?? [])
+    .filter((content) => content.type === undefined || content.type === 'output_text')
+    .map((content) => content.text ?? '')
+    .join('');
+}
+
+function mapResponsesFinishReason(response: ResponseLike): FinishReason {
+  if (response.status === 'completed') return 'stop';
+  const reason = response.incomplete_details?.reason ?? '';
+  if (/max_output_tokens|length/i.test(reason)) return 'length';
+  if (/content_filter|safety/i.test(reason)) return 'content_filter';
+  return 'unknown';
+}
+
+function chatWebSearchEvidence(completion: ChatCompletionLike): { performed: boolean; sources: WebSearchSource[] } | undefined {
+  const sources = [
+    ...(completion.citations ?? []).map(sourceOf),
+    ...(completion.choices?.[0]?.message?.annotations ?? []).map(sourceOf),
+  ].filter((source): source is WebSearchSource => source !== undefined);
+  const unique = dedupeSources(sources);
+  return unique.length > 0 ? { performed: true, sources: unique } : undefined;
+}
+
+function responsesWebSearchEvidence(
+  response: ResponseLike,
+): { performed: boolean; sources: WebSearchSource[] } | undefined {
+  const calls = (response.output ?? []).filter((item) => item.type === 'web_search_call');
+  if (calls.length === 0) return undefined;
+
+  const sources: WebSearchSource[] = [];
+  for (const call of calls) {
+    const direct = sourceOf(call.action?.url);
+    if (direct) sources.push(direct);
+    for (const source of call.action?.sources ?? []) {
+      const parsed = sourceOf(source);
+      if (parsed) sources.push(parsed);
+    }
+  }
+  for (const item of response.output ?? []) {
+    for (const content of item.content ?? []) {
+      for (const annotation of content.annotations ?? []) {
+        const source = sourceOf(annotation);
+        if (source) sources.push(source);
+      }
+    }
+  }
+  return {
+    performed: calls.some((call) => call.status === undefined || call.status === 'completed'),
+    sources: dedupeSources(sources),
+  };
+}
+
+function sourceOf(value: string | CitationLike | undefined): WebSearchSource | undefined {
+  if (typeof value === 'string') return value ? { url: value } : undefined;
+  if (!value) return undefined;
+  const url = value.url_citation?.url ?? value.url;
+  if (!url) return undefined;
+  const title = value.url_citation?.title ?? value.title;
+  return { url, ...(title ? { title } : {}) };
+}
+
+function dedupeSources(sources: readonly WebSearchSource[]): WebSearchSource[] {
+  const unique = new Map<string, WebSearchSource>();
+  for (const source of sources) if (!unique.has(source.url)) unique.set(source.url, source);
+  return [...unique.values()];
 }
 
 function mapFinishReason(reason: string | null | undefined): FinishReason {
