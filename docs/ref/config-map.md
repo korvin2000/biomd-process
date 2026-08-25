@@ -31,8 +31,10 @@ Both because several tasks have to agree about them.
 | Key | Default | What it decides |
 |---|---|---|
 | `run.concurrency` | `4` | tasks in flight |
-| `cost.budgetUsd` | — | hard spend ceiling; `BudgetGuard` checks before each call |
-| `cost.maxRequests` | `0` (off) | request ceiling |
+| `cost.budget.maxCostUsd` | `0` (unlimited) | hard spend ceiling; `BudgetGuard` checks before each call. CLI: `--budget-usd` |
+| `cost.budget.maxRequests` | `0` (unlimited) | request ceiling. CLI: `--max-requests` |
+| `cost.budget.maxTotalTokens` | `0` (unlimited) | token ceiling across the run |
+| `cost.onExceeded` | `stop` | `stop` ends the run; `warn` logs and continues |
 | `llm.routing.strategy` | `cost-optimized` | the **default a pool inherits**, not the only answer |
 | `llm.routing.pools.<pool>.strategy` | inherits | per-pool. Extraction is scarce in money, translation in wall-clock — `least-busy` is the translation answer |
 | `llm.routing.pools.<pool>.maxConcurrent.<endpoint>` | `{}` | a **lane**: this pool's share of that endpoint's cap. The schema refuses lanes summing above the cap |

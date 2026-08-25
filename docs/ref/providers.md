@@ -8,6 +8,13 @@ Settings and defaults: [config-map.md](config-map.md) · what to do when one mis
 [failure-modes.md](failure-modes.md) · getting all three busy at once:
 [throughput.md](throughput.md).
 
+> **Target ids differ between the two config files.** The live `biomd.config.yaml` uses
+> `gemma-local` · `gpt-luna` · `deepseek` · `minimax-m3` · `search-std` · `search-mx` ·
+> `search-safe` · `paid-search`; the annotated `biomd.config.yaml.example` still uses the older
+> `local-small` · `or-luna` · `or-cheap` · `or-search{,2,3}` · `or-osearch` · `or-search-quality`.
+> Historical incidents below keep the id they happened under. **Free vs paid is a property of the
+> endpoint, not of the id — read `pricing`.**
+
 > **Sourcing.** Rows marked *(gateway)* were read from the deployment's own `/v1/models` or
 > measured on the wire and written up in `reports/`. Rows marked *(upstream)* come from the
 > project's public documentation and describe defaults, which a local install may have changed.

@@ -178,7 +178,17 @@ is nearly always the portrait matcher resolving a family name rather than a pers
 `biomd validate [dir] [--strict] [--json] [--no-files]` — LLM-free, exits 1 on an error
 (`--strict`: on a warning too). `validateCatalogue` is a pure function over a snapshot of the files.
 
-`INV-1 … INV-28` are all implemented.
+**`src/domain/validate.ts` on `main` implements `INV-1 … INV-14` and `INV-17 … INV-28` — 26 of the
+28.** Verified 2026-08-25 by grepping the finding codes in both `validate.ts` and
+`external/07-authoring-and-validation.md`.
+
+`INV-15` and `INV-16` are **designed and written but not merged**: the implementation is
+uncommitted in the git worktree `.claude/worktrees/inspiring-bassi-6b089c` (branch
+`claude/inspiring-bassi-6b089c`), which also touches `src/cli/commands/validate.ts`,
+`src/domain/types.ts`, `src/pipelines/catalog/names.ts` and `tests/validate.test.ts`.
+
+**The two sections below describe that branch, not `main`.** Merge it, or delete the branch and
+this note with it — but do not read them as a description of what `biomd validate` does today.
 
 ### `INV-15` is checked against the configured order, not against the spec's
 

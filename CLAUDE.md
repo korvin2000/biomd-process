@@ -33,7 +33,7 @@ npm run typecheck && npm test         # the whole gate — there is no lint scri
 | `prompts list` (default) \| `prompts show <task> [--messages]` | inspect/render templates, no tokens spent |
 | `report [runId] [--failed] [--notes [regex]]` | summarize a run. `--notes` replays decisions that produced **no file** |
 | `portrait <who…> [--top n] [--min-identity n] [--all] [--json]` | search the image index for one person, with reasoning. LLM-free |
-| `validate [dir] [--strict] [--json] [--no-files]` | check a published catalogue against `INV-1 … INV-28`, all of them. Exits 1 on an error |
+| `validate [dir] [--strict] [--json] [--no-files]` | check a published catalogue against the `INV-*` list. Exits 1 on an error (`--strict`: on a warning too) |
 
 All accept `-c/--config <file>`. In development the CLI always runs through `tsx` via
 `npm run biomd -- <args>`; `npm run build` produces the `dist/cli/main.js` that `bin.biomd` points at.
@@ -115,9 +115,11 @@ with reasons: [docs/ref/repo-map.md](docs/ref/repo-map.md).
 
 **NEVER**
 
-- call a paid endpoint for testing. Free targets only: `local-small` on `local`, and `or-search` on
-  `omniroute`. Everything on `openrouter` (`or-cheap`, `or-osearch`, `or-quality`) costs money —
-  **ask first**.
+- call a paid endpoint for testing. Free: everything on `local` (`gemma-local`) and on `omniroute`
+  (`gpt-luna`, `search-std`, `search-mx`, `search-safe`). **Everything on `openrouter` costs
+  money** — `deepseek`, `minimax-m3`, `paid-search` — **ask first.** Check `pricing` in
+  `biomd.config.yaml` rather than trusting an id: `biomd.config.yaml.example` still uses the
+  older `or-*` / `local-small` names.
 - set `tasks.catalog.merge: false` — it silently detaches localized names from their entries.
 - add a format rule outside `src/domain`, or re-derive a Markdown link pattern outside
   `src/documents/markdown/inline.ts`.

@@ -21,7 +21,7 @@ price and wrong about time:
 run.concurrency: 3, strategy: cost-optimized, no lanes
 
   task A ─┐
-  task B ─┼─→ local-small  (llama-server, 1 slot)  →  serialised
+  task B ─┼─→ gemma-local  (llama-server, 1 slot)  →  serialised
   task C ─┘
              omniroute   idle for the whole run
              openrouter  idle for the whole run
@@ -128,9 +128,15 @@ run:
   concurrency: 8              # ≥ sum of lanes below
 llm:
   endpoints:
-    - id: local        { maxConcurrent: 1 }                    # server-limited
-    - id: omniroute    { maxConcurrent: 4, stream: true }      # stream is mandatory above 1
-    - id: openrouter   { maxConcurrent: 4, minRequestSpacingMs: 300 }
+    - id: local                      # server-limited: llama-server has one slot
+      maxConcurrent: 1
+    - id: omniroute
+      maxConcurrent: 4
+      stream: true                   # mandatory above 1 — see providers.md
+      minRequestSpacingMs: 350
+    - id: openrouter
+      maxConcurrent: 4
+      minRequestSpacingMs: 300
   routing:
     onOverflow: skip          # never pay for a call that cannot finish
     pools:
@@ -168,8 +174,10 @@ llm:
       extract:   { models: [gemma-local, deepseek], strategy: cost-optimized }
       translate: { models: [gemma-local, gpt-luna], strategy: cost-optimized }
 cost:
-  budgetUsd: 0.50                # a hard stop, checked before each call
-  maxRequests: 200
+  budget:                        # 0 = unlimited on every field
+    maxCostUsd: 0.50             # a hard stop, checked before each call
+    maxRequests: 200
+  onExceeded: stop               # or `warn` to log and carry on
 tasks:
   extract:   { onExistingDossier: reuse }
   translate: { useTranslationMemory: persistent, repairAttempts: 1 }
