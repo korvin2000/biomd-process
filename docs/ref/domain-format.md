@@ -178,9 +178,44 @@ is nearly always the portrait matcher resolving a family name rather than a pers
 `biomd validate [dir] [--strict] [--json] [--no-files]` — LLM-free, exits 1 on an error
 (`--strict`: on a warning too). `validateCatalogue` is a pure function over a snapshot of the files.
 
-<!-- GAP: src/domain/validate.ts implements INV-1..INV-14 and INV-17..INV-28. INV-15 (index-<lang>[id][0]
-     agrees with forename + " " + surname of the same language's dossier — warning severity) and
-     INV-16 (its exemption for comma-list forenames and rows that do not own their dossier) are
-     specified in external/07-authoring-and-validation.md:93-94 and are NOT implemented. Verified
-     2026-08-25. Do not describe validate as covering the full list until this is closed or the
-     omission is recorded as deliberate. -->
+`INV-1 … INV-28` are all implemented.
+
+### `INV-15` is checked against the configured order, not against the spec's
+
+`INV-15` (warning) says `index-<lang>.json[0]` agrees with `forename + " " + surname` of the same
+language's dossier. Taken literally that is `displayNameOrder: given-first`, and this deployment
+defaults to `roster` — so a literal check would warn on **every correctly-produced Russian row**.
+
+`validateCatalogue` therefore takes `displayNameOrder` and `rosterLanguage` as options and computes
+the expected form from them, the same arrangement as `datePrecision`: the setting is the statement
+of intent, and the checker accepts what it allows. `biomd validate` passes both from the config;
+called with neither, the function defaults to `given-first`, which is `external/07` as written.
+
+Only the expected form is accepted. A catalogue that declared one order and published the other has
+a real bug, and the defect this catches is drift rather than a typo — `mergeNameIndex` keeps a
+hand-authored `[0]` and appends only aliases, so a dossier renamed afterwards leaves the old display
+name standing for ever with the new one filed behind it.
+
+**One case degrades, and it has to.** Under `roster` order, for the roster's own language, `[0]` may
+legitimately be a heading a person wrote that the dossier does not contain — `Абреу Зекинья` where
+the dossier says `Хосе Гомеш де Абреу`, which is exactly what the setting exists for. The roster is
+an *input* and never reaches the snapshot, so there the check falls back to the only claim still
+available: the two names must share a word of three characters or more. A name that arrived from
+another row shares nothing.
+
+Measured on the published catalogue (2026-08-25, 146 Russian rows with a dossier): the real config
+reports **0**; a literal `given-first` reading reports **142**, every one of them a correct row;
+`surname-first` reports **718**, every non-Russian row. Of the 146, **135** match the inverted form
+exactly and **11** are saved only by the degraded escape — `Амадеус-дуэт`, `Даргомыжский Ал.`,
+`Бойко Олег Адам.`, `Классический ансамбль гитаристов (Россия)` — all of them roster headings doing
+what the setting exists for. The escape is 7.5% of the rows, not a rubber stamp.
+
+### `INV-16`, both exemptions
+
+- **A comma-separated `forename`** is the roster's convention for several people, not one person's
+  given name. Skipped.
+- **A row that does not own its dossier outright.** `external/01` §1.6 lets two rows declare the
+  same `json` and asks the producer to record which is canonical (`external/07` §7.5.5) — but the
+  format has **no member for it**, so a validator cannot tell the canonical row from the variant it
+  was told to distinguish by appending a qualifier. Checking either would report that qualifier as
+  the defect, so a shared dossier exempts every row that declares it.

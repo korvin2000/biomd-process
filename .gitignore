@@ -156,3 +156,8 @@ configs/good/
 configs/obsolete/
 docs/findings.md
 bakeoff/
+
+# Claude Code: harness-managed worktrees and personal settings
+.claude/worktrees/
+.claude/settings.local.json
+CLAUDE.local.md

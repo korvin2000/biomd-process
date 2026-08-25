@@ -33,7 +33,7 @@ npm run typecheck && npm test         # the whole gate — there is no lint scri
 | `prompts list` (default) \| `prompts show <task> [--messages]` | inspect/render templates, no tokens spent |
 | `report [runId] [--failed] [--notes [regex]]` | summarize a run. `--notes` replays decisions that produced **no file** |
 | `portrait <who…> [--top n] [--min-identity n] [--all] [--json]` | search the image index for one person, with reasoning. LLM-free |
-| `validate [dir] [--strict] [--json] [--no-files]` | check a published catalogue against the `INV-*` list. Exits 1 on an error |
+| `validate [dir] [--strict] [--json] [--no-files]` | check a published catalogue against `INV-1 … INV-28`, all of them. Exits 1 on an error |
 
 All accept `-c/--config <file>`. In development the CLI always runs through `tsx` via
 `npm run biomd -- <args>`; `npm run build` produces the `dist/cli/main.js` that `bin.biomd` points at.
@@ -92,9 +92,24 @@ npm run score -- input/ru out
 - **`tasks.catalog.refresh` is empty by default and `upsert` only fills empty members**, so a
   machine mistake is permanent: change `tasks.portrait.assetPrefix` and every row keeps the old
   `img`. Switch `refresh` on for the run that fixes it, then off.
+- **On OpenRouter, a sampler you set is not a sampler that was applied.** One model id is served
+  by many hosts and most drop what they do not implement, answering 200 either way.
+  `provider.requireParameters: true` turns that silence into a `404`.
 - **`git log` is one squashed commit and carries no rationale.** The decision trail is
   [docs/PROGRESS_AND_TODO.md](docs/PROGRESS_AND_TODO.md) — Russian narration, English technical
   terms.
+
+## Do not index these
+
+~1,200 files here are frozen experiment output, already written up in `reports/`. Do not glob,
+grep or read them unless the task is explicitly about one:
+
+`.scratch/` · `bakeoff/` · `out-*/` · `configs/` · `translation/examples/` · `.biomd/` · `out/` ·
+`dist/` · `.claude/worktrees/` · `progress.old.log`
+
+**`tools/` is not in that list** — it holds `score-translations.ts`, the `npm run score` regression
+suite. Neither are `example/`, `examples/` (hand-authored expected output) or `input/`. Full table
+with reasons: [docs/ref/repo-map.md](docs/ref/repo-map.md).
 
 ## Boundaries
 
@@ -117,11 +132,16 @@ npm run score -- input/ru out
 ## Read when needed
 
 Start at **[docs/ref/INDEX.md](docs/ref/INDEX.md)**, which routes to all of the below.
+Area-specific rules load automatically when you open a matching file — see
+[.claude/README.md](.claude/README.md) for which tier holds what.
 
 | Topic | File | When |
 |---|---|---|
 | Symbols, files, ownership | [docs/ref/source-map.md](docs/ref/source-map.md) | **before grepping for a concept** |
+| What to skip in this tree | [docs/ref/repo-map.md](docs/ref/repo-map.md) | before globbing or grepping |
 | Scheduling, call path, routing, resume | [docs/ref/architecture.md](docs/ref/architecture.md) | changing how work is planned or dispatched |
+| Throughput vs cost: strategies, lanes, concurrency | [docs/ref/throughput.md](docs/ref/throughput.md) | tuning a run for speed or for spend |
+| OmniRoute / OpenRouter / llama.cpp, model tuning | [docs/ref/providers.md](docs/ref/providers.md) | adding or tuning a model target |
 | The eleven cost mechanisms | [docs/ref/cost-mechanisms.md](docs/ref/cost-mechanisms.md) | touching a prompt, pipeline or context strategy |
 | Silent-failure catalogue | [docs/ref/failure-modes.md](docs/ref/failure-modes.md) | before a real run, or when a "successful" run is wrong |
 | Dates, names, aliases, collectives, validation | [docs/ref/domain-format.md](docs/ref/domain-format.md) | anything in `src/domain` |

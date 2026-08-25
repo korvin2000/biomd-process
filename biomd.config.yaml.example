@@ -514,7 +514,7 @@ llm:
       tags: [local, cheap]
 
     # The German/English translation model. Measured against four alternatives
-    # on this endpoint (2026-08-24, `omniroute-openai-report.md`): first on
+    # on this endpoint (2026-08-24, `reports/omniroute-openai-report.md`): first on
     # translation quality of the five, second overall, and the only family that
     # transliterates into German rather than English — `Tschudinow`, not
     # `Chudinov`, which is the difference between an entry a German reader finds
@@ -639,7 +639,7 @@ llm:
       reasoning: { enabled: false, dialect: reasoning }
       # Measured, and the measurement is mostly a negative result. 36
       # combinations of these four, twice each, on `example/example.bio.md`
-      # ru->de (see `deepseek-v4-flash-report.md`): no parameter's effect is
+      # ru->de (see `reports/deepseek-v4-flash-report.md`): no parameter's effect is
       # distinguishable from chance (permutation test, p = 0.45 / 0.38 / 0.96 /
       # 0.69), because two runs of the *same* combination differ by 16.7 points
       # on average while the largest spread between parameter levels is 4.3.

@@ -23,13 +23,35 @@ out/en/paco.bio.json    dossier localized into English
 out/index.json          catalogue index (incl. the chosen portrait) + index-en.json, index-ru.json
 ```
 
-> **Status: v0.3.** The orchestration, routing, reliability, cost control, resume
-> and observability layers are complete and tested. The published format lives in
-> `src/domain`, implemented against the normative specification in `external/`,
-> and `biomd validate` checks the output against its invariant list. v0.3 added
-> the two sources of fact an article does not contain — an image index and the
-> web — and made a year-only date publishable instead of dropped.
-> See [Extending](#extending) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+> **Status: v0.6.** Orchestration, routing, reliability, cost control, resume and
+> observability were complete in v0.1 and are largely unchanged. The published
+> format lives in `src/domain`, implemented against the normative specification
+> in [`external/`](external/README.md), and `biomd validate` checks the output
+> against its invariant list. What each release since has added:
+>
+> - **v0.3** — the two sources of fact an article does not contain: an image
+>   index (`portrait`) and the web (`websearch`). A year-only date is published
+>   rather than dropped.
+> - **v0.4** — a failure is local. A dependency can be declared *optional*, so
+>   one document failing one translation no longer retires the catalogue for the
+>   whole corpus; only a task whose output is genuinely on disk counts as done;
+>   and a routing candidate must both *hold* the prompt and have room left to
+>   *emit* the answer.
+> - **v0.5** — what a corpus of a thousand real articles turned out to contain
+>   that four samples did not: **collectives** (a duo, a trio, `gender: mixed`),
+>   a **second name source** (`data/names.json`, the site's own name list, read
+>   by `src/roster`), and quoted **foreign text**, which is kept verbatim
+>   instead of being sent to a translator.
+> - **v0.6** — *when* and *where* the work goes. Each routing pool picks its own
+>   strategy, its share of an endpoint's concurrency, and a preferred model per
+>   language, so translation is scheduled across every endpoint at once instead
+>   of queueing on the cheapest one (measured 1m 43s → 34s on three articles).
+>   The three settings that all mean "this output already exists" are read at
+>   plan time rather than after a model has been billed, and `progress.log` is
+>   one line per finished task, written to be read *while* the run is going.
+>
+> The mechanisms behind all of this, their defaults and the reasoning:
+> **[docs/ref/INDEX.md](docs/ref/INDEX.md)**.
 
 ## Quick start
 
@@ -48,12 +70,19 @@ npm run biomd -- config check
 ```
 
 ```bash
+npm run biomd -- models --probe
+```
+
+```bash
 npm run biomd -- run --dry-run
 ```
 
-`--dry-run` plans the whole job — documents, tasks, the model chain each pipeline
-would use and an estimated cost — without issuing a single request. Drop the flag
-to execute.
+`--probe` sends one tiny completion to every target and reports who answered —
+the only check that tells a *declared* model from a working one. A pool is a
+fallback chain, so a dead first choice is otherwise invisible until the bill
+arrives. `--dry-run` then plans the whole job — documents, tasks, the model
+chain each pipeline would use and an estimated cost — without issuing a single
+request. Drop the flag to execute.
 
 ## Commands
 
@@ -64,10 +93,13 @@ to execute.
 | `config check` | Validate the config, resolve paths, load every prompt template. |
 | `config show` | Print the effective config with secrets redacted. |
 | `models` | List resolved model targets, pools, and a routing preview. |
+| `models --probe` | Call every target once and report who answered. Exits 1 if any fails. |
 | `prompts list` / `prompts show <task>` | Inspect and render templates without spending tokens. |
-| `report [runId]` | Summarize a finished run from its journal. |
+| `report [runId]` | Summarize a finished run from its journal. `--notes` replays the decisions that produced no file — a refused web answer, a date conflict recorded rather than published. |
 | `portrait <who…>` | Search the image index for one entry and print the ranking with its reasoning (`--faces n` for an ensemble). Spends nothing. |
 | `validate [dir]` | Check a published catalogue against the format invariants. Spends nothing. |
+
+All of them accept `-c/--config <file>`, and options come *after* the subcommand.
 
 Useful `run` flags: `--only extract,translate`, `--lang en,de`, `--limit 10`,
 `--concurrency 8`, `--strategy context-optimized`, `--budget-usd 5`,
@@ -85,22 +117,36 @@ corpus ──► JobPlanner ──► tasks ──► Orchestrator ──► art
 
 **Models.** Any OpenAI-compatible endpoint: LiteLLM, OmniRoute, 9router, vLLM,
 Ollama's shim, OpenRouter, OpenAI. Per model you configure the wire name, context
-window, output ceiling, pricing, capabilities, reasoning effort and its dialect.
+window, output ceiling, pricing, capabilities, reasoning effort and its dialect;
+per endpoint, whether answers are streamed.
 
-**Routing.** A scheduler picks an ordered chain of candidates per call.
-Built-ins: `cost-optimized`, `context-optimized`, `sequential`, `round-robin`,
-`least-failures`. Pools let each task type use a different set — cheap models for
-extraction, a strong one for translation.
+**Routing.** A strategy ranks an ordered chain of candidates per call —
+`cost-optimized`, `context-optimized`, `sequential`, `round-robin`,
+`least-failures`, `least-busy`. Pools let each task use a different model set,
+and each pool sets its own strategy, its lane of an endpoint's concurrency, and a
+preferred model per target language: extraction is scarce in money, translation
+in wall-clock, and one global setting could not say both.
+→ [docs/ref/architecture.md](docs/ref/architecture.md)
 
-**Reliability.** Retry (same model, exponential backoff with jitter, honouring
-`Retry-After`) and fallback (next model) are separate dimensions driven by a
-typed error taxonomy. Circuit breakers stop a run from hammering a dead endpoint
-once per document; client-side rate limiting avoids earning 429s in the first place.
+**Reliability.** Retry (same model, bounded exponential backoff with jitter,
+honouring `Retry-After`) and fallback (next model) are separate axes driven by a
+typed error taxonomy rather than by matching provider message strings. Circuit
+breakers stop a run hammering a dead endpoint; client-side rate limiting avoids
+earning 429s in the first place. A task whose *answer* was broken
+— every call returned 200 and the document they add up to does not hold together
+— is run again with the models that failed it demoted. Whatever survives all of
+that costs the entry a field, an edition or a row, never the catalogue.
+→ [docs/ref/failure-modes.md](docs/ref/failure-modes.md)
 
 **Cost.** By default, translation and localization send **only the prose**, as a
-flat `{contentHash: text}` table: heading markers, list bullets, `:::` containers
-and their attributes, code blocks, URLs and — for dossiers — `dates`, `ranking`,
-`url`, media targets and unknown fields all stay local and are spliced back after.
+flat `{contentHash: text}` table — markup, code, URLs and a dossier's
+language-invariant fields never leave the machine and are spliced back after,
+and a fragment not written in the source language is not sent at all. Prompts
+are assembled stable-part-first so provider caches hit across the corpus,
+context strategies escalate cheapest-first, a partial answer is repaired
+key-by-key rather than re-sent whole, output already on disk is recognized
+before a model is called, and budgets in requests, tokens or USD stop a run
+before it overspends. → [docs/ref/cost-mechanisms.md](docs/ref/cost-mechanisms.md)
 
 Measured on the sample corpus in `examples/ru`:
 
@@ -109,26 +155,16 @@ Measured on the sample corpus in `examples/ru`:
 | dossier localization | **52% smaller** | 142 → 117 distinct strings (**-18%**) |
 | article translation | **18% smaller** (9–26% per file) | negligible between distinct articles |
 
-A fragment that is not written in the source language is not sent at all: a
-Russian article quotes work titles, discographies and Latin spellings of names as
-their own languages write them, and on `input/ru` that is 11% of the fragments —
-every one of them a title, a composer or a link label.
-
-The structural guarantee matters at least as much as the bytes: a `:::` block
-that is never sent cannot come back unbalanced, so no retry or model escalation
-is ever spent repairing one, and `dates`/`ranking`/`url` are identical across
-editions by construction rather than by instruction.
-
-On top of that, prompts are assembled stable-part-first so provider caches hit
-across the corpus, context strategies escalate cheapest-first, and budgets in
-requests, tokens or USD stop a run before it overspends.
+The structural guarantee matters as much as the bytes: a `:::` block that is
+never sent cannot come back unbalanced, and `dates`/`ranking`/`url` are identical
+across editions by construction rather than by instruction.
 
 **Asking the right source.** An article that never states a birthplace does not
 start stating one on the third context rung, so `websearch` asks a different
-source instead — and only about fields that are genuinely missing, sending an
-eight-line identity card rather than the article. The portrait is chosen from an
-image index by name matching and the index's own classification, with no model
-involved at all.
+source instead — only about fields genuinely missing, sending an eight-line
+identity card rather than the article, and nothing personal about a collective.
+The portrait is chosen from an image index by name matching, the index's own
+classification and the pictures the article itself embeds — no model at all.
 
 **Resume.** Each task carries a fingerprint over its input, its prompt templates
 and its output contract. Re-running an unchanged corpus issues zero calls; editing
@@ -136,14 +172,17 @@ a prompt correctly redoes exactly the work that prompt affects.
 
 **Observability.** Every run writes `.biomd/runs/<runId>/` with a manifest, an
 append-only `events.jsonl` journal (every request, retry, fallback, error and
-artifact) and a checkpoint. The terminal shows live progress; `biomd report`
-reads it back afterwards.
+artifact) and a checkpoint, which `biomd report` reads back afterwards. The
+terminal shows live progress; so does `progress.log` in the project root, one
+plain line per finished task naming the model that actually answered it, written
+to be `tail -f`-able — and `grep ' ! ' progress.log` is the incident report.
 
 ## Configuration
 
 One YAML file, validated by Zod, layered `defaults < file < ${ENV} < CLI flags`.
 Invalid config fails before any work starts, with the offending path named.
-`biomd.config.yaml` in the repo root is a documented working example.
+`biomd.config.yaml` in the repo root is a documented working example, and
+[docs/ref/config-map.md](docs/ref/config-map.md) is the map of every setting.
 
 Ready-made configs for the common model setups — use with `-c`:
 
@@ -157,15 +196,26 @@ The hybrid pattern is the one worth knowing: put the local model first in every
 pool and the paid ones behind it. Combined with fallback, the corpus is processed
 locally and only the documents the local model actually fails on reach a paid model.
 
+Two sections sit at the root rather than under a task, because several tasks have
+to agree about them: `catalogue:` describes the *format's* deployment (supported
+languages, date precision, defaults), and `roster:` the optional name roster.
+
 Secrets are referenced as `${VAR}` / `${VAR:-fallback}` and are redacted
 everywhere they would otherwise be written.
 
 ## Prompts
 
 Templates live in `prompts/<task>/{system.md,user.md}` — see
-[prompts/README.md](prompts/README.md). The document body is never a template
-variable; it is appended after everything the templates produce, which is what
-keeps the cache prefix identical across the corpus.
+[prompts/README.md](prompts/README.md) for the conventions and
+[docs/ref/prompts.md](docs/ref/prompts.md) for the naming, title and punctuation
+rules they encode. The document body is never a template variable; it is appended
+after everything the templates produce, which is what keeps the cache prefix
+identical across the corpus.
+
+A prompt change is measured, not eyeballed. `npm run score -- input/ru out`
+compares a translated corpus against its source and reports the invariants a
+structure guard cannot see — source-script text left in the prose, a substituted
+dash, punctuation pulled inside a quotation mark.
 
 ## Extending
 
@@ -197,9 +247,19 @@ const app = createApp(loaded, {
 await runJob(app);
 ```
 
+## Documentation
+
+| Read | For |
+|---|---|
+| [docs/ref/INDEX.md](docs/ref/INDEX.md) | **start here.** The on-demand reference tier, one file per concern |
+| [external/README.md](external/README.md) | **any** data-format question. Normative, nine documents, format version 2 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the full prose architecture, extension points and non-goals |
+| [docs/PROGRESS_AND_TODO.md](docs/PROGRESS_AND_TODO.md) | *why* something was built this way — `git log` carries no rationale |
+
 ## Known gaps
 
-- The Markdown skeleton does not model footnote ids.
+- The Markdown skeleton does not model footnote ids. (The footnote *marker* this
+  corpus writes is recognized as the link it is.)
 - Two people with the same name cannot be told apart in the image index —
   `photo/w/john_williams/` is the guitarist or the film composer depending on
   facts no filename carries. `portrait` never overwrites a curated `img`, which
@@ -211,10 +271,7 @@ await runJob(app);
 - Search aliases for CJK names depend entirely on the extraction hint — no
   algorithm gets from 塞戈维亚 back to "Segovia". That is a property of the
   problem, not of this implementation.
-- A dossier's `dates`/`ranking`/`url` are language-invariant *by construction*
-  (they are never sent to a model), but nothing cross-checks editions that were
-  authored outside this tool.
-- No streaming, no provider batch APIs, no web UI.
+- No provider batch APIs, no web UI.
 
 ## Development
 
