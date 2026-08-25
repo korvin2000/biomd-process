@@ -341,31 +341,21 @@ llm:
           local: 1
           omniroute: 3
           openrouter: 4
-        # wait: a language's list is the first tier. One of them is used when it
-        # is free; when none is, the call queues for `preferWaitMs` and only
-        # then widens to the rest of the pool. If everything allowed is busy it
-        # waits for whichever frees first — running out of preferred models is a
-        # reason to look further, never a reason to fail a document.
-        #
-        # Spent idle: a waiting task holds one of `run.concurrency`'s workers,
-        # so this trades throughput for quality and wants seconds, not minutes.
+        # reorder (default) | restrict | wait.
+        #   reorder   float the list to the front, rest of the pool behind it
+        #   restrict  the list is the whole chain; a one-entry list is a pool of one
+        #   wait      wait a preferred models a preferWaitMs, then use pool
         preferMode: wait
-        preferWaitMs: 30000
+        preferWaitMs: 45000
         prefer:
-          zh: [deepseek]
-          ja: [deepseek]
-          ko: [deepseek]
-          it: [deepseek]
-          es: [minimax-m3]
-          fr: [deepseek, minimax-m3]
-          de: [gpt-luna]
-          en: [gpt-luna]
-        # Never, whatever else says so. A veto, applied to every tier — an
-        # excluded model is gone from the preference list, from the rest of the
-        # pool, and from the final wait. Kept in its own map because YAML reads
-        # a leading `!` as a tag: `[a, !b]` parses to `['a', '']` and the veto
-        # would disappear with only a warning.
-        exclude: {}
+          zh: [deepseek, minimax-m3, gemma-local]
+          ja: [deepseek, minimax-m3, gpt-luna]
+          ko: [deepseek, gpt-luna]
+          ua: [gpt-luna, minimax-m3, gemma-local]
+        exclude:
+          pt: [gemma-local]
+          it: [gemma-local]
+
       # Free OmniRoute search targets first; paid-search is the final fallback.
       # maxTargets must stay >= 4; least-busy may use paid search for throughput.
       websearch:
