@@ -45,7 +45,7 @@ output:
 
 # Published-format settings shared by extract/search/localize/catalog/validate.
 catalogue:
-  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, zh, ko] # VD-LANG; Chinese = `zh`
+  supportedLanguages: [en, es, ja, de, fr, it, pt, ru, uk, zh, ko] # VD-LANG; Chinese = `zh`
   # day | month | year; coarsest published date precision.
   datePrecision: year
   defaultType: guitarist # fallback biography type
@@ -283,7 +283,7 @@ llm:
       maxOutputTokens: 16384
       capabilities: [json_schema, json_object, tools, prompt_cache]
       # Pricing reflects the provider order below.
-      pricing: { inputPer1M: 0.08, outputPer1M: 0.18, cachedInputPer1M: 0.016 }
+      pricing: { inputPer1M: 0.1, outputPer1M: 0.25, cachedInputPer1M: 0.025 }
       # requireParameters rejects providers that silently ignore requested parameters.
       provider:
         order: [together, phala, deepinfra/fp8, morph/bf16, wafer/fast, ambient/fp4]
@@ -296,6 +296,22 @@ llm:
         topK: 42
         minP: 0.02
       tags: [remote, cheap]
+
+    - id: deepseek-any
+      endpoint: openrouter
+      model: deepseek/deepseek-v4-flash-0731
+      contextWindow: 128000
+      maxOutputTokens: 16384
+      capabilities: [json_schema, json_object, tools, prompt_cache]
+      # Pricing reflects the provider order below.
+      pricing: { inputPer1M: 0.08, outputPer1M: 0.18, cachedInputPer1M: 0.016 }
+      # requireParameters rejects providers that silently ignore requested parameters.
+      # Disable upstream-default reasoning; hiding the trace alone does not disable it.
+      params:
+        temperature: 0.5
+      reasoning: { enabled: false, dialect: reasoning }
+      tags: [remote, cheap]
+
 
     # Search routing relies on declared `web_search`; these use Responses with a required tool.
     # The configured gateways reject web search combined with JSON mode, so omit `json_object`.
@@ -346,7 +362,8 @@ llm:
       capabilities: [tools, web_search]
       pricing: { inputPer1M: 0.1, outputPer1M: 0.6, cachedInputPer1M: 0.075 }
       params:
-        temperature: 0.1
+        temperature: 0.2
+      reasoning: { enabled: false, dialect: reasoning }
       tags: [remote, search]
 
   routing:
@@ -361,7 +378,7 @@ llm:
 
       # least-busy spreads extraction across endpoint capacity.
       extract:
-        models: [gemma-local, gpt-luna, deepseek]
+        models: [gemma-local, gpt-luna, deepseek-any]
         strategy: least-busy
 
       # least-busy maximizes translation throughput across endpoints.
@@ -379,12 +396,18 @@ llm:
         preferMode: wait
         preferWaitMs: 45000
         prefer:
-          zh: [deepseek, minimax-m3, minimax-m3-free, gemma-local]
-          ja: [deepseek, minimax-m3, minimax-m3-free, gpt-luna]
-          ko: [deepseek, gpt-luna]
-          ua: [gpt-luna, minimax-m3, minimax-m3-free, gemma-local]
+          en: [minimax-m3, minimax-m3-free, deepseek, gemma-local]
+          ja: [gemma-local, deepseek, gpt-luna]
+          de: [gpt-luna, deepseek, gemma-local]
+          fr: [gpt-luna, minimax-m3, minimax-m3-free]	
+          it: [gpt-luna, deepseek]
+          pt: [gpt-luna, minimax-m3-free, minimax-m3, gemma-local]
+          uk: [minimax-m3, minimax-m3-free, deepseek, gpt-luna]
+          zh: [gemma-local, deepseek, gpt-luna]
+          ko: [gemma-local, deepseek, gpt-luna]
         exclude:
-          pt: [gemma-local]
+          ja: [minimax-m3, minimax-m3-free]
+          ko: [minimax-m3-free, minimax-m3]
           it: [gemma-local]
 
       # Free OmniRoute search targets first; paid-search is the final fallback.
@@ -402,14 +425,14 @@ llm:
 # retry = same model; fallback = next model in the pool.
 reliability:
   retry:
-    maxAttempts: 3
+    maxAttempts: 2
     initialDelayMs: 500
     maxDelayMs: 20000
     factor: 2
     jitter: full
     respectRetryAfter: true
   fallback:
-    maxTargets: 4
+    maxTargets: 5
     onValidationFailure: true
   # Task-level fallback retries a broken whole task on another model.
   taskFallback:
