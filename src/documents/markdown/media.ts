@@ -1,5 +1,12 @@
-import { isAudioTarget, isImageTarget, isOpaque, targetExtension } from '../../domain/values.js';
-import type { MediaItem } from '../../domain/types.js';
+import {
+  isAudioTarget,
+  isDocumentTarget,
+  isImageTarget,
+  isOpaque,
+  isWebTarget,
+  targetExtension,
+} from '../../domain/values.js';
+import type { DocumentItem, MediaItem } from '../../domain/types.js';
 import { imagePattern, linkPattern } from './inline.js';
 
 /**
@@ -31,6 +38,8 @@ export interface HarvestOptions {
   photos: boolean;
   /** Collect links whose target is audio, MIDI or a tablature file. */
   music: boolean;
+  /** Collect links to external pages and to local printable documents. */
+  documents: boolean;
   /** Ceiling per list — a discography table can hold a hundred rows. */
   maxItems: number;
 }
@@ -38,6 +47,19 @@ export interface HarvestOptions {
 export interface HarvestResult {
   photos: MediaItem[];
   music: MediaItem[];
+  /**
+   * `documents` items, on the same terms as the two lists above: read out of the
+   * article rather than asked for.
+   *
+   * Two kinds qualify, and the asymmetry between them is the rule. An **external**
+   * link qualifies by being external — `evafampas.gr/biosen.html` is a reference
+   * whatever it serves, and nothing else in the dossier would ever mention it. A
+   * **local** link qualifies only when it points at a printable document, because
+   * every other relative path in this corpus is either a photograph, a recording,
+   * a tablature or a route to another entry — all three of them already described,
+   * and the fourth not a resource at all.
+   */
+  documents: DocumentItem[];
   /**
    * Every image the article references, in document order, caption or not.
    *
@@ -52,7 +74,7 @@ export interface HarvestResult {
   notes: string[];
 }
 
-export const DEFAULT_HARVEST: HarvestOptions = { photos: true, music: true, maxItems: 60 };
+export const DEFAULT_HARVEST: HarvestOptions = { photos: true, music: true, documents: true, maxItems: 60 };
 
 const FENCE = /^\s*(`{3,}|~{3,})/;
 const CONTAINER_OPEN = /^\s*:::\s*(\S+)\s*$/;
@@ -63,6 +85,7 @@ const ATTRIBUTE = /^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/;
 export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT_HARVEST): HarvestResult {
   const photos = new Collector(options.maxItems);
   const music = new Collector(options.maxItems);
+  const documents = new Collector(options.maxItems);
   const imageTargets: string[] = [];
   const seenTarget = new Set<string>();
   const sawImage = (target: string): void => {
@@ -113,14 +136,16 @@ export function harvestMedia(markdown: string, options: HarvestOptions = DEFAULT
         photos.add(match[1] ?? '', match[2] ?? '');
       }
     }
-    if (options.music) collectAudioLinks(line, music);
+    if (options.music) collectLinks(line, music, isPlayable);
+    if (options.documents) collectLinks(line, documents, isDocument);
   }
 
   const notes: string[] = [];
   if (photos.truncated) notes.push(`Harvested only the first ${options.maxItems} photo(s) from the article.`);
   if (music.truncated) notes.push(`Harvested only the first ${options.maxItems} audio item(s) from the article.`);
+  if (documents.truncated) notes.push(`Harvested only the first ${options.maxItems} document(s) from the article.`);
 
-  return { photos: photos.items, music: music.items, imageTargets, notes };
+  return { photos: photos.items, music: music.items, documents: documents.items, imageTargets, notes };
 }
 
 /**
@@ -146,25 +171,33 @@ function readAttributes(
 }
 
 /**
- * Audio, MIDI and tablature links, labelled from their table row when they are
- * in one.
+ * Inline links whose target `accept` recognizes, labelled from their table row
+ * when they are in one.
  *
  * `| Julia Florida | [TAB](…txt) | [MP3](…mp3) |` names the work once and links
  * it twice; the link text (`TAB`, `MP3`) is the format, not the title. So the
  * row's first cell becomes the label and the link text qualifies it — which is
  * exactly the shape the specification's own example uses
  * (`"La Catedral — табулатура"`).
+ *
+ * The label comes out of `linkPattern`, which treats a backslash and whatever
+ * follows it as one unit — so `[Алехо КАРПЕНТЬЕР \[ОБ ЭЙТОРЕ ВИЛА-ЛОБОСЕ\]](…)`
+ * is read as a single link with its brackets intact, and `stripMarkdown`
+ * unescapes them for display.
+ *
+ * Both lists read the same line independently: a row may hold a recording and a
+ * reference at once, and neither claim excludes the other.
  */
-function collectAudioLinks(line: string, music: Collector): void {
+function collectLinks(line: string, into: Collector, accept: (target: string) => boolean): void {
   const row = tableCells(line);
   const title = row ? stripMarkdown(row[0] ?? '') : '';
 
   for (const match of line.matchAll(linkPattern())) {
     const label = (match[1] ?? '').trim();
     const target = match[2] ?? '';
-    if (!isPlayable(target)) continue;
+    if (!accept(target)) continue;
 
-    music.add(title ? (label && label !== title ? `${title} — ${label}` : title) : label, target);
+    into.add(title ? (label && label !== title ? `${title} — ${label}` : title) : label, target);
   }
 }
 
@@ -173,6 +206,27 @@ function isPlayable(target: string): boolean {
   if (!target || target.startsWith('#')) return false;
   if (isAudioTarget(target)) return true;
   return targetExtension(target) === '.txt' && /(?:^|\/)(?:music|tab|tabs)\//i.test(target);
+}
+
+/**
+ * Is this link a `documents` item?
+ *
+ * Four exclusions, then the two rules. A fragment and a `/#/slug` route are
+ * navigation inside this catalogue rather than a resource. A playable target and
+ * an image are resources the other two lists already own — testing `isPlayable`
+ * rather than `isAudioTarget` keeps that true if the audio vocabulary widens. And
+ * an opaque target that is not `http(s)` is an *action*: `mailto:` opens a mail
+ * composer, `tel:` a dialler, and neither is a document a reader can open.
+ *
+ * What is left is external-or-printable: any page on another host, and — among
+ * this catalogue's own files — only the printable document formats.
+ */
+function isDocument(target: string): boolean {
+  const value = target.trim();
+  if (!value || value.startsWith('#') || value.includes('/#/')) return false;
+  if (isPlayable(value) || isImageTarget(value)) return false;
+  if (isWebTarget(value)) return true;
+  return !isOpaque(value) && isDocumentTarget(value);
 }
 
 /** `| a | b |` → `["a", "b"]`; anything else is not a table row. */

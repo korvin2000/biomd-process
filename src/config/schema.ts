@@ -796,6 +796,13 @@ export const extractTaskSchema = taskBase
       .object({
         photos: z.boolean().default(true),
         music: z.boolean().default(true),
+        /**
+         * `documents`: every link to a page on another host, plus the local
+         * links that point at a printable document (`.pdf`, `.doc`, `.docx`,
+         * `.rtf`). A `mailto:` is an action rather than a resource and is not
+         * one; neither is a `/#/slug` route inside this catalogue.
+         */
+        documents: z.boolean().default(true),
         /** Ceiling per list — a discography table can hold a hundred rows. */
         maxItems: z.number().int().positive().default(60),
       })

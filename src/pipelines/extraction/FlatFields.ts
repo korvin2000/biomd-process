@@ -1,5 +1,5 @@
 import { resolveCountry } from '../../domain/countries.js';
-import type { CatalogHints, Dossier, MediaItem } from '../../domain/types.js';
+import type { CatalogHints, DocumentItem, Dossier, MediaItem } from '../../domain/types.js';
 import { orderDossier, sanitizeDossier, type DossierOptions } from '../../domain/dossier.js';
 import {
   mergeCsvLists,
@@ -457,6 +457,8 @@ export interface BuildResult {
 export interface BuildOptions extends DossierOptions {
   /** Media parsed out of the article; the model is never asked for it. */
   media?: { photos?: MediaItem[]; music?: MediaItem[] };
+  /** `documents` parsed out of the article, on the same terms as {@link media}. */
+  documents?: DocumentItem[];
 }
 
 /**
@@ -493,16 +495,46 @@ export function buildDossier(
   }
   if (Object.keys(dates).length > 0) metadata['dates'] = dates;
 
+  const notes: string[] = [];
   const draft: Dossier = {
     metadata,
     media: { photos: options.media?.photos ?? [], music: options.media?.music ?? [] },
-    documents: [],
+    documents: withoutTheSourceRow(options.documents ?? [], metadata['url'], notes),
   };
 
   // One pass through the same sanitizer that reads a hand-authored file, so a
   // freshly built dossier and an existing one are held to identical rules.
   const sanitized = sanitizeDossier(draft, options);
-  return { dossier: orderDossier(sanitized.dossier), hints, notes: sanitized.notes };
+  return { dossier: orderDossier(sanitized.dossier), hints, notes: [...notes, ...sanitized.notes] };
+}
+
+/**
+ * The harvested documents, minus the one the reader is already shown.
+ *
+ * `external/05` §5.4.5 has the consumer synthesizing a trailing *source* row
+ * from `metadata.url`, after the authored items — so harvesting the same URL out
+ * of the prose publishes it twice on the same screen, which §5.7 lists as a
+ * defect. It is the *normal* case here rather than an edge one: the article ends
+ * with `Источник: [www.evafampas.gr](http://www.evafampas.gr/biosen.html)` and
+ * `url`'s own card hint asks the model for exactly that link.
+ *
+ * Compared after `normalizeUrl`, because the two spellings are rarely identical:
+ * the prose says `http://www.MarinaAlexandra.com` and the answer comes back
+ * `http://www.marinaalexandra.com/`.
+ */
+function withoutTheSourceRow(
+  documents: readonly DocumentItem[],
+  url: unknown,
+  notes: string[],
+): DocumentItem[] {
+  const source = typeof url === 'string' ? normalizeUrl(url) : undefined;
+  if (!source) return [...documents];
+
+  const kept = documents.filter((item) => normalizeUrl(item.target) !== source);
+  if (kept.length !== documents.length) {
+    notes.push(`Dropped ${documents.length - kept.length} document(s) repeating metadata.url; the reader is shown it as the source row.`);
+  }
+  return kept;
 }
 
 /** Which card keys a record actually answered — the input to `requiredFields`. */

@@ -426,7 +426,7 @@ export function targetExtension(target: string): string {
   return dot > 0 ? name.slice(dot).toLowerCase() : '';
 }
 
-const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.mid', '.midi']);
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.mid', '.midi', '.wma', '.ram', '.ra', '.rm']);
 const IMAGE_EXTENSIONS = new Set([
   '.jpg',
   '.jpeg',
@@ -446,6 +446,36 @@ export function isAudioTarget(target: string): boolean {
 
 export function isImageTarget(target: string): boolean {
   return IMAGE_EXTENSIONS.has(targetExtension(target));
+}
+
+/**
+ * Document formats worth a `documents` row when the target is a **local** path.
+ *
+ * The list is short on purpose. An external URL earns its row by being external
+ * — a page on another host is a reference whatever it serves — while a relative
+ * path is one of this catalogue's own files, and almost all of those are already
+ * described by `media.photos`, `media.music` or the article itself. What is left
+ * over and still worth offering a reader is the printable document: a scanned
+ * programme, a thesis, a set of liner notes.
+ */
+const DOCUMENT_EXTENSIONS = new Set(['.pdf', '.doc', '.docx', '.rtf']);
+
+export function isDocumentTarget(target: string): boolean {
+  return DOCUMENT_EXTENSIONS.has(targetExtension(target));
+}
+
+/**
+ * Is this target a page somewhere else?
+ *
+ * Narrower than {@link isOpaque}, and the difference is the whole point:
+ * `mailto:` and `tel:` are opaque too, and they are **actions** rather than
+ * resources. `[ras1@bezeqint.net](mailto:ras1@bezeqint.net)` invites a reader to
+ * write to somebody, so filing it as a document would put a mail composer behind
+ * a row that promises a page — and `external/05` §5.6 has no way to say "this
+ * one opens your mail client".
+ */
+export function isWebTarget(target: string): boolean {
+  return /^(?:https?:\/\/|\/\/)\S/i.test(target.trim());
 }
 
 // ---------------------------------------------------------------------------

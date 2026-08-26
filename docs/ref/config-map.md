@@ -65,6 +65,10 @@ A task declaring `mergesOutput` (`catalog`, `websearch`) is exempt from the firs
 | Key | Default | |
 |---|---|---|
 | `readWholeDocument` | `true` | declares `coverage: 'whole'` — drops every partial context attempt at plan time |
+| `harvest.photos` | `true` | `::: image` containers and inline images. An item without a caption has no `label` and is dropped |
+| `harvest.music` | `true` | links whose target is audio, MIDI, or a `.txt` under `music/` \| `tab/` \| `tabs/` |
+| `harvest.documents` | `true` | links to a page on **another host**, plus local links to `.pdf` \| `.doc` \| `.docx` \| `.rtf`. A `mailto:`/`tel:` is an action, not a resource; a `/#/slug` is navigation. One repeating `metadata.url` is dropped — the reader is already shown it as the source row |
+| `harvest.maxItems` | `60` | ceiling **per list** |
 
 ### `tasks.translate`
 | Key | Default | |

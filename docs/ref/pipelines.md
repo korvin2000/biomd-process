@@ -31,6 +31,11 @@ out/.hints/paco.*.json  internal hand-offs: classification, web answers, the por
   this side already has.
 - Classification (`type`/`gender`/`country`/`title`) goes to `out/.hints/`, never into the dossier
   (`INV-7`).
+- **`media` and `documents` are parsed, never asked for** (`harvestMedia`, `src/documents/markdown/media.ts`)
+  — zero tokens, and the `target` is the path the article contains rather than one a model retyped.
+  `documents` takes every link to another host plus the local links to a printable document; a
+  `mailto:` is an action rather than a resource, and a link repeating `metadata.url` is dropped
+  because `external/05` §5.4.5 already shows that one as the trailing source row.
 
 ## `websearch`
 

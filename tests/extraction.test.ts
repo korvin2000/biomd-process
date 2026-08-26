@@ -190,6 +190,26 @@ describe('assembling the dossier', () => {
     expect(dossier.media?.photos).toEqual(media.photos);
   });
 
+  it('carries the documents harvested from the article', () => {
+    const documents = [{ label: 'Программка', target: 'articles/programme.pdf' }];
+    const { dossier } = buildDossier(record, FIELDS, { ...OPTIONS, documents });
+    expect(dossier.documents).toEqual(documents);
+  });
+
+  it('drops a harvested document that repeats metadata.url, whatever its spelling', () => {
+    // `external/05` §5.4.5: the reader is shown `url` as a trailing source row,
+    // so the same link as a `documents` item is a visible duplicate. The two
+    // spellings are rarely identical — the prose says `MarinaAlexandra.com` and
+    // the answer comes back lower-cased with a trailing slash.
+    const documents = [
+      { label: 'Источник', target: 'HTTPS://Example.ORG/segovia' },
+      { label: 'Другая страница', target: 'https://example.org/other' },
+    ];
+    const { dossier, notes } = buildDossier(record, FIELDS, { ...OPTIONS, documents });
+    expect(dossier.documents).toEqual([{ label: 'Другая страница', target: 'https://example.org/other' }]);
+    expect(notes.join(' ')).toMatch(/repeating metadata\.url/);
+  });
+
   it('emits the members in the house order, so an unchanged corpus re-renders identically', () => {
     const { dossier } = buildDossier(record, FIELDS, OPTIONS);
     expect(Object.keys(dossier)).toEqual(['metadata', 'media', 'documents']);

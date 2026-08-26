@@ -16,10 +16,6 @@ Full account: [docs/ref/prompts.md](../../docs/ref/prompts.md). Eta conventions:
   `sharedUser`, and the intended shape is `<%= it.sharedSystem %>` plus the correction — forking a
   hundred measured rules to change one is how two versions of a rule end up disagreeing. Overrides
   hash into the task version too, so adding one re-plans the task for **every** model.
-- **A template is read by a model, so the reasoning goes in `<% /* … */ %>`.** (Eta 3 has no
-  `<%# … %>`.) An audit finding — "nineteen values came back in the source alphabet" — is addressed
-  to a person: unactionable, uncheckable, and billed on every call. The model reads a rule, an
-  example and a named check; the why sits in the comment above them.
 - **Look for the contradiction before adding a rule.** `minimax-m3` left a name in Cyrillic twelve
   times in twenty documents, always as a whole heading or caption and never inside a sentence: not
   a missing rule but two rules that both seemed to cover a fragment that is *only* a name.
@@ -42,4 +38,4 @@ Full account: [docs/ref/prompts.md](../../docs/ref/prompts.md). Eta conventions:
   can never fire and reads like two languages being offered.
 - **Check the text reached the model before blaming the prompt.** `extractTextSpans` plus a script
   count answers that for nothing — the untranslated poems were a span-extraction bug.
-- **Measure before and after**: `npm run score -- input/ru out`.
+

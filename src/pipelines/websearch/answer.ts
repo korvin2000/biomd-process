@@ -320,6 +320,13 @@ function refines(field: WebField, current: string, candidate: string): boolean {
  * check on, silently costs the field. So scheme, `www.`, a trailing slash, the
  * fragment and campaign parameters are all dropped here.
  *
+ * **Percent-encoding is one of those spellings.** `/ark:/12148/cb13927560g` and
+ * `/ark%3A/12148/cb13927560g` are one page, and so are `_(chitarrista)` and
+ * `_%28chitarrista%29`; a provider that reports the encoded form against a model
+ * that writes the readable one used to lose the field. The path is decoded once
+ * before comparing — the query needs no such handling, `URLSearchParams` having
+ * already re-encoded it canonically.
+ *
  * Deliberately *not* `normalizeUrl`: that one produces the URL actually written
  * into a dossier and must stay faithful. This one only ever compares.
  */
@@ -327,7 +334,7 @@ export function sourceKey(url: string): string {
   try {
     const parsed = new URL(url);
     const host = parsed.host.toLowerCase().replace(/^www\./, '');
-    const path = parsed.pathname.replace(/\/+$/, '');
+    const path = decodePath(parsed.pathname).replace(/\/+$/, '');
     for (const key of [...parsed.searchParams.keys()]) {
       if (/^(utm_|fbclid$|gclid$|ref$|source$)/i.test(key)) parsed.searchParams.delete(key);
     }
@@ -335,6 +342,15 @@ export function sourceKey(url: string): string {
     return `${host}${path}${query ? `?${query}` : ''}`;
   } catch {
     return url;
+  }
+}
+
+/** One decode pass, or the path untouched when it is not valid encoding. */
+function decodePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
   }
 }
 

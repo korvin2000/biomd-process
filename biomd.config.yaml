@@ -105,7 +105,7 @@ tasks:
     enabled: true
     pool: translate
     outputChannel: translation
-    targetLanguages: [en, fr, es, de, it]
+    targetLanguages: [it, ja, uk, en, de, zh, ko, fr, pt, es]
     skipSourceLanguage: true
     # Also emit the source-language article into the output tree.
     copySourceArticle: true
@@ -128,7 +128,7 @@ tasks:
     enabled: true
     pool: translate
     outputChannel: metadata
-    targetLanguages: [en, fr, es, de, it] # [] = follow translate targets
+    targetLanguages: [it, ja, uk, en, de, zh, ko, fr, pt, es] # [] = follow translate targets
     maxStringsPerCall: 60
     repairAttempts: 2
     useTranslationMemory: run
@@ -402,7 +402,7 @@ llm:
           fr: [gpt-luna, minimax-m3, minimax-m3-free]	
           it: [gpt-luna, deepseek]
           pt: [gpt-luna, minimax-m3-free, minimax-m3, gemma-local]
-          uk: [minimax-m3, minimax-m3-free, deepseek, gpt-luna]
+          uk: [deepseek, minimax-m3, minimax-m3-free, gpt-luna]
           zh: [gemma-local, deepseek, gpt-luna]
           ko: [gemma-local, deepseek, gpt-luna]
         exclude:
@@ -412,9 +412,10 @@ llm:
 
       # Free OmniRoute search targets first; paid-search is the final fallback.
       # maxTargets must stay >= 4; least-busy may use paid search for throughput.
+      # search-std, search-safe, search-mx, search-std, search-safe, paid-search
       websearch:
-        models: [search-mx, search-std, search-safe, paid-search]
-        strategy: cost-optimized
+        models: [search-std, search-safe]
+        strategy: sequential
     # demote | skip on overflow; `skip` avoids known-truncated calls.
     onOverflow: skip
     options: {}

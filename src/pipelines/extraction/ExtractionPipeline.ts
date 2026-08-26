@@ -127,7 +127,7 @@ export class ExtractionPipeline implements DocumentPipeline {
 
     if (fields.length === 0) {
       const merged = base
-        ? mergeDossier(base.dossier, { metadata: {}, media: harvest, documents: [] }, options)
+        ? mergeDossier(base.dossier, { metadata: {}, media: harvest, documents: harvest.documents }, options)
         : undefined;
       notes.push('Nothing left to extract; the existing dossier already answers every field.');
       return this.emit(
@@ -175,7 +175,11 @@ export class ExtractionPipeline implements DocumentPipeline {
       accept: (record) => this.accept(record, config, satisfied, local),
     });
 
-    const built = buildDossier(outcome.value, fields, { ...options, media: harvest });
+    const built = buildDossier(outcome.value, fields, {
+      ...options,
+      media: harvest,
+      documents: harvest.documents,
+    });
     notes.push(...outcome.notes, ...built.notes);
 
     // An absent key means two different things depending on this, and only the
@@ -303,18 +307,19 @@ export class ExtractionPipeline implements DocumentPipeline {
     return merged.dossier;
   }
 
-  /** The gallery, read out of the article rather than asked for. */
+  /** The gallery and the reference list, read out of the article rather than asked for. */
   private harvest(config: ExtractTaskConfig, item: WorkItem, notes: string[]): HarvestResult {
-    if (!config.harvest.photos && !config.harvest.music) {
-      return { photos: [], music: [], imageTargets: [], notes: [] };
+    const { photos, music, documents } = config.harvest;
+    if (!photos && !music && !documents) {
+      return { photos: [], music: [], documents: [], imageTargets: [], notes: [] };
     }
 
     const harvested = harvestMedia(item.content, config.harvest);
     notes.push(...harvested.notes);
-    if (harvested.photos.length + harvested.music.length > 0) {
+    if (harvested.photos.length + harvested.music.length + harvested.documents.length > 0) {
       notes.push(
-        `Read ${harvested.photos.length} photo(s) and ${harvested.music.length} audio item(s) ` +
-          'out of the article — no tokens spent on media.',
+        `Read ${harvested.photos.length} photo(s), ${harvested.music.length} audio item(s) and ` +
+          `${harvested.documents.length} document(s) out of the article — no tokens spent on media.`,
       );
     }
     return harvested;

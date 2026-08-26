@@ -135,6 +135,7 @@ export class PortraitPipeline implements DocumentPipeline {
     const articleImages = harvestMedia(item.content, {
       photos: true,
       music: false,
+      documents: false,
       maxItems: ARTICLE_IMAGES,
     }).imageTargets;
 
