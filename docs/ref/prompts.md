@@ -151,6 +151,39 @@ failing the call for. The third is *worse*, not wrong — which half of `Debuss�
 is right is not knowable from here — so it is only ever re-asked, and a document
 is never lost over it.
 
+### …until the pool runs out
+
+The first two escalate, and escalation ends. On the **last** task attempt every
+model in the pool has already answered this document and `lastAttempt` only
+changes *how* the same ones are asked, so from there `untranslatedReason`
+reports (`untranslatedNote`) instead of rejecting and the edition is published
+as sent. The distinction the middle of this section draws — wrong is worth
+failing a call for — is a claim about a call, not about a run: once no call can
+go differently, a check that still rejects is choosing between a bad document
+and no document at all.
+
+Measured on a real run before this existed: one fragment took `assad_b` down
+every target in the pool, then a second attempt, in each of eleven target
+languages — 39 `response_format` errors, 30 retries and 22 fallbacks, and not
+one edition of the article produced.
+
+### Evidence is a word, not a letter
+
+The fragment in that run was `**Danсa dos Tons**` — a Portuguese album title
+with the Cyrillic `с` (U+0441) typed into `Danсa` on a Russian keyboard, saved
+that way in `input/ru/assad_b.bio.md`. One letter was the whole of the reason
+`isTranslatable` sent it and `untranslatedReason` rejected the answer, and every
+model was right to hand the title back untouched.
+
+`withoutMixedWords` strikes two-alphabet words out before either test reads the
+fragment. That definition is not new: `mixedScriptWords` already calls the shape
+what it is — no human writes it and no source contains it on purpose — so a
+letter trapped inside one is not evidence of anything. Only the evidence goes;
+a Russian sentence that happens to contain such a word is still translated on
+the rest of it. `falseSourceEvidence` names the word for the run notes, because
+a fragment kept verbatim for a typo is the right outcome and a silent one, and
+the article is the thing that needs fixing.
+
 Both halves of `untranslatedReason` were needed, and a live run is what proved
 it. The alphabet test catches a name and misses a sentence: eight lines of
 Russian prose reached one Spanish edition, every one of them carrying a Latin

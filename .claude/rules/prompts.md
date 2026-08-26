@@ -23,6 +23,12 @@ Full account: [docs/ref/prompts.md](../../docs/ref/prompts.md). Eta conventions:
   with every letter still in the source alphabet, is re-asked and then handed to the next model
   (`untranslatedReason`). A word that changed alphabet halfway through is only ever re-asked and is
   published with a note — which half is right is not knowable, and a document is worth more.
+- **…and a check is bounded by the pool.** On the last task attempt there is no model left to
+  reach, so `untranslatedReason` reports rather than rejects. Insisting past that point buys nothing
+  and costs the document — measured: eleven editions of `assad_b`, none of them producible.
+- **Evidence of the source language is a *word*, not a letter.** `Danсa dos Tons` is a Portuguese
+  title with one Cyrillic `с` typed into it; `withoutMixedWords` strikes such words out before
+  `isTranslatable` or `untranslatedReason` reads the fragment, so the title is never sent.
 - **The four naming rules, in precedence order**: a name already printed in another language *is*
   that name → a personal or place name is rendered from the **source spelling**, never from
   nationality → a source-script-only title is romanized *and* glossed once → the gloss never nests

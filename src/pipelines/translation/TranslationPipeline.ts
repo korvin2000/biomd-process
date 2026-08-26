@@ -26,10 +26,13 @@ import { hashStructure } from '../../shared/hash.js';
 import { keyOf, type LocalizationUnit } from '../localization/StringTable.js';
 import { runWithEscalation, type Parsed } from '../shared/escalation.js';
 import {
+  falseSourceEvidence,
   halfTransliteratedNote,
   hasOwnScript,
   introducedMixedScriptWords,
   isTranslatable,
+  mistypedSourceNote,
+  untranslatedNote,
   untranslatedReason,
 } from '../shared/script.js';
 import { complexityOf } from '../../routing/strategies/adaptive/ComplexityScorer.js';
@@ -193,6 +196,11 @@ export class TranslationPipeline implements DocumentPipeline {
       if (!chosen || (chosen.kind !== 'paragraph' && span.kind === 'paragraph')) spanOf.set(keyOf(span.text), span);
     }
     const keepForeign = config.foreignFragments === 'keep' && hasOwnScript(document.language);
+    // Every model in the pool has already had this document and answered badly;
+    // `lastAttempt` only changes how the same ones are asked. A check that no
+    // model can satisfy has run out of anywhere to escalate to, so from here it
+    // reports instead of rejecting. See {@link untranslatedNote}.
+    const lastResort = context.attempt >= context.config.reliability.taskFallback.maxAttempts;
     const articleContext = describeArticle(document, config.contextChars);
 
     const batch = await translateUnits({
@@ -242,9 +250,11 @@ export class TranslationPipeline implements DocumentPipeline {
         // A fragment handed back unchanged, or handed back with every letter
         // still in the source alphabet, was charged for and not answered.
         // Rejected on the strict round too: this is a defect another model
-        // demonstrably does not have, and reaching one is the point.
+        // demonstrably does not have, and reaching one is the point — until
+        // there is no other model left, at which point insisting costs the
+        // document and buys nothing.
         const untranslated = untranslatedReason(unit.text, translation, document.language, targetLang);
-        if (untranslated) return untranslated;
+        if (untranslated && !(strict && lastResort)) return untranslated;
         // Half a name in each alphabet is the other model's other habit. Only
         // ever re-asked, never failed: which half is right is not knowable from
         // here, so a mixture that survives the re-ask is published with the note
@@ -266,6 +276,21 @@ export class TranslationPipeline implements DocumentPipeline {
     const markdown = applyTextSpans(document.content, spans, byText);
 
     const notes = [...batch.notes];
+    // A fragment kept verbatim because its only Russian letter is a typo is the
+    // right outcome and an invisible one — the article stays wrong, and the next
+    // run reaches the same conclusion again. Named here so it can be fixed:
+    // `biomd report --notes typo` lists them.
+    const mistyped = keepForeign
+      ? [...new Set(units.flatMap((unit) => falseSourceEvidence(unit.text, document.language)))]
+      : [];
+    if (mistyped.length > 0) notes.push(mistypedSourceNote(mistyped));
+    // What the last attempt let through, read off the finished document rather
+    // than off the rounds: a fragment re-asked four times and answered on the
+    // fifth is not news, and only what was actually published is.
+    const published = units.filter((unit) =>
+      untranslatedReason(unit.text, batch.translations.get(unit.key) ?? unit.text, document.language, targetLang),
+    );
+    if (published.length > 0) notes.push(untranslatedNote(published.map((unit) => unit.text)));
     // The guard is a safety net here rather than the defence: splicing cannot
     // change the skeleton, so a failure means the extractor missed something.
     const verdict = new StructureGuard(config.verifyStructure).verify(document.content, markdown);

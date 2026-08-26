@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { runJob } from '../src/app/runJob.js';
-import { untranslatedReason } from '../src/pipelines/shared/script.js';
+import { falseSourceEvidence, isTranslatable, untranslatedReason } from '../src/pipelines/shared/script.js';
 import type { CompletionRequest, CompletionResponse, LlmClient, ModelTarget } from '../src/llm/types.js';
 import {
   DEFAULT_FACTS,
@@ -83,6 +84,44 @@ describe('a value the model did not answer', () => {
   });
 });
 
+/**
+ * `Danсa` is `Dança` typed on a Russian keyboard: the `с` is U+0441, Cyrillic.
+ * One mistyped letter used to be the whole of the evidence that a Portuguese
+ * album title was a Russian sentence, and the cost of reading it that way was
+ * eleven editions of `assad_b` that no model in the pool could ever produce —
+ * every one of them handing the title back correctly and being told it had
+ * translated nothing.
+ */
+describe('a source-language word, rather than a source-language letter', () => {
+  const TITLE = '**Danсa dos Tons**';
+
+  it('does not find one in a Latin title with a mistyped Cyrillic letter', () => {
+    expect(isTranslatable(TITLE, 'ru')).toBe(false);
+    expect(untranslatedReason(TITLE, TITLE, 'ru', 'es')).toBeUndefined();
+  });
+
+  it('still finds one in Russian prose that quotes a Latin name', () => {
+    const prose = 'Играл на гитаре Pedro Maldonado';
+    expect(isTranslatable(prose, 'ru')).toBe(true);
+    expect(untranslatedReason(prose, prose, 'ru', 'es')).toMatch(/exactly as it was sent/);
+  });
+
+  /** One typo in a sentence is a typo; it does not excuse the sentence. */
+  it('is not fooled by a typo sitting inside a real Russian sentence', () => {
+    const sentence = 'Лауреат международного конкурса Danсa dos Tons';
+    expect(isTranslatable(sentence, 'ru')).toBe(true);
+    expect(untranslatedReason(sentence, sentence, 'ru', 'es')).toMatch(/exactly as it was sent/);
+  });
+
+  /** Kept verbatim is right, and silent — so the typo is named for the run notes. */
+  it('names the word that caused it', () => {
+    expect(falseSourceEvidence(TITLE, 'ru')).toEqual(['Danсa']);
+    expect(falseSourceEvidence('Allegro vivo', 'ru')).toEqual([]);
+    expect(falseSourceEvidence('Наталья Липницкая', 'ru')).toEqual([]);
+    expect(falseSourceEvidence('Лауреат международного конкурса Danсa', 'ru')).toEqual([]);
+  });
+});
+
 const ARTICLE = `# Наталья Липницкая
 
 Липницкая родилась в Екатеринбурге.
@@ -128,6 +167,8 @@ afterEach(async () => {
 class TwoTranslators implements LlmClient {
   readonly endpointId = 'fake';
   readonly served: { model: string; keys: string[] }[] = [];
+  /** Every fragment that actually crossed the wire, for the checks about what did not. */
+  readonly sent: string[] = [];
 
   constructor(private readonly lazyAnswer: (text: string) => string = (text) => text) {}
 
@@ -138,7 +179,9 @@ class TwoTranslators implements LlmClient {
     if (!isStringBatch(request)) {
       return respond(request.responseFormat?.type === 'json_object' ? JSON.stringify(DEFAULT_FACTS) : '');
     }
-    this.served.push({ model: target.modelId, keys: Object.keys(requestedTable({ target: target.modelId, request })) });
+    const table = requestedTable({ target: target.modelId, request });
+    this.served.push({ model: target.modelId, keys: Object.keys(table) });
+    this.sent.push(...Object.values(table));
     return respond(echoTable(request, target.modelId === 'lazy' ? this.answerAsLazy : translated));
   }
 }
@@ -203,6 +246,96 @@ describe('a model that hands the fragment straight back', () => {
 
     const dossier = JSON.parse(await readFile(workspace.path('out/es/lipnitskaya.bio.json'), 'utf8'));
     expect(dossier.metadata.forename).toBe('Pako');
+  });
+});
+
+describe('a work title with one mistyped Cyrillic letter in it', () => {
+  const TITLE = '**Danсa dos Tons**';
+
+  /**
+   * The measured failure, end to end: the title is not sent, so no model can be
+   * accused of failing to translate it, and no edition of the article is lost to
+   * a fall-back chain that had nothing to fall back to.
+   */
+  it('is never sent, and the typo is named rather than left silent', async () => {
+    await workspace.writeFile(
+      'corpus/ru/assad.bio.md',
+      `# Сержио Ассад
+
+Ассад записал этот альбом в Париже.
+
+${TITLE}
+`,
+    );
+    const client = new TwoTranslators();
+    const app = workspace.app(
+      { ...POOL, tasks: { translate: { enabled: true, targetLanguages: ['es'] } } },
+      client,
+    );
+
+    const outcome = await runJob(app);
+    expect(outcome.summary.failures).toEqual([]);
+    expect(client.sent.some((text) => text.includes('Danсa'))).toBe(false);
+
+    // Kept verbatim, which is what the title deserves…
+    const article = await readFile(workspace.path('out/es/assad.bio.md'), 'utf8');
+    expect(article).toContain(TITLE);
+    // …and said out loud, because the article is the thing that needs fixing.
+    const journal = await readFile(join(outcome.runDir, 'events.jsonl'), 'utf8');
+    expect(journal).toContain('fix the typo in the article');
+  });
+});
+
+/**
+ * The other end of the same check, and the reason it has one.
+ *
+ * Rejecting on the strict round is what reaches a model that translates, and it
+ * works — the pool above proves it. But the ladder is finite, and when the last
+ * rung has been climbed the check is no longer choosing between a good document
+ * and a bad one: it is choosing between a bad document and none. A real run lost
+ * eleven editions of one article that way, to a fragment no model would ever
+ * have translated.
+ */
+describe('a fragment every model in the pool hands straight back', () => {
+  class Stubborn implements LlmClient {
+    readonly endpointId = 'fake';
+    batches = 0;
+
+    async complete(_target: ModelTarget, request: CompletionRequest): Promise<CompletionResponse> {
+      if (!isStringBatch(request)) {
+        return respond(request.responseFormat?.type === 'json_object' ? JSON.stringify(DEFAULT_FACTS) : '');
+      }
+      this.batches += 1;
+      return respond(echoTable(request, (text) => (text.startsWith('Наталья') ? text : translated(text))));
+    }
+  }
+
+  it('is published with a note rather than costing the document', async () => {
+    const client = new Stubborn();
+    const app = workspace.app(
+      {
+        ...POOL,
+        reliability: { taskFallback: { maxAttempts: 2 } },
+        tasks: { translate: { enabled: true, targetLanguages: ['es'] } },
+      },
+      client,
+    );
+
+    const outcome = await runJob(app);
+    expect(outcome.summary.failures).toEqual([]);
+
+    // It insisted first — down the pool and then over a second attempt.
+    expect(client.batches).toBeGreaterThan(2);
+
+    // The rest of the article is translated; the value nobody would answer is
+    // published as it was sent…
+    const article = await readFile(workspace.path('out/es/lipnitskaya.bio.md'), 'utf8');
+    expect(article).toContain('Наталья Липницкая');
+    expect(article).toContain(translated('Липницкая родилась в Екатеринбурге.'));
+
+    // …and the note is the whole account of a decision that produced a file.
+    const journal = await readFile(join(outcome.runDir, 'events.jsonl'), 'utf8');
+    expect(journal).toContain('came back untranslated from every model in the pool');
   });
 });
 

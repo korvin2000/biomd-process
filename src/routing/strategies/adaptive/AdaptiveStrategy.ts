@@ -75,10 +75,10 @@ const PRIOR_STRENGTH = 3;
  * At these values the mean over five runs is roughly 63 / 21 / 16 against a
  * stated target of 65 / 25 / 10.
  */
-const W_THROUGHPUT = 0.8;
+const W_THROUGHPUT = 1.0;
 const W_HEALTH = 1.8;
-const W_COST = 1.2;
-const W_PROSE = 0.8;
+const W_COST = 0.8;
+const W_PROSE = 0.65;
 
 /**
  * How far complexity is allowed to bend the quality score.
@@ -112,23 +112,34 @@ const COMPLEXITY_PULL = 0.7;
  *
  * The bend is centred here, and this used to be hard-coded to 0.5 — the midpoint
  * of the 0…1 scale, chosen because it is the midpoint of the *scale*. That is
- * not a fact about any corpus, and on this one it was quietly wrong: the median
- * document scores 0.24 and the mean 0.265, so measuring "above average" from 0.5
- * made roughly 93% of the corpus below average and handed the tolerant model a
- * penalty on nearly every document it saw. The complexity term was not
- * discriminating between documents; it was a blanket levy with a rebate for the
- * top 7%.
+ * not a fact about any corpus, and on this one it was quietly wrong: measuring
+ * "above average" from 0.5 made roughly 93% of the corpus below average and
+ * handed the tolerant model a penalty on nearly every document it saw. The
+ * complexity term was not discriminating between documents; it was a blanket
+ * levy with a rebate for the top 7%.
  *
- * Centring on what the corpus actually looks like restores the thing the term is
- * for — above this line the structure-holding model, below it the prose model —
- * and it is the constant to change when the corpus changes, which
- * `tools/simulate-adaptive.ts` prints the distribution for.
+ * 0.23 — the **median** of `manual/`, 736 real documents, this deployment's own
+ * corpus and by far the largest sample measured so far. Earlier this was 0.19,
+ * fitted by a grid search against a 196-document slice for its effect on the
+ * *split* rather than measured as a property of the corpus, which is a
+ * different question and the same mistake `COMPLEXITY_PULL` was already
+ * documented against: a structural constant tuned to hit a share is a share
+ * fitted through the back door, and moves again the moment anything else does.
+ * Measured honestly, the split shifts from 72/24/4 to **76/20/4** — deepseek
+ * gains what the midpoint no longer artificially hands minimax-m3. That shift
+ * is not a defect; it is what an honest midpoint costs, and the level knobs
+ * (`W_PROSE`, `W_COST`) are where a share should be recovered from if it needs
+ * to be, not this one.
+ *
+ * Centring on what the corpus actually looks like restores the thing the term
+ * is for — above this line the structure-holding model, below it the prose
+ * model — and it is the constant to revisit when the corpus changes materially,
+ * which `tools/simulate-adaptive.ts` prints the distribution for.
  *
  * Note that this is **not** the same quantity as `DEFAULT_PROFILE.tolerance`,
- * which is also 0.5 and is the neutral point of a different axis. They were the
- * same number by coincidence.
+ * which is 0.5 and is the neutral point of a different axis.
  */
-const COMPLEXITY_MIDPOINT = 0.16;
+const COMPLEXITY_MIDPOINT = 0.19;
 
 /** A consecutive-failure streak counts this many times over against a target. */
 const STREAK_PENALTY = 0.12;

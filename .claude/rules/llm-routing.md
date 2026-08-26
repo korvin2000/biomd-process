@@ -41,6 +41,18 @@ provider quirks: [docs/ref/providers.md](../../docs/ref/providers.md).
   length capped every target's certainty at ten and handed the decision to cost; weighting
   throughput by window length left the hand-set prior holding 3/7 of the term for the whole run, so
   a target sustaining 200 tok/s against a prior of 81 scored as 149.
+- **Score a term through a knee when the measurement is noisier than the thing it measures.**
+  Speed on openrouter is a mixture over dozens of providers, so `v / max` is steepest exactly where
+  the reading is least trustworthy. `SPEED_TOLERANCE` places the knee at the noise floor: a 2.5x
+  difference is nearly a tie, a 3.5x one is not.
+- **`COMPLEXITY_MIDPOINT` is a corpus property, not the middle of the scale.** It was 0.5 because
+  0…1 has 0.5 in the middle; this corpus has a median of 0.24, so 93% of it counted as "below
+  average" and the tolerant model was penalised on nearly everything. Fitting it moved that model
+  from 6.7% to 24% at unchanged weights.
+- **A share held up by a hairline tie is not a share.** Two targets separated by a *constant* term
+  (price) flip all at once when that constant nears zero — one weight moved 15% swung seventeen
+  points of traffic. Two separated by a *payload-dependent* term (complexity × tolerance) slide a
+  threshold instead. `tools/matrix-adaptive.ts` gates on that before it ranks on error.
 - **Anything measured must be able to go stale.** A slow window demotes a target, and being demoted
   is what stops the next measurement arriving. `STREAK_DECAY_MS` and `THROUGHPUT_DECAY_MS` exist so
   the evidence expires rather than the target.

@@ -38,7 +38,7 @@ cli → app → core ─┬→ pipelines → io
 | `localization/` | `LocalizePipeline` | `StringTable.ts` — `collectUnits` `applyUnits` `keyOf` `missingKeys` · `TranslationMemory.ts` · `TranslationMemoryRegistry.ts` |
 | `portrait/` | `PortraitPipeline` `assetPath` | none — all logic lives in `src/images` |
 | `catalog/` | `CatalogPipeline` | `names.ts` — `displayNamesOf` `latinTitleOf` `AliasPolicy`, and a re-export of `DisplayNameOrder` (which lives in `domain/types.ts`, because `validate` holds the same opinion for `INV-15`) |
-| `shared/` | cross-pipeline helpers | `escalation.ts` — `runWithEscalation` `EscalationSpec` · `stringBatch.ts` — `translateUnits` (repair + narrowing ladders) · `dossierSource.ts` — `findSourceDossier` `findDossierToLocalize` `outputDossierPath` · `script.ts` — `isTranslatable` `hasOwnScript` `mixedScriptWords` `introducedMixedScriptWords` `untranslatedReason` · `roster.ts` — `rosterEntryFor` |
+| `shared/` | cross-pipeline helpers | `escalation.ts` — `runWithEscalation` `EscalationSpec` · `stringBatch.ts` — `translateUnits` (repair + narrowing ladders) · `dossierSource.ts` — `findSourceDossier` `findDossierToLocalize` `outputDossierPath` · `script.ts` — `isTranslatable` `hasOwnScript` `mixedScriptWords` `introducedMixedScriptWords` `untranslatedReason` `falseSourceEvidence` `untranslatedNote` · `roster.ts` — `rosterEntryFor` |
 
 ## src/documents — reading Markdown and putting it back
 

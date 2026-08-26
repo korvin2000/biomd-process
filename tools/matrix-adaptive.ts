@@ -197,6 +197,42 @@ interface Candidate {
   error: number;
   /** How far the split moves between `slow` and `very slow`, percentage points. */
   responsiveness: number;
+  /** Worst share swing under a 15% nudge to any one weight, percentage points. */
+  fragility: number;
+}
+
+/**
+ * How far the split moves when one weight is nudged by 15%.
+ *
+ * A share is only worth quoting if it is a property of the constants rather than
+ * of where they happen to sit relative to a cliff, and this pool can produce
+ * cliffs: two targets separated by a *constant* offset — price, say — are either
+ * always above or always below one another, so when that offset approaches zero
+ * every document flips at once. Measured on a candidate that scored well on
+ * every other criterion, moving `prose` from 0.8 to 0.7 moved **seventeen
+ * points** of traffic from deepseek to the free tier.
+ *
+ * The contrast worth keeping in mind: deepseek against minimax-m3 is separated
+ * by a *payload-dependent* term, so nudging a weight slides a threshold through
+ * document space and the share moves in proportion to how many documents sit
+ * near it. That is a stable split. A split held up by a hairline tie is not, and
+ * nothing that fitted it will survive the first hour of provider drift.
+ */
+function fragilityOf(
+  requests: readonly RoutedRequest[],
+  tuning: AdaptiveTuning,
+  baseline: Record<string, number>,
+): number {
+  let worst = 0;
+  for (const knob of ['throughput', 'health', 'cost', 'prose', 'complexityPull'] as const) {
+    for (const factor of [0.85, 1.15]) {
+      const nudged = shareOf(requests, { ...tuning, [knob]: tuning[knob] * factor }, SCENARIOS[0]!);
+      for (const model of CONTENDERS) {
+        worst = Math.max(worst, Math.abs((nudged[model] ?? 0) - (baseline[model] ?? 0)));
+      }
+    }
+  }
+  return worst;
 }
 
 function parseTarget(argv: readonly string[]): Record<string, number> {
@@ -225,11 +261,17 @@ function numberFlag(argv: readonly string[], name: string, fallback: number): nu
  */
 const GRID = {
   throughput: [0.6, 0.8, 1.0],
-  health: [1.4, 1.6, 1.8],
-  cost: [0.8, 1.0, 1.2, 1.4],
-  prose: [0.5, 0.65, 0.8],
-  complexityPull: [0.4, 0.5, 0.6, 0.7],
-  complexityMidpoint: [0.16, 0.19, 0.22, 0.25],
+  health: [1.2, 1.5, 1.8],
+  cost: [0.8, 1.1, 1.4, 1.8, 2.2],
+  prose: [0.2, 0.35, 0.5, 0.65, 0.8],
+  complexityPull: [0.4, 0.55, 0.7, 0.9],
+  // Held tight around the honest, corpus-measured value (0.23 — the median of
+  // `manual/`) rather than left free the way `prose` and `cost` are. Widening
+  // this to hit a share is the exact mistake `COMPLEXITY_MIDPOINT`'s own comment
+  // documents against: it stops being a description of the corpus and becomes
+  // a share fitted through the back door. The narrow band here is a robustness
+  // check, not a search.
+  complexityMidpoint: [0.21, 0.23, 0.25],
   speedTolerance: [2.75, 3.0, 3.25],
   speedTolerancePenalty: [0.06, 0.08, 0.11],
 } as const;
@@ -320,17 +362,39 @@ async function main(): Promise<void> {
     }
 
     const error = CONTENDERS.reduce((sum, m) => sum + Math.abs((nominal[m] ?? 0) - (wanted[m] ?? 0)), 0);
-    candidates.push({ tuning, nominal, slow, verySlow, error, responsiveness });
+    candidates.push({ tuning, nominal, slow, verySlow, error, responsiveness, fragility: 0 });
   }
 
-  candidates.sort((a, b) => a.error - b.error || b.responsiveness - a.responsiveness);
+  // Fragility only for the ones worth the arithmetic: it costs ten extra
+  // replays apiece, and a candidate thirty points from the target is not going
+  // to be rescued by being stable about it.
+  candidates.sort((a, b) => a.error - b.error);
+  const examined = candidates.slice(0, 400);
+  for (const candidate of examined) {
+    candidate.fragility = fragilityOf(requests, candidate.tuning, candidate.nominal);
+  }
+
+  // A split that cannot survive a 15% nudge to one weight is not a split, so
+  // fragility gates before error ranks — but as a band rather than a threshold,
+  // because a point or two of it is meaningless.
+  const stable = examined.filter((c) => c.fragility <= 10);
+  const ranked = (stable.length > 0 ? stable : examined).sort(
+    (a, b) => a.error - b.error || a.fragility - b.fragility || b.responsiveness - a.responsiveness,
+  );
+  candidates.length = 0;
+  candidates.push(...ranked);
+  console.log(
+    `
+${examined.length} best-fitting examined for stability · ${stable.length} survive a 15% nudge to any one weight
+`,
+  );
 
   console.log(
     `${considered} combinations · ${disqualified} disqualified on the speed requirements · ` +
       `${candidates.length} left · target ${CONTENDERS.map((m) => `${m}=${wanted[m] ?? 0}`).join('/')}\n`,
   );
   console.log(
-    '  thr  hlth  cost prose  pull   mid   tol  pen | nominal            | 2.5x slow          | 3.5x slow          | err  resp',
+    '  thr  hlth  cost prose  pull   mid   tol  pen | nominal            | 2.5x slow          | 3.5x slow          | err  resp  frag',
   );
   for (const c of candidates.slice(0, top)) {
     const t = c.tuning;
@@ -338,7 +402,8 @@ async function main(): Promise<void> {
       `  ${t.throughput.toFixed(2)}  ${t.health.toFixed(2)}  ${t.cost.toFixed(2)}  ${t.prose.toFixed(2)}  ` +
         `${t.complexityPull.toFixed(2)}  ${t.complexityMidpoint.toFixed(2)}  ${t.speedTolerance.toFixed(1)}  ` +
         `${t.speedTolerancePenalty.toFixed(2)} | ` +
-        `${row(c.nominal)} | ${row(c.slow)} | ${row(c.verySlow)} | ${c.error.toFixed(1).padStart(4)}  ${c.responsiveness.toFixed(1)}`,
+        `${row(c.nominal)} | ${row(c.slow)} | ${row(c.verySlow)} | ${c.error.toFixed(1).padStart(4)}  ` +
+        `${c.responsiveness.toFixed(1).padStart(4)}  ${c.fragility.toFixed(1).padStart(4)}`,
     );
   }
   console.log(

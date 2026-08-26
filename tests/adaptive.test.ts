@@ -221,9 +221,14 @@ describe('the adaptive strategy', () => {
       const rows = scoreTargets([deepseek], contextFor(complexity));
       return rows[0]!.score;
     };
+    // Against `complexityMidpoint` rather than 0.5, which is where this used to
+    // read the neutral point from — back when the midpoint was hard-coded to
+    // the middle of the scale rather than fitted to the corpus. The invariant is
+    // unchanged; the complexity it is measured from is a constant now.
+    const neutral = DEFAULT_TUNING.complexityMidpoint;
     expect(profileFor('deepseek').tolerance).toBeLessThan(0.5);
-    expect(scoreAt(0)).toBeCloseTo(scoreAt(0.5), 10);
-    expect(scoreAt(1)).toBeLessThan(scoreAt(0.5));
+    expect(scoreAt(0)).toBeCloseTo(scoreAt(neutral), 10);
+    expect(scoreAt(1)).toBeLessThan(scoreAt(neutral));
   });
 
   it('does not let one lucky fast call hand over the corpus', () => {
@@ -274,9 +279,14 @@ describe('the adaptive strategy', () => {
 
   it('treats a missing complexity signal as the neutral midpoint, not as zero', () => {
     // A caller that measured nothing must not be read as "this document is as
-    // simple as documents get" — that is a claim, and nobody made it.
+    // simple as documents get" — that is a claim, and nobody made it. `bend = 0`
+    // is what a missing signal produces, and `bend = 0` is by construction the
+    // same thing as a document sitting exactly on `complexityMidpoint`.
     const unmeasured = makeRouter().select([deepseek, minimax], { ...ask(), pool: 'p' });
-    const neutral = makeRouter().select([deepseek, minimax], { ...ask(0.5), pool: 'p' });
+    const neutral = makeRouter().select([deepseek, minimax], {
+      ...ask(DEFAULT_TUNING.complexityMidpoint),
+      pool: 'p',
+    });
     const easy = makeRouter().select([deepseek, minimax], { ...ask(0.0), pool: 'p' });
 
     expect(unmeasured.map((t) => t.modelId)).toEqual(neutral.map((t) => t.modelId));
@@ -482,6 +492,91 @@ describe('the response to a target becoming slow', () => {
       const rows = scoreTargets([deepseek, minimax, minimaxFree], contextFor(0.24, slowed(factor), true));
       expect(rows[0]!.target.modelId, `minimax-m3 took a clean document at ${factor}x`).not.toBe('minimax-m3');
     }
+  });
+});
+
+/**
+ * The metered free tier, which is the pool member most likely to start refusing.
+ *
+ * Its characteristic failure is not a bad answer but a 429: the allowance runs
+ * out, every call fails for a while, and then it works again. The requirement is
+ * the whole arc — notice quickly, stop prioritising it, and be able to give it
+ * back its place without a restart, because "it is available again" is the
+ * normal case rather than the exception.
+ */
+describe('a free tier that starts refusing', () => {
+  const pool = [deepseek, minimax, minimaxFree];
+  const rank = (stats: TargetStatsRegistry): string[] =>
+    scoreTargets(pool, contextFor(0.2, stats, true)).map((r) => r.target.modelId);
+  const scoreOf = (stats: TargetStatsRegistry): number =>
+    scoreTargets(pool, contextFor(0.2, stats, true)).find((r) => r.target.modelId === 'minimax-m3-free')!
+      .score;
+
+  /** Everyone warm and clean, which is what a run looks like before anything goes wrong. */
+  function healthy(): TargetStatsRegistry {
+    const stats = new TargetStatsRegistry();
+    for (const t of pool) {
+      for (let i = 0; i < 20; i += 1) stats.recordSuccess(t.key, 1000, 0.001, profileFor(t.modelId).priorThroughput);
+    }
+    return stats;
+  }
+
+  it('drops it down the chain within a handful of refusals, and hands it back when it recovers', () => {
+    const stats = healthy();
+    const before = scoreOf(stats);
+
+    // Three 429s in a row. Three, not thirty: an allowance that has run out says
+    // so immediately, and a strategy that needs a dozen failures to notice has
+    // spent a dozen calls finding out.
+    for (let i = 0; i < 3; i += 1) stats.recordFailure(minimaxFree.key);
+    const refusing = scoreOf(stats);
+
+    expect(refusing).toBeLessThan(before - 0.15);
+    expect(rank(stats).at(-1), 'a refusing target must not still be preferred').toBe('minimax-m3-free');
+
+    // The allowance comes back. Two independent routes have to carry it, because
+    // a target scored to the bottom of the chain does not get the call that
+    // would clear it: the streak fades once nothing has been sent for a while…
+    stats.get(minimaxFree.key).lastUsedAt = Date.now() - 90_000;
+    const rested = scoreOf(stats);
+    expect(rested).toBeGreaterThan(refusing);
+
+    // …and the window forgets the failures outright once newer outcomes push
+    // them out, which is what actually restores it.
+    for (let i = 0; i < 10; i += 1) {
+      stats.recordSuccess(minimaxFree.key, 1000, 0, profileFor('minimax-m3-free').priorThroughput);
+    }
+    expect(scoreOf(stats)).toBeCloseTo(before, 1);
+    // The run-long ledger still remembers; the routing decision does not.
+    expect(stats.get(minimaxFree.key).failures).toBe(3);
+  });
+
+  it('keeps it in the chain as a fallback rather than removing it', () => {
+    const stats = healthy();
+    for (let i = 0; i < 8; i += 1) stats.recordFailure(minimaxFree.key);
+    // Demoted, never dropped: the pool is also the fallback chain, and a target
+    // that is last is still the thing that catches a failure above it.
+    expect(rank(stats)).toHaveLength(3);
+    expect(rank(stats).at(-1)).toBe('minimax-m3-free');
+  });
+
+  it('does not let a size ceiling and a complexity penalty both be ignored', () => {
+    // The two guards the deployment asked for, in one place. This target fails
+    // more than deepseek on large *and* on complex requests, so it must lose on
+    // each axis independently — a small tangled document and a large clean one
+    // both have to move away from it.
+    const stats = healthy();
+    const ceiling = profileFor('minimax-m3-free').maxComfortableTokens!;
+    const scoreWith = (complexity: number, inputTokens: number): number => {
+      const base = contextFor(complexity, stats, true);
+      const context = { ...base, request: { ...base.request, estimatedInputTokens: inputTokens } };
+      return scoreTargets(pool, context as RoutingContext).find((r) => r.target.modelId === 'minimax-m3-free')!
+        .score;
+    };
+
+    const small = scoreWith(0.1, Math.round(ceiling * 0.8));
+    expect(scoreWith(0.55, Math.round(ceiling * 0.8)), 'complexity did not cost it').toBeLessThan(small);
+    expect(scoreWith(0.1, ceiling * 2), 'size did not cost it').toBeLessThan(small);
   });
 });
 

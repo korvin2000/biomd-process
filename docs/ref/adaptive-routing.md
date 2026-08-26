@@ -17,7 +17,7 @@ busy, which in practice means the ones sharing an endpoint.
 
 | Term | Source | Unit |
 |---|---|---|
-| throughput | rolling window of the last 4 successes, confidence from **cumulative successes**, decaying with idleness | **generated** tokens / wall-clock second |
+| throughput | rolling window of the last 4 successes, confidence from **cumulative successes**, decaying with idleness, scored **through a knee** | **generated** tokens / wall-clock second |
 | health | failure rate over the **last 10 outcomes**, plus a **time-decayed** streak | 0…1, higher is better |
 | cost | `context.estimatedCost(target)` for this request | USD |
 | prose quality | `ModelProfile.proseQuality` — a judgement | 0…1 |
@@ -50,6 +50,34 @@ measurement arriving. `THROUGHPUT_DECAY_MS` (2 minutes idle) decays the *confide
 so the target is scored on its profile again and gets another turn — the same shape as the circuit
 breaker's half-open probe.
 
+### Speed is scored through a knee, because it is not a property of the model
+
+The other three terms compare properties of a *model*. Speed on openrouter is not one: a model id
+there is served by dozens of providers at once, one managing ten tokens a second while another does
+a hundred, and the population drifts with the clock — faster in the evening, slower through a
+working day. Two identical models measured over four calls each can differ threefold for no reason
+that will still be true in a minute.
+
+`v / max` has the response backwards for that job. It is steepest exactly where the measurement is
+least trustworthy: a 2.5× reading spent 0.6 of the term, and going on to 3.5× cost only 0.11 more.
+The strategy reacted hardest to the differences most likely to be noise and had almost nothing left
+to say about the ones that were not.
+
+So the term is piecewise-linear in **octaves** — "twice as slow" is one step whether it happens at
+40 tok/s or 400 — with a gentle slope inside the noise band and a steep one outside it:
+
+| constant | means |
+|---|---|
+| `SPEED_TOLERANCE` 3.0 | ratio still plausibly the provider lottery |
+| `SPEED_TOLERANCE_PENALTY` 0.06 | what a target exactly that much slower gives up |
+| `SPEED_FULL_PENALTY_RATIO` 8 | ratio at which the term is spent entirely |
+
+The band is set from the measurement's own noise floor: the harness models ±55% per call on an
+openrouter id, so two identical targets can read as far apart as 3.4× on a bad pair of draws.
+Measured at the median document, deepseek's score falls 0.008 going from parity to 2.5× slower and
+0.035 more going on to 3.5× — flat inside the band, decisive outside it. Pinned by two tests, which
+assert the *ratio* between those two drops rather than either number.
+
 ### Every value is rescaled in proportion, and `min / v` is not how
 
 Min-max keeps the ordering and throws away the magnitude: two targets failing 4.7% and 1.8% of the
@@ -80,24 +108,58 @@ turning `COMPLEXITY_PULL` is how an earlier calibration arrived at a best value 
 split came out right and the complexity term, the entire reason this strategy exists, had stopped
 doing anything. See "What the split can and cannot be" below.
 
+### `COMPLEXITY_MIDPOINT` is where "hard" starts, and it is not 0.5
+
+The bend is centred here, and this was hard-coded to 0.5 for most of the strategy's life — the
+midpoint of the 0…1 *scale*, chosen because it is the midpoint of the scale. That is not a fact
+about any corpus, and on this one it was quietly wrong: measuring "above average" from 0.5 made
+roughly 93% of the corpus below average and handed the tolerant model a penalty on nearly every
+document it saw. The complexity term was not discriminating between documents. It was a blanket levy
+with a rebate for the top 7%.
+
+**Current value: 0.23, the median of `manual/`** — 736 real documents, this deployment's own corpus
+and the largest sample measured so far. It went through two versions before that, and the difference
+between them is worth keeping:
+
+1. hard-coded to **0.5**, wrong for the reason above;
+2. fitted to **0.19** by a grid search on a 196-document slice, chosen for its effect on the
+   *openrouter split* rather than measured as a property of the corpus. This is the same mistake
+   `COMPLEXITY_PULL` is documented against below: a structural constant tuned to hit a share is a
+   share fitted through the back door, and it moves again the moment any weight does. It also made
+   the constant's name a lie — 0.19 is not where this corpus's documents are actually split in half.
+3. **measured at 0.23** from the 736-document corpus. Honest, and it costs something: the split
+   shifts from 72/24/4 to **76/20/4** on `out/ru`, because the midpoint is no longer artificially
+   handing the tolerant model a bend on documents that are not, by this corpus's own median, hard.
+   That shift is not a defect. If a share needs recovering, the level knobs — `W_PROSE`, `W_COST` —
+   are where to take it from, not this one.
+
+It is the constant to re-measure when the corpus changes materially, and `tools/simulate-adaptive.ts`
+prints the distribution to set it from.
+
+Note it is **not** the same quantity as `DEFAULT_PROFILE.tolerance`, which is 0.5 and is the neutral
+point of a different axis. They were the same number by coincidence at an earlier version of this
+file, and a missing `signals.complexity` is treated as "exactly on the midpoint" — `bend = 0` — not
+as zero.
+
 ### The crossover, which is the thing worth stating
 
-With `d` the score gap at complexity 0.5 (positive = the tolerant model is ahead) and `Δt` the
+With `d` the score gap at the midpoint (positive = the tolerant model is ahead) and `Δt` the
 tolerance difference, the complexity at which preference flips is
 
 ```text
-c* = 0.5 − d / (2 · COMPLEXITY_PULL · Δt)
+c* = COMPLEXITY_MIDPOINT − d / (2 · COMPLEXITY_PULL · Δt)
 ```
 
 Three consequences that are not obvious and were all got wrong here:
 
-- **If the tolerant model loses at the midpoint, `c*` is above 0.5, always.** No value of
-  `COMPLEXITY_PULL` brings it below. Only ~7% of this corpus scores above 0.5, so the tolerant
-  model's ceiling is that 7% until a *weight or a profile* changes.
+- **If the tolerant model loses at the midpoint, `c*` is above it, always.** No value of
+  `COMPLEXITY_PULL` brings it below. With the midpoint at 0.5, only ~7% of this corpus scored above
+  it, so the tolerant model's ceiling was that 7% until a *weight or a profile* changed — which is
+  why every attempt to fit a 25% share by turning the slope failed.
 - **Which way `COMPLEXITY_PULL` moves a share depends on the sign of `d`.** With `d < 0` a larger
-  pull drags `c*` down towards 0.5 and the tolerant model gains; with `d > 0` it drags `c*` up
-  towards 0.5 and the tolerant model loses. The doc used to state the second as if it were a
-  property of the constant. It is a property of the constant *and* the weights.
+  pull drags `c*` down towards the midpoint and the tolerant model gains; with `d > 0` it drags
+  `c*` up and the tolerant model loses. The doc used to state the second as if it were a property
+  of the constant. It is a property of the constant *and* the weights.
 - **A very low `COMPLEXITY_PULL` does not hand it the corpus — it flattens the score.** All three
   openrouter candidates end up within a hair of each other and the split is then decided by
   exploration, task order and endpoint timing. That reads as a share moving and is actually
@@ -179,14 +241,38 @@ been fitted against that. With the fake spending real time, the same measurement
 
 ```bash
 npx vitest run tests/adaptive.simulation.test.ts               # whole scheduler, fake provider
-npx tsx tools/split-adaptive.ts 10 196 out/ru                  # mean and spread over 10 real runs
-npx tsx tools/calibrate-adaptive.ts complexityPull 0.2,0.3,0.43 --fix=prose=0.35 --corpus=out/ru
+npx tsx tools/split-adaptive.ts 5 196 out/ru                   # mean and spread over real runs
+npx tsx tools/matrix-adaptive.ts --corpus=out/ru --docs=196    # grid search, three speed scenarios
+npx tsx tools/calibrate-adaptive.ts prose 0.5,0.65,0.8 --corpus=out/ru --docs=196 --runs=5
 npx tsx tools/simulate-adaptive.ts out/ru <model-ids>          # complexity distribution, static map
 ```
 
 **Use the harness, not a live run.** A live run reports the split it produced and nothing about
 why, so every hypothesis costs another one. Four consecutive live runs came back "deepseek took
 everything" for four unrelated reasons.
+
+`matrix-adaptive.ts` is the coarse pass and `calibrate-adaptive.ts` the fine one, and the division of
+labour is a cost thing: a real run over the full corpus takes ~40 seconds, so a thousand-point grid
+is a week. The matrix **records one real run's routing decisions** — every `complexity`,
+`estimatedInputTokens` and `expectedOutputTokens` the pipelines actually posed — and replays them
+against the real `scoreTargets` under each candidate. Nothing reimplements the arithmetic; nothing
+invents a payload.
+
+What replay drops is the feedback loop, and getting that right took three attempts, each of which
+the tool now prints an accuracy check against:
+
+| replay model | predicted | measured |
+|---|---|---|
+| one frozen snapshot of warm stats | 97.9 / 2.1 / **0.0** | 87.6 / 5.8 / 6.6 |
+| sequential, updating immediately | 95.0 / 3.6 / 1.4 | 86.3 / 7.9 / 5.8 |
+| sequential, lagged by `IN_FLIGHT = 4` | 65.5 / 29.9 / 4.6 | 65.0 / 29.9 / 5.1 |
+
+The frozen version zeroed the free tier *exactly*, because on this pool the free tier's share is
+almost entirely the exploration bonus. The immediate-update version concentrated, because a run
+scores under concurrency: roughly four calls are outstanding at any moment, so the target that won
+decision *n* has not yet recorded a success when decision *n+1* is scored. **The first line the tool
+prints is replay against harness at the current constants** — if those two disagree, nothing below
+it means anything.
 
 Three things about the instruments:
 
@@ -205,19 +291,57 @@ Three things about the instruments:
 
 ## What the split can and cannot be
 
-Current constants: `W_THROUGHPUT 1.0 · W_HEALTH 1.5 · W_COST 0.2 · W_PROSE 0.5 · COMPLEXITY_PULL 0.43`.
+Current constants:
 
-Measured over 5 runs of the **whole 196-document corpus** (`split-adaptive.ts 5 196 out/ru`), as a
-share of the openrouter calls:
+```text
+W_THROUGHPUT 1.0 · W_HEALTH 1.8 · W_COST 0.8 · W_PROSE 0.65
+COMPLEXITY_PULL 0.7 · COMPLEXITY_MIDPOINT 0.23
+SPEED_TOLERANCE 3.0 · SPEED_TOLERANCE_PENALTY 0.06 · SPEED_FULL_PENALTY_RATIO 8
+```
 
-| | deepseek | minimax-m3 | minimax-m3-free |
+Measured over 5 runs, as a share of the openrouter calls:
+
+| corpus | deepseek | minimax-m3 | minimax-m3-free |
 |---|---:|---:|---:|
-| `proseQuality 0.70` (before) | 91.4 ± 0.8 | 6.7 ± 0.5 | 1.9 ± 0.7 |
-| **`proseQuality 0.85` (shipped)** | **88.5 ± 0.6** | **9.8 ± 0.8** | **1.7 ± 0.3** |
+| stated target | 60 | 25 | 15 |
+| `out/ru`, 196 docs | 76.4 ± 0.4 | 19.7 ± 0.4 | 3.8 ± 0.2 |
+| `manual/`, 736 docs | 82.3 ± 0.5 | 15.4 ± 0.2 | 2.3 ± 0.4 |
 
-At 0.85 minimax-m3 leads by 0.004 at complexity 0.5, so `c*` is **0.489** — a shade under the
-midpoint, which is where ~9% of this corpus sits. Theory and measurement agree to within the
-exploration bonus, which is the first time they have.
+76/20/4 rather than the 72/24/4 an earlier, split-fitted `COMPLEXITY_MIDPOINT` produced — see the
+midpoint section above for why the honest number is preferred over the one that hit the target more
+closely.
+
+### The split shifts with corpus length, independent of what is in the corpus
+
+`out/ru` and `manual/` are the same kind of document — Russian biographies — with almost the same
+complexity distribution: median 0.232 on `manual/`, ~0.24 on `out/ru`; mean 0.257 against ~0.265.
+The four-point gap between their splits is not a property of what they contain. It is a property of
+how many documents there are.
+
+The mechanism is `EXPLORATION_BONUS`, and it decays fast: `0.3 / (1 + successes)` falls from 0.30 at
+zero observations to 0.027 by the tenth success — a tenfold drop in the time it takes a target to be
+tried ten times. Warming a target from 0 to 500 successes and re-scoring at each step:
+
+```text
+n=   0  explore=0.3000  free.score=1.2293
+n=  10  explore=0.0273  free.score=0.9771
+n=  30  explore=0.0097  free.score=0.9632
+n= 500  explore=0.0006  free.score=0.9564
+```
+
+Almost the whole decline happens in the first ten calls, and after that the term is negligible. The
+number of documents affected by a *meaningfully large* exploration bonus is therefore roughly
+constant — bounded by how many calls it takes each target to be tried a few dozen times — while the
+total corpus grows without bound. So the **fraction** of the run served under real exploration
+shrinks as the corpus grows, and with it goes the lift it gives the underdogs. A short corpus
+over-represents them; a long one under-represents the transient and is closer to the strategy's
+*steady state*.
+
+Practically: `manual/`'s 82/15/2 is the better estimate of what a long real run looks like once it
+has settled. `out/ru`'s 76/20/4 is not wrong, but it is measuring a run that never gets past the
+part where exploration still matters. Quote the corpus size next to any split, and treat
+`EXPLORATION_BONUS` as more consequential than "untuned" made it sound — it does not just affect the
+first few calls of a run, it determines what "the split" even converges to.
 
 > **State the split as a distribution, never as a point.** It is not a function of the constants.
 > The strategy learns during a run and task order under `run.concurrency` varies, so a single run is
@@ -228,24 +352,45 @@ It also depends on the corpus. The 16-, 24- and 196-document slices of this repo
 materially different splits because their complexity distributions differ — quote which corpus a
 number came from.
 
-**A share target is not always reachable, and it is worth knowing why before turning anything.**
-minimax-m3 is roughly 1.3× deepseek's speed and 5.8× its price per call. At `proseQuality 0.70` it
-was 0.02 behind at complexity 0.5, `c*` sat at 0.553, and no value of `COMPLEXITY_PULL` could have
-brought its share past the ~7% of documents above that line. The 25% this was once calibrated
-towards was never reachable from the slope; the earlier calibration reached it only because the
-harness was manufacturing a throughput advantage.
+### A share bought with a hairline tie is not a share
 
-Raising a share means raising a **baseline** — `proseQuality`, or a lower `W_COST` — which is a
-claim about the model rather than a tuning exercise, and should be made with evidence and written
-down next to the number.
+The most useful thing the grid search produced was a *rejection*. Candidates that hit 60 / 25 / 15
+almost exactly did exist, and they all did it the same way: `W_COST` around 1.2, which lifts the free
+tier's score to within a hair of deepseek's across a wide range of documents. Measured on the real
+harness, moving `W_PROSE` from 0.8 to 0.7 under one of them moved **seventeen points** of traffic
+from deepseek to the free tier.
 
-**The free tier is currently the piece that does not match its policy.** It was meant to carry
-10–15%; it carries 1.7%. On merit it is last: marginally slower than deepseek (78 against 81),
-lower `tolerance`, the same `proseQuality`, an `oversize` penalty on the larger half of the corpus,
-and a `priorFailureRate` deliberately set high because a metered free tier's characteristic failure
-is a 429. Being free is worth at most `W_COST / ΣW` = 6.25% of the score, and that is not enough to
-overcome the rest. Raising `W_COST` is the lever; it trades money saved against the free tier's
-habit of running out.
+The reason is structural and worth keeping:
+
+- deepseek against minimax-m3 is separated by a **payload-dependent** term — complexity × tolerance.
+  Nudging a weight slides a threshold through document space, and the share moves in proportion to
+  how many documents sit near it. That is a stable split.
+- deepseek against the free tier is separated by a **constant offset** — price. Two lines a constant
+  apart are either always above or always below one another, so as that constant approaches zero
+  every document flips at once. The split is then a property of where the constants happen to sit
+  relative to a cliff, and nothing fitted to it survives the first hour of provider drift.
+
+`tools/matrix-adaptive.ts` therefore gates on **fragility** — the worst share swing under a 15% nudge
+to any one weight — before it ranks on error. Of 3,529 candidates that met the split and speed
+requirements, 340 survived that gate, and every one of them had `W_COST = 0.8`.
+
+### The free tier is structurally capped at a few per cent, and the reason is a requirement
+
+It carries 3.8% against a stated 15%, and the two routes to raising it are both closed:
+
+- **By price.** That is the `W_COST 1.2` family above: unstable, rejected.
+- **By size.** Raising `maxComfortableTokens` would win it the larger documents — and the deployment's
+  own account of this target is that it fails *more often than deepseek* on large and complex
+  requests. Sending it more of exactly that work is the opposite of what was asked.
+
+What is capping it is the faithful encoding of that account: `tolerance 0.2`, below deepseek's 0.25,
+so a document above the complexity midpoint costs it more than it costs anything else in the pool.
+That penalty is now larger than its price advantage. The 15% and the "it crashes more on large and
+complex files" are in direct tension, and the safety-relevant half won.
+
+**If the share matters more**, the lever is `minimax-m3-free`'s `tolerance`, not a weight — and the
+honest first step is to measure the thing nobody has: the A/B behind `proseQuality 0.7` never covered
+the free variant at all, and it now has a prompt override of its own.
 
 ## Measured translation quality
 
@@ -301,8 +446,16 @@ moves it in either direction. It is not excluded.
   ModelProfiles.ts](../../src/routing/strategies/adaptive/ModelProfiles.ts) — batch size does not
   predict failure in this corpus, and OpenRouter free tiers meter requests per day rather than
   tokens.
-- **`EXPLORATION_BONUS = 0.3` was chosen, not fitted.** It is now sweepable
-  (`calibrate-adaptive.ts explorationBonus …`) but has not been swept.
+- **`EXPLORATION_BONUS = 0.3` was chosen, not fitted, and it determines more than the first few
+  calls.** It decays from 0.30 to 0.027 within ten successes per target, so its effect on the
+  *split* is concentrated in a roughly fixed number of early calls rather than scaling with the
+  corpus — which is why `out/ru` (196 docs) and `manual/` (736 docs) measure 76/20/4 and 82/15/2
+  respectively from the same constants on near-identical complexity distributions. Sweepable
+  (`calibrate-adaptive.ts explorationBonus …`) but not yet swept, and a sweep should hold corpus
+  size fixed while it runs, given the above.
+- **`minimax-m3-free`'s `proseQuality 0.7` rests on an A/B that never tested it.** The 20-document
+  Spanish comparison covered deepseek and the paid minimax-m3 only. The free variant now has a
+  prompt override of its own and has never been scored against either.
 - **`OUTLIER_CEILING` is relative to the prior**, so an uncharacterised model can never be measured
   as faster than 3× `DEFAULT_PROFILE.priorThroughput` however fast it is.
 - **`estimatedCost` ignores prompt caching**, so a target with a warm cache is scored at list price.

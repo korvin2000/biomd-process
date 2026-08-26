@@ -68,6 +68,7 @@ tasks:
     harvest:
       photos: true
       music: true
+      documents: true
       maxItems: 60
     emitCatalogHints: true # emit type/gender/country/title hints
     fields: [] # [] = built-in extraction card
@@ -84,7 +85,7 @@ tasks:
     requireSource: true # require a source URL
     # …and require the provider to report having opened that URL. Turn off if a
     # gateway reports redirect URLs rather than the pages behind them.
-    requireVerifiedSource: true
+    requireVerifiedSource: false
     minConfidence: 0.7
     # Age threshold for querying alive/dead/unknown when death is missing.
     livenessAgeYears: 78
@@ -437,7 +438,7 @@ reliability:
     onValidationFailure: true
   # Task-level fallback retries a broken whole task on another model.
   taskFallback:
-    maxAttempts: 3 # 1 = disabled
+    maxAttempts: 2 # 1 = disabled
     # After all targets fail, retry the least-failing target conservatively.
     lastAttempt:
       strategy: least-failures

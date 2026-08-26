@@ -15,7 +15,12 @@ import type { Dossier } from '../../domain/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
 import { hashStructure } from '../../shared/hash.js';
-import { halfTransliteratedNote, introducedMixedScriptWords, untranslatedReason } from '../shared/script.js';
+import {
+  halfTransliteratedNote,
+  introducedMixedScriptWords,
+  untranslatedNote,
+  untranslatedReason,
+} from '../shared/script.js';
 import { readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import {
@@ -120,6 +125,12 @@ export class LocalizePipeline implements DocumentPipeline {
       ]);
     }
 
+    // Every model in the pool has already had this dossier and answered badly;
+    // `lastAttempt` only changes how the same ones are asked. A check that no
+    // model can satisfy has nowhere left to escalate to, so from here it reports
+    // instead of rejecting. See {@link untranslatedNote}.
+    const lastResort = context.attempt >= context.config.reliability.taskFallback.maxAttempts;
+
     // The escalation ladder does not apply here: the input is a small flat table,
     // not an article, so there is no cheaper slice of it to try first. Retry,
     // fallback and validation still come from the gateway.
@@ -163,7 +174,7 @@ export class LocalizePipeline implements DocumentPipeline {
       // it reaches the catalogue index as the name the page is filed under.
       verify: (unit, translation, strict) => {
         const untranslated = untranslatedReason(unit.text, translation, item.language, targetLang);
-        if (untranslated) return untranslated;
+        if (untranslated && !(strict && lastResort)) return untranslated;
         // Localization *is* romanization, so this is where a half-transliterated
         // name is made rather than passed through. Re-asked while that is free
         // and never failed — see the whole-dossier note below, which still
@@ -184,6 +195,12 @@ export class LocalizePipeline implements DocumentPipeline {
     if (unresolved.length > 0) {
       notes.push(`${unresolved.length} string(s) kept their source text: no translation was returned.`);
     }
+    // What the last attempt let through, read off the finished table rather than
+    // off the rounds: only what was actually published is worth an account.
+    const published = units.filter((unit) =>
+      untranslatedReason(unit.text, batch.translations.get(unit.key) ?? unit.text, item.language, targetLang),
+    );
+    if (published.length > 0) notes.push(untranslatedNote(published.map((unit) => unit.text)));
 
     // One pass through the sanitizer so the edition is punctuated, ordered and
     // shaped exactly like its source — the comparison `INV-17` is checked by.

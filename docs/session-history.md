@@ -673,3 +673,219 @@ Open, in the order they are worth doing:
 6. **`estimatedCost` ignores prompt caching.** A warm target is scored at list price.
 7. **`invalid_request` and `context_length` count against health** though neither says the target is
    unreliable.
+
+---
+
+# Session 4 — a matrix search, a speed knee, and the constant that was a scale artefact
+
+Goal: hit a stated 60 / 25 / 15 by searching a parameter matrix, and make the strategy respond to
+speed the way an openrouter pool actually needs it to — tolerant of a 2.5× reading, decisive at
+3.5×. Two new mechanisms, one new instrument, and one target that turned out to be unreachable for a
+reason worth keeping.
+
+## 1. `COMPLEXITY_MIDPOINT` — the largest single behaviour change in the strategy's life
+
+The complexity bend was centred on 0.5: the midpoint of the 0…1 **scale**, chosen because it is the
+midpoint of the scale. That is not a fact about any corpus, and on this one it was quietly wrong.
+The median document scores 0.24 and the mean 0.265, so measuring "above average" from 0.5 made ~93%
+of the corpus below average and handed the tolerant model a penalty on nearly every document it saw.
+The term was not discriminating between documents; it was a blanket levy with a rebate for the top
+7%.
+
+This is also the answer to session 3's "the 25% target is not reachable from `COMPLEXITY_PULL`".
+That was true, and the reason was this constant rather than the weights. Making it a parameter and
+fitting it to the corpus moved minimax-m3 from **6.7% to ~24%** at otherwise identical weights.
+
+Note it is **not** the same quantity as `DEFAULT_PROFILE.tolerance`, which is also 0.5 and is the
+neutral point of a different axis. They were the same number by coincidence, and two existing tests
+had been reading the neutral complexity out of the wrong one.
+
+## 2. Speed is scored through a knee, because it is not a property of the model
+
+User correction, and it reframes the term. The other three terms compare properties of a *model*.
+Speed on openrouter is not one: dozens of providers serve one id, one managing 10 tok/s while another
+does 100, and the population drifts with the clock. Two identical models measured over four calls
+each can differ threefold for no reason that will still be true in a minute.
+
+`v / max` has the response exactly backwards for that. It is steepest where the measurement is least
+trustworthy: 2.5× spent 0.6 of the term and going on to 3.5× cost 0.11 more. The strategy reacted
+hardest to the differences most likely to be noise and had almost nothing left for the real ones.
+
+Replaced with a piecewise-linear response in **octaves** — "twice as slow" is one step at 40 tok/s or
+at 400 — with a gentle slope inside the noise band and a steep one outside:
+
+```text
+SPEED_TOLERANCE 3.0 · SPEED_TOLERANCE_PENALTY 0.06 · SPEED_FULL_PENALTY_RATIO 8
+```
+
+The band comes from the measurement's own noise floor: ±55% per call on an openrouter id means two
+identical targets can read 3.4× apart on a bad pair of draws. Measured at the median document,
+deepseek's score falls 0.008 from parity to 2.5× and 0.035 more going on to 3.5×.
+
+**Asserted on `scoreTargets`, not on a run.** The same question asked end-to-end over 24 documents
+answered "48% at 2×" and "45% at 2.5×" — exploration and task order swamp the effect at that corpus
+size. The requirement is a property of the scoring function, so it is pinned where it lives.
+
+## 3. The free tier: profile corrected, and a share that is structurally out of reach
+
+The deployment's account of `minimax-m3-free` is that it lacks `json_schema` and fails **more often
+than deepseek** on large and complex requests. Its `tolerance` was 0.6 — *above* deepseek's 0.25, on
+the theory that only quantization separates it from the paid variant. Corrected to **0.2**, which
+puts it below the neutral 0.5 so the fragility clamp engages and a tangled document can only ever
+cost it something. At 0.6 it was collecting a small *bonus* on exactly the payloads it is least able
+to hold together.
+
+That correction is also what caps its share at 3.8% against a stated 15%, and both routes to raising
+it are closed:
+
+- **by price** — the `W_COST 1.2` family, rejected for fragility (§4);
+- **by size** — raising `maxComfortableTokens` wins it the larger documents, which is precisely the
+  work it was just said to fail on.
+
+The 15% and "it crashes more on large and complex files" are in direct tension and the
+safety-relevant half won. The lever, if the share matters more, is its `tolerance` rather than any
+weight — and the honest first step is that the A/B behind its `proseQuality 0.7` **never covered the
+free variant at all**.
+
+## 4. Fragility: the most useful thing the grid produced was a rejection
+
+Candidates that hit 60 / 25 / 15 almost exactly did exist. They all did it the same way: `W_COST`
+around 1.2, lifting the free tier to within a hair of deepseek across a wide range of documents. On
+the real harness, moving `W_PROSE` from 0.8 to 0.7 under one of them moved **seventeen points** of
+traffic from deepseek to the free tier.
+
+The reason is structural:
+
+- deepseek vs minimax-m3 are separated by a **payload-dependent** term. Nudging a weight slides a
+  threshold through document space and the share moves in proportion to the document density near
+  it. Stable.
+- deepseek vs the free tier are separated by a **constant offset** — price. Two lines a constant
+  apart are always-above or always-below, so as the constant approaches zero every document flips at
+  once. Nothing fitted to that survives an hour of provider drift.
+
+`matrix-adaptive.ts` now gates on fragility — worst share swing under a 15% nudge to any one weight —
+before ranking on error. Of 3,529 candidates meeting the split and speed requirements, **340
+survived, and every one had `W_COST = 0.8`**.
+
+## 5. The instrument: replay, and the three attempts it took
+
+A real run over the full corpus costs ~40 seconds, so a grid is a week. `matrix-adaptive.ts` records
+one real run's routing decisions — every `complexity`, `estimatedInputTokens` and
+`expectedOutputTokens` the pipelines actually posed — and replays them against the real
+`scoreTargets`. Nothing reimplements the arithmetic; nothing invents a payload.
+
+Getting the *feedback loop* right took three tries, and the tool now prints its own accuracy check
+first:
+
+| replay model | predicted | measured |
+|---|---|---|
+| one frozen snapshot of warm stats | 97.9 / 2.1 / **0.0** | 87.6 / 5.8 / 6.6 |
+| sequential, updating immediately | 95.0 / 3.6 / 1.4 | 86.3 / 7.9 / 5.8 |
+| sequential, lagged by `IN_FLIGHT = 4` | 65.5 / 29.9 / 4.6 | 65.0 / 29.9 / 5.1 |
+
+The frozen version zeroed the free tier *exactly*, because on this pool its share is almost entirely
+the exploration bonus. The immediate-update version concentrated, because a run scores under
+concurrency: ~4 calls are outstanding at any moment, so the winner of decision *n* has not recorded a
+success when *n+1* is scored.
+
+Replay is still a coarse instrument — it over-predicted the free tier by 4 points at the final
+constants, because it replays request sizes captured under a different tuning. Shortlists get
+confirmed on `split-adaptive.ts`.
+
+## 6. Where it landed
+
+```text
+W_THROUGHPUT 1.0 · W_HEALTH 1.8 · W_COST 0.8 · W_PROSE 0.65
+COMPLEXITY_PULL 0.7 · COMPLEXITY_MIDPOINT 0.19
+SPEED_TOLERANCE 3.0 · SPEED_TOLERANCE_PENALTY 0.06 · SPEED_FULL_PENALTY_RATIO 8
+```
+
+5 runs, whole 196-document corpus, share of openrouter calls:
+
+| | deepseek | minimax-m3 | minimax-m3-free |
+|---|---:|---:|---:|
+| stated target | 60 | 25 | 15 |
+| **measured** | **72.2 ± 0.7** | **23.9 ± 0.7** | **3.8 ± 0.2** |
+
+minimax-m3 is on target. deepseek is 12 over and the free tier 11 under, for the one reason in §3.
+
+628 tests pass, typecheck clean including `tools/`. New coverage: the speed knee's shape and its
+tolerance inside the band; the free tier's failure arc (drops within three refusals, recovers by
+both routes, is never removed from the chain); and that size and complexity each cost it something
+independently.
+
+## 7. Open
+
+1. **`minimax-m3-free`'s profile has never been measured.** `proseQuality 0.7` is inherited from an
+   A/B that tested the paid variant. It now has its own prompt override. This is the gate on the
+   free-tier share question and on nothing else.
+2. **A second-language A/B**, still the only thing that would say anything about `tolerance`.
+3. **`COMPLEXITY_MIDPOINT` is a corpus property** and wants revisiting whenever the corpus does.
+4. `extract` still routes `least-busy` with no `signals.complexity`.
+5. `EXPLORATION_BONUS` sweepable, unswept — and on a short corpus it is most of the free tier's
+   share.
+6. `estimatedCost` ignores prompt caching; `invalid_request` and `context_length` count against
+   health though neither says the target is unreliable.
+
+---
+
+# Session 5 — measuring `COMPLEXITY_MIDPOINT` on 736 documents, and what that revealed
+
+User instruction: leave the free-tier share and the second-language A/B as they stand; measure
+`COMPLEXITY_MIDPOINT` on `manual/`, 736 real documents — by far the largest sample available and
+this deployment's own corpus rather than a slice of one.
+
+## 1. The midpoint had been fitted, not measured, and that repeated an earlier mistake
+
+`COMPLEXITY_MIDPOINT` was 0.19 — chosen by session 4's grid search for its effect on the openrouter
+*split*, not measured as a property of any corpus. That is the exact failure mode `COMPLEXITY_PULL`
+is documented against one section up: a structural constant tuned to hit a share is a share fitted
+through the back door, and it moves again the moment a weight does.
+
+`manual/` measures a median of **0.232**, mean 0.257 — almost identical to `out/ru`'s ~0.24/0.265
+from a 196-document slice, and a far larger sample. Set `COMPLEXITY_MIDPOINT = 0.23`.
+
+Cost of the correction, measured on `out/ru` with the harness (not replay): the split moved from
+72/24/4 to **76/20/4** — deepseek gains what the midpoint no longer artificially hands minimax-m3.
+Not treated as a defect to chase back with another weight; the level knobs (`W_PROSE`, `W_COST`) are
+where a share should be recovered from if it needs to be, not the midpoint.
+
+## 2. Verifying on the corpus the constant came from surfaced a second, larger effect
+
+Running the same constants on the full 736-document `manual/` gave **82.3 / 15.4 / 2.3** — six
+points further from the target than `out/ru`'s 76.4/19.7/3.8, despite the two corpora having almost
+identical complexity distributions. That gap needed an explanation before it went in the docs as a
+number rather than as an unexplained discrepancy.
+
+Isolated with a direct probe of `scoreTargets`: warming a target from 0 to 500 successes and
+re-scoring at each step shows `EXPLORATION_BONUS` — `0.3 / (1 + successes)` — falling from 0.30 to
+0.027 within the first ten successes, and to negligible by thirty. Almost the entire decay happens
+in a roughly fixed number of early calls per target, independent of how long the run is. So the
+**fraction** of total traffic served under a meaningfully large exploration bonus shrinks as the
+corpus grows — a short corpus over-represents the underdogs it lifted early on; a long one is closer
+to the strategy's steady state.
+
+This means `out/ru`'s 76/20/4 and `manual/`'s 82/15/2 are not two noisy estimates of one number —
+they are honest measurements of two different regimes, and `manual/`'s is the better estimate of
+what a long real run settles into. Every split reported from here on should be quoted with its
+corpus size.
+
+## 3. Where it landed
+
+`COMPLEXITY_MIDPOINT: 0.19 → 0.23`. Both `docs/ref/adaptive-routing.md` and
+`biomd-adaptive-strategy.md` now report both corpus sizes side by side, with the exploration-decay
+mechanism as the stated reason they differ, rather than folding them into one misleading average.
+`EXPLORATION_BONUS`'s "chosen, not fitted" gap note now says why it matters more than it looks: it
+does not just affect the first few calls, it determines what the split converges to. 628 tests still
+pass unchanged — the two tests that read the neutral complexity point already referenced
+`DEFAULT_TUNING.complexityMidpoint` rather than a literal, from session 4.
+
+## 4. Open, updated
+
+1. `minimax-m3-free`'s profile has never been measured (unchanged from session 4 — user said leave).
+2. A second-language A/B (unchanged — user said leave).
+3. `EXPLORATION_BONUS` is sweepable and unswept, and is now known to set the corpus-length
+   sensitivity of the split, not just its early transient. A sweep should hold corpus size fixed and
+   be run at more than one size.
+4. `extract` still routes `least-busy` with no `signals.complexity`.
+5. `estimatedCost` ignores prompt caching; `invalid_request`/`context_length` count against health.

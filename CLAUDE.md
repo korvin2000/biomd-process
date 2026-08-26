@@ -64,6 +64,14 @@ npm run score -- input/ru out
   every letter still in the source alphabet, is re-asked and then handed to the next model
   (`untranslatedReason`); a word that changed alphabet halfway through is re-asked and then
   *published with a note*. Wrong is worth failing a call for; unknowable is not worth a document.
+- **Every check that can reject a batch is bounded by the pool.** On the **last** task attempt
+  every model has already answered and `lastAttempt` only changes how the same ones are asked, so
+  `untranslatedReason` reports (`untranslatedNote`) instead of rejecting. A check with nowhere left
+  to escalate to is choosing between a bad document and no document, and it must choose the file.
+- **A letter is not a language; a word is.** One Cyrillic `с` mistyped into `Danсa dos Tons` is not
+  evidence of Russian, and reading it as evidence sent a Portuguese album title to every model in
+  the pool, twice, for eleven editions. `withoutMixedWords` strikes two-alphabet words out before
+  either script test looks (`falseSourceEvidence` names them for the run notes).
 - **Classification (`type`/`gender`/`country`/`img`/`title`) is an error inside a `*.bio.json`**
   (`INV-7`). It goes to `out/.hints/`, where `catalog` picks it up.
 - **The catalogue is updated, never rebuilt** — ids, row order, unknown members and hand-edits all

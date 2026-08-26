@@ -55,6 +55,33 @@ const SCRIPTS: ReadonlyMap<string, Script> = new Map([
   ...['ja', 'zh', 'ko'].map((code) => [code, CJK] as const),
 ]);
 
+/** A word — what the tests below count, because a letter alone counts nothing. */
+const WORD = /\p{L}[\p{L}\p{M}'’-]*/gu;
+
+/** A single word built out of two alphabets — always a machine's mistake. */
+const MIXED_WORD = /[\p{Script=Cyrillic}\p{Script=Greek}][\p{Script=Latin}]|[\p{Script=Latin}][\p{Script=Cyrillic}\p{Script=Greek}]/u;
+
+/**
+ * The text with every two-alphabet word struck out.
+ *
+ * A letter trapped inside such a word is not evidence of the language it
+ * belongs to, and reading it as evidence is what made `**Danсa dos Tons**` — a
+ * Portuguese album title typed on a Russian keyboard, one Cyrillic `с` in
+ * `Danсa` — look like a Russian sentence to {@link isTranslatable} and like an
+ * unanswered one to {@link untranslatedReason}. It was sent, correctly handed
+ * back as the work title it is, rejected as "nothing was translated", and
+ * re-asked down every model in the pool and then on a second attempt — for each
+ * of eleven editions of the same article, none of which could ever be produced.
+ *
+ * {@link mixedScriptWords} already says what the shape is: no human writes it
+ * and no source contains it on purpose. It is struck out here for that reason.
+ * Only the *evidence* goes: a sentence that mixes alphabets in one of its words
+ * and is plainly Russian in the rest is still translated on the rest.
+ */
+function withoutMixedWords(text: string): string {
+  return text.replace(WORD, (word) => (MIXED_WORD.test(word) ? ' ' : word));
+}
+
 /**
  * Is this fragment worth sending to a translator?
  *
@@ -72,7 +99,7 @@ export function isTranslatable(text: string, sourceLanguage: string): boolean {
 
   const script = scriptOfLanguage(sourceLanguage);
   if (!script) return true;
-  return script.letters.test(text);
+  return script.letters.test(withoutMixedWords(text));
 }
 
 /** The alphabet a language is written in, or `undefined` when that alphabet is Latin. */
@@ -84,9 +111,6 @@ function scriptOfLanguage(language: string): Script | undefined {
 export function hasOwnScript(language: string): boolean {
   return scriptOfLanguage(language) !== undefined;
 }
-
-/** A single word built out of two alphabets — always a machine's mistake. */
-const MIXED_WORD = /[\p{Script=Cyrillic}\p{Script=Greek}][\p{Script=Latin}]|[\p{Script=Latin}][\p{Script=Cyrillic}\p{Script=Greek}]/u;
 
 /**
  * Words that changed alphabet halfway through.
@@ -104,7 +128,7 @@ const MIXED_WORD = /[\p{Script=Cyrillic}\p{Script=Greek}][\p{Script=Latin}]|[\p{
  * `biomd report --notes alphabets` lists them.
  */
 export function mixedScriptWords(text: string): string[] {
-  return [...text.matchAll(/\p{L}[\p{L}\p{M}'’-]*/gu)]
+  return [...text.matchAll(WORD)]
     .map((match) => match[0])
     .filter((word) => MIXED_WORD.test(word));
 }
@@ -159,6 +183,12 @@ export function halfTransliteratedNote(words: readonly string[]): string {
  * lines of one Spanish edition, whole paragraphs of Russian, every one of them
  * byte-identical to its source line.
  *
+ * "Contain them" is a question about *words*, and {@link withoutMixedWords} is
+ * why: one Cyrillic `с` mistyped into `Danсa dos Tons` is not a Russian
+ * sentence, so a model handing that title straight back has done exactly what
+ * the prompt asks and must not be told it answered nothing. Asking it per
+ * letter cost eleven editions of one article a full pass down the pool, twice.
+ *
  * ## Every letter still in the source alphabet
  *
  * The blunter test, and the one that catches an untranslated *name*. Nineteen
@@ -189,7 +219,7 @@ export function untranslatedReason(
   if (!script) return undefined;
   if (scriptOfLanguage(targetLanguage) === script) return undefined;
 
-  if (script.letters.test(source) && source.trim() === translation.trim()) {
+  if (script.letters.test(withoutMixedWords(source)) && source.trim() === translation.trim()) {
     return `came back exactly as it was sent ("${clip(translation)}") — nothing was translated`;
   }
 
@@ -200,6 +230,62 @@ export function untranslatedReason(
   return (
     `every letter is still ${script.name} ("${clip(translation)}") — the value came back untranslated; ` +
     'a name is rendered into the target alphabet, never copied'
+  );
+}
+
+/**
+ * The two-alphabet words that are a fragment's *only* claim to the source
+ * language.
+ *
+ * `**Danсa dos Tons**` is a Portuguese album title with one Cyrillic `с` in it,
+ * typed on a Russian keyboard and saved into the corpus that way. Nothing else
+ * in the fragment is Russian, so it is now kept verbatim — which is right, and
+ * silent, and leaves the typo sitting in the article for the next run to find
+ * again. This names it so the run notes can.
+ *
+ * Empty for any fragment that has real source-language words in it, whatever
+ * mixtures it also carries: that one is translated, and the mixture is
+ * {@link introducedMixedScriptWords}'s business rather than this one's.
+ */
+export function falseSourceEvidence(text: string, sourceLanguage: string): string[] {
+  const script = scriptOfLanguage(sourceLanguage);
+  if (!script || !script.letters.test(text)) return [];
+  if (script.letters.test(withoutMixedWords(text))) return [];
+  return [...new Set(mixedScriptWords(text).filter((word) => script.letters.test(word)))];
+}
+
+/**
+ * The one-line account of a value every model handed back, as the notes phrase it.
+ *
+ * {@link untranslatedReason} rejects on the strict round as well as the lenient
+ * one, and it should: an untranslated Russian paragraph in a Spanish edition is
+ * *wrong*, another model demonstrably does translate it, and reaching that model
+ * is the entire point of the check. But the escalation it drives is finite. When
+ * every model in the pool has answered and every answer was the same, the check
+ * has stopped choosing between a good document and a bad one and started
+ * choosing between a bad document and no document at all — and no document is
+ * the worse of those. A run that loses eleven editions of one article to a
+ * fragment nobody would translate has spent the corpus's budget proving it.
+ *
+ * So the last attempt publishes and says so. `biomd report --notes untranslated`
+ * lists them, which is the whole account of a decision that produced a file
+ * rather than a failure.
+ */
+export function untranslatedNote(values: readonly string[]): string {
+  const subject = values.length === 1 ? 'One value' : `${values.length} values`;
+  const verb = values.length === 1 ? 'was' : 'were';
+  return (
+    `${subject} came back untranslated from every model in the pool and ${verb} published as sent: ` +
+    `${values.map((value) => `"${clip(value, 40)}"`).join(', ')}. Check the source line and the prompt.`
+  );
+}
+
+/** The one-line account of a mistyped source word, as the run notes phrase it. */
+export function mistypedSourceNote(words: readonly string[]): string {
+  const subject = words.length === 1 ? 'One source word mixes' : `${words.length} source words mix`;
+  return (
+    `${subject} two alphabets, and that was the fragment's only word in the source language: ` +
+    `${words.join(', ')}. Kept verbatim rather than translated; fix the typo in the article.`
   );
 }
 
