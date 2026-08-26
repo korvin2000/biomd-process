@@ -60,6 +60,10 @@ npm run score -- input/ru out
   provider message strings at a call site.
 - **Drop, never guess.** An absent field is correct; an invented one is a claim about a person.
   Normalizers are narrow on output and wide on input.
+- **A translation is checked, not trusted.** A value byte-identical to the fragment sent, or with
+  every letter still in the source alphabet, is re-asked and then handed to the next model
+  (`untranslatedReason`); a word that changed alphabet halfway through is re-asked and then
+  *published with a note*. Wrong is worth failing a call for; unknowable is not worth a document.
 - **Classification (`type`/`gender`/`country`/`img`/`title`) is an error inside a `*.bio.json`**
   (`INV-7`). It goes to `out/.hints/`, where `catalog` picks it up.
 - **The catalogue is updated, never rebuilt** — ids, row order, unknown members and hand-edits all
@@ -84,6 +88,13 @@ npm run score -- input/ru out
   completes, every document is produced, and the only trace is the bill from the backup. Hence
   `--probe` before, and the run summary's target-health table after. A pool of **one** has no chain
   at all and turns every transient failure into a failed document.
+- **`adaptive` scores the *document*, not the batch it sends.** `translate` runs in `segments`
+  mode, so a batch carries prose with every container, table and link already lifted out: whole
+  documents average 0.265 complexity, the prose drawn from them 0.082, and scoring the batch
+  reports "simple" for the whole corpus. Its throughput term is **generated** tokens over wall
+  clock; counting prompt tokens overstated targets 3.7–6.4× and *unevenly*, which reorders them.
+  Verify changes with `tests/adaptive.simulation.test.ts`, never with a live run.
+
 - **`omniroute` needs `stream: true`** — with buffered answers, two *overlapping* requests get the
   same completion, and a web-search answer about the wrong guitarist is well-formed, sourced, and
   uncatchable downstream. `maxConcurrent: 3` on that endpoint is safe **only** because streaming is
@@ -102,6 +113,12 @@ npm run score -- input/ru out
 - **Editing a prompt template invalidates every fingerprint** (both files hash into
   `promptVersion`) and re-plans the corpus. It also correctly starts a fresh translation-memory
   namespace — but a bad rendering already cached is re-served verbatim until then.
+- **`prompts/<task>/<modelId>/<same file name>` is that one model's copy of that file** — a
+  convention, named nowhere in the config, listed by `biomd prompts list`. It is rendered with the
+  shared text available as `<%= it.sharedSystem %>`, so a correction is an addendum rather than a
+  fork. Overrides hash into the task version as well, so adding the first one to a task re-plans
+  that task for **every** model: routing picks the model per call, long after a fingerprint is
+  computed, so a fingerprint can never mean "this model's prompt".
 - **Only `resume` and `existing-output` mean "done"** (`isTaskDone`, `src/state/types.ts`). Add a
   skip reason to that whitelist only if it means the artifact is on disk — counting a retired task
   makes the next resume skip it forever.
@@ -161,6 +178,7 @@ Area-specific rules load automatically when you open a matching file — see
 | What to skip in this tree | [docs/ref/repo-map.md](docs/ref/repo-map.md) | before globbing or grepping |
 | Scheduling, call path, routing, resume | [docs/ref/architecture.md](docs/ref/architecture.md) | changing how work is planned or dispatched |
 | Throughput vs cost: strategies, lanes, concurrency | [docs/ref/throughput.md](docs/ref/throughput.md) | tuning a run for speed or for spend |
+| The `adaptive` strategy and its model profiles | [docs/ref/adaptive-routing.md](docs/ref/adaptive-routing.md) | touching `src/routing/strategies/adaptive`, or tuning who translates what |
 | OmniRoute / OpenRouter / llama.cpp, model tuning | [docs/ref/providers.md](docs/ref/providers.md) | adding or tuning a model target |
 | The eleven cost mechanisms | [docs/ref/cost-mechanisms.md](docs/ref/cost-mechanisms.md) | touching a prompt, pipeline or context strategy |
 | Silent-failure catalogue | [docs/ref/failure-modes.md](docs/ref/failure-modes.md) | before a real run, or when a "successful" run is wrong |

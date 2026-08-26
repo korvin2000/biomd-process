@@ -6,7 +6,7 @@ import { validateCatalogue } from '../src/domain/validate.js';
 import { readCatalogue } from '../src/io/CatalogueReader.js';
 import { LlmCallError } from '../src/reliability/errors.js';
 import type { JournalRecord } from '../src/state/types.js';
-import { DEFAULT_FACTS, FakeClient, Workspace, echoTable, isStringBatch, respond } from './helpers/workspace.js';
+import { DEFAULT_FACTS, FakeClient, Workspace, echoTable, isStringBatch, respond, translated } from './helpers/workspace.js';
 
 const ARTICLE = `# Пако де Лусия
 
@@ -71,8 +71,8 @@ describe('end-to-end run', () => {
     expect(metadata.metadata.forename).toBe('Пако');
 
     for (const lang of ['en', 'de']) {
-      const translated = await readFile(workspace.path(`out/${lang}/paco-de-lucia.bio.md`), 'utf8');
-      expect(translated.trim()).toBe(ARTICLE.trim());
+      const article = await readFile(workspace.path(`out/${lang}/paco-de-lucia.bio.md`), 'utf8');
+      expect(article.trim()).toBe(translated(ARTICLE).trim());
     }
   });
 
@@ -183,8 +183,8 @@ describe('language editions and catalogue', () => {
     const dossier = JSON.parse(await readFile(workspace.path('out/en/paco-de-lucia.bio.json'), 'utf8'));
     const article = await readFile(workspace.path('out/en/paco-de-lucia.bio.md'), 'utf8');
 
-    expect(dossier.metadata.forename).toBe('Пако'); // identity "translation" from the fake
-    expect(article.trim()).toBe(ARTICLE.trim());
+    expect(dossier.metadata.forename).toBe('Pako'); // the fake's "translation" is a transliteration
+    expect(article.trim()).toBe(translated(ARTICLE).trim());
     await expect(readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8')).resolves.toContain('forename');
   });
 
@@ -206,7 +206,7 @@ describe('language editions and catalogue', () => {
     // provably a field that was never sent. The media is not in this answer at
     // all: it is harvested from the article's own `::: image` container.
     const client = new FakeClient((call) => {
-      if (isStringBatch(call.request)) return respond(echoTable(call.request, (text) => text.toUpperCase()));
+      if (isStringBatch(call.request)) return respond(echoTable(call.request, (text) => translated(text).toUpperCase()));
       if (call.request.responseFormat?.type === 'json_object') return respond(JSON.stringify(DEFAULT_FACTS));
       return respond('');
     });
@@ -217,8 +217,8 @@ describe('language editions and catalogue', () => {
     const source = JSON.parse(await readFile(workspace.path('out/ru/paco-de-lucia.bio.json'), 'utf8'));
     const edition = JSON.parse(await readFile(workspace.path('out/en/paco-de-lucia.bio.json'), 'utf8'));
 
-    expect(edition.metadata.forename).toBe('ПАКО');
-    expect(edition.media.photos[0].label).toBe('ПАКО ДЕ ЛУСИЯ');
+    expect(edition.metadata.forename).toBe('PAKO');
+    expect(edition.media.photos[0].label).toBe('PAKO DE LUSIYA');
     expect(edition.metadata.dates).toEqual(source.metadata.dates);
     expect(edition.metadata.url).toBe(source.metadata.url);
     expect(source.media.photos[0].target).toBe('photo/p/paco.jpg');
@@ -689,7 +689,7 @@ describe('failure handling', () => {
   it('rejects a segment translation that dropped a link placeholder', async () => {
     // Every fragment is echoed except the one carrying a masked URL, which is
     // returned without it — the failure a lost link would look like.
-    const client = FakeClient.batch((text) => text.replace(/⟦\d+⟧/g, ''));
+    const client = FakeClient.batch((text) => translated(text).replace(/⟦\d+⟧/g, ''));
     const app = workspace.app({ tasks: { translate: { enabled: true, targetLanguages: ['en'] } } }, client);
 
     const outcome = await runJob(app);

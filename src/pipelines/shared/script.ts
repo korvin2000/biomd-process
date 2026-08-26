@@ -26,20 +26,34 @@
  * survival is the prompt's business.
  */
 
-/** Language codes whose prose is written in Cyrillic. */
-const CYRILLIC_LANGUAGES = new Set(['ru', 'uk', 'be', 'bg', 'sr', 'mk', 'kk', 'ky', 'mn', 'tg']);
-const GREEK_LANGUAGES = new Set(['el']);
-const HEBREW_LANGUAGES = new Set(['he', 'yi']);
-const ARABIC_LANGUAGES = new Set(['ar', 'fa', 'ur', 'ps']);
-/** CJK and Korean: any of their scripts counts, and kana is script evidence too. */
-const CJK_LANGUAGES = new Set(['ja', 'zh', 'ko']);
+/** An alphabet, and the languages written in it. */
+interface Script {
+  /** How the alphabet is named in a note a person has to read. */
+  name: string;
+  /** Matches when the text contains at least one letter of this alphabet. */
+  letters: RegExp;
+}
 
 const HAS_LETTER = /\p{L}/u;
-const HAS_CYRILLIC = /\p{Script=Cyrillic}/u;
-const HAS_GREEK = /\p{Script=Greek}/u;
-const HAS_HEBREW = /\p{Script=Hebrew}/u;
-const HAS_ARABIC = /\p{Script=Arabic}/u;
-const HAS_CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+const CYRILLIC: Script = { name: 'Cyrillic', letters: /\p{Script=Cyrillic}/u };
+const GREEK: Script = { name: 'Greek', letters: /\p{Script=Greek}/u };
+const HEBREW: Script = { name: 'Hebrew', letters: /\p{Script=Hebrew}/u };
+const ARABIC: Script = { name: 'Arabic', letters: /\p{Script=Arabic}/u };
+/** CJK and Korean: any of their scripts counts, and kana is script evidence too. */
+const CJK: Script = {
+  name: 'CJK',
+  letters: /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u,
+};
+
+/** Language code (before any region suffix) to the alphabet its prose is written in. */
+const SCRIPTS: ReadonlyMap<string, Script> = new Map([
+  ...['ru', 'uk', 'be', 'bg', 'sr', 'mk', 'kk', 'ky', 'mn', 'tg'].map((code) => [code, CYRILLIC] as const),
+  ...['el'].map((code) => [code, GREEK] as const),
+  ...['he', 'yi'].map((code) => [code, HEBREW] as const),
+  ...['ar', 'fa', 'ur', 'ps'].map((code) => [code, ARABIC] as const),
+  ...['ja', 'zh', 'ko'].map((code) => [code, CJK] as const),
+]);
 
 /**
  * Is this fragment worth sending to a translator?
@@ -58,18 +72,12 @@ export function isTranslatable(text: string, sourceLanguage: string): boolean {
 
   const script = scriptOfLanguage(sourceLanguage);
   if (!script) return true;
-  return script.test(text);
+  return script.letters.test(text);
 }
 
-/** The script test for a language, or `undefined` when it is written in Latin. */
-function scriptOfLanguage(language: string): RegExp | undefined {
-  const code = language.toLowerCase().split(/[-_]/)[0] ?? '';
-  if (CYRILLIC_LANGUAGES.has(code)) return HAS_CYRILLIC;
-  if (GREEK_LANGUAGES.has(code)) return HAS_GREEK;
-  if (HEBREW_LANGUAGES.has(code)) return HAS_HEBREW;
-  if (ARABIC_LANGUAGES.has(code)) return HAS_ARABIC;
-  if (CJK_LANGUAGES.has(code)) return HAS_CJK;
-  return undefined;
+/** The alphabet a language is written in, or `undefined` when that alphabet is Latin. */
+function scriptOfLanguage(language: string): Script | undefined {
+  return SCRIPTS.get(language.toLowerCase().split(/[-_]/)[0] ?? '');
 }
 
 /** True when the language has an alphabet of its own, so the rule can apply at all. */
@@ -124,4 +132,79 @@ export function introducedMixedScriptWords(source: string, output: string): stri
 export function halfTransliteratedNote(words: readonly string[]): string {
   const subject = words.length === 1 ? 'A word changed' : `${words.length} words changed`;
   return `${subject} alphabet halfway through: ${words.join(', ')}. Half-transliterated by the model; check it.`;
+}
+
+/**
+ * A value the model was paid for and did not answer.
+ *
+ * `isTranslatable` decides what is worth *sending*; this decides whether what
+ * came back is an answer. They are the same script test pointed in opposite
+ * directions, and the second one is needed because a fragment can be sent,
+ * charged for, and returned exactly as it went out.
+ *
+ * Two conditions have to hold before either test below means anything:
+ *
+ *  - the **source** language has an alphabet of its own, so "unchanged" is
+ *    visible at all — nothing here can tell an English sentence from an
+ *    untranslated Italian one;
+ *  - the **target** language is not written in that same alphabet, or the test
+ *    would reject every correct ru → uk translation ever made.
+ *
+ * ## Byte-identical to what was sent
+ *
+ * The precise test, and the one that catches an untranslated *sentence*. A
+ * fragment with no words in the source language never reaches a model —
+ * `isTranslatable` answers it locally — so a fragment that does contain them
+ * and comes back character for character was not worked on. Measured: eight
+ * lines of one Spanish edition, whole paragraphs of Russian, every one of them
+ * byte-identical to its source line.
+ *
+ * ## Every letter still in the source alphabet
+ *
+ * The blunter test, and the one that catches an untranslated *name*. Nineteen
+ * values across twenty documents came back this way, twelve of them a person's
+ * name standing alone as a heading or a photo caption — which is how a Spanish
+ * page ends up with `# Наталья Липницкая` at the top of it. It catches a
+ * near-copy the first test misses, at the price of only seeing values with no
+ * other alphabet in them at all.
+ *
+ * One letter from anywhere else acquits the second test: `Наталья Липницкая
+ * (Natalia Lipnitskaya)` is a gloss, which is a judgement about style, and
+ * `Дебюсси` → `Debussи` is a half-transliteration, which
+ * {@link introducedMixedScriptWords} owns. Digits and punctuation are not
+ * letters and never decide anything, so `Наталья Липницкая (2003)` is judged on
+ * its two words and not on its year.
+ *
+ * Both are safe enough to reject a batch over — meaning to hand it to the next
+ * model in the chain — because a correct answer fails neither. It is rendered,
+ * or romanized and glossed, and either way it differs from what was sent.
+ */
+export function untranslatedReason(
+  source: string,
+  translation: string,
+  sourceLanguage: string,
+  targetLanguage: string,
+): string | undefined {
+  const script = scriptOfLanguage(sourceLanguage);
+  if (!script) return undefined;
+  if (scriptOfLanguage(targetLanguage) === script) return undefined;
+
+  if (script.letters.test(source) && source.trim() === translation.trim()) {
+    return `came back exactly as it was sent ("${clip(translation)}") — nothing was translated`;
+  }
+
+  if (!script.letters.test(translation)) return undefined;
+  for (const letter of translation.match(/\p{L}/gu) ?? []) {
+    if (!script.letters.test(letter)) return undefined;
+  }
+  return (
+    `every letter is still ${script.name} ("${clip(translation)}") — the value came back untranslated; ` +
+    'a name is rendered into the target alphabet, never copied'
+  );
+}
+
+/** Enough of a value to recognize it in a note, without pasting a paragraph into one. */
+function clip(text: string, limit = 60): string {
+  const flat = text.replace(/\s+/gu, ' ').trim();
+  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
 }

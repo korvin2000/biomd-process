@@ -79,6 +79,85 @@ lingers in `run.memoryDir`.
 Eta fallback that can never fire, because `languageName()` already falls back to the code — but it
 *reads* like two languages being offered, in a file whose entire job is to be unambiguous.
 
+## A prompt for one model
+
+`prompts/<task>/<modelId>/<the same file name>` shadows the file beside it, for
+that model and nobody else. Convention only — nothing in the config names it.
+Full mechanics: [prompts/README.md](../../prompts/README.md).
+
+The measurement that produced it. Twenty documents from `manual/`, stratified
+across the complexity range, translated ru → es by `minimax-m3` alone:
+
+| | clean | source script left in | requests | retries | failed | dashΔ | titles kept |
+|---|---|---|---|---|---|---|---|
+| shared prompt, no check | 15/20 | 273 chars | — | — | — | 45 | 21/21 |
+| shared prompt + the check | 17/19 | 874 chars | 28 | 3 | 1 | 39 | 15/16 |
+| **+ this model's override** | **20/20** | **0** | **21** | **0** | **0** | 50 | 20/21 |
+| `deepseek`, shared prompt | 20/20 | 0 | — | — | — | 18 | 21/21 |
+
+**One run per row, so read the columns differently.** The leak column moved 273
+→ 0 and held at 0 across two different drafts of the override; that is the
+effect. `dashΔ` (45 → 39 → 50) and `titles kept` (21/21 → 15/16 → 20/21) move by
+about that much between two runs of *the same* arm, so nothing in them is
+attributable yet. The same discipline as
+[adaptive-routing.md](adaptive-routing.md): state a stochastic measurement as a
+distribution, and do not fit to one sample.
+
+The middle row's 874 characters are one document where the model returned whole
+paragraphs verbatim — a worse roll of the same model, not something the check
+caused. That row is what motivated the identity test described below.
+
+## What belongs in an override, and what does not
+
+The first draft of `minimax-m3/segments-system.md` opened by telling the model
+that nineteen of its values had come back in the source alphabet. That is an
+audit finding addressed to a person: the model cannot act on it, cannot check
+it, and pays for it on every call. Two more things went the same way — a heading
+saying "for this model only", which leaks a routing arrangement the model has no
+use for, and "read your own values back", an open-ended self-review where a
+single named check was wanted.
+
+**The reasoning belongs in an Eta comment**, which never reaches the model:
+`<% /* … */ %>`. (Eta 3 has no `<%# … %>` form — it is a syntax error.) The
+override now carries its own why in one, and what the model reads is a rule, two
+examples and one check.
+
+`deepseek` scores 0 of 20 on the shared prompt, which is why the correction
+belongs to one model rather than to the task. What the override says is not a
+new rule — every rule it needs was already in the shared prompt and was already
+being followed *inside sentences*. It resolves a **conflict between two of
+them**: output rule 1 says a fragment you cannot translate comes back unchanged,
+rule 5 says a name is rendered, and a fragment that is *nothing but* a name
+reads as covered by both. `minimax-m3` resolved it the wrong way twelve times in
+twenty documents, always on a heading or a caption, never in prose.
+
+> Look for the contradiction before adding a rule. A model that follows a rule
+> in one place and not another is usually not ignoring it.
+
+## Checks, because an instruction is a request
+
+A prompt cannot be relied on, and three of these rules now have a check behind
+them that costs nothing when the model complies:
+
+| Caught | Where | On failure |
+|---|---|---|
+| a value byte-identical to the fragment sent | `untranslatedReason` | re-asked, then handed to the next model |
+| a value whose every letter is still in the source alphabet | `untranslatedReason` | re-asked, then handed to the next model |
+| a word that changed alphabet halfway through | `introducedMixedScriptWords` | re-asked; **published with a note** if it survives |
+
+The split in the last column is the whole design. The first two are *wrong* and
+another model demonstrably gets them right, so reaching that model is worth
+failing the call for. The third is *worse*, not wrong — which half of `Debussи`
+is right is not knowable from here — so it is only ever re-asked, and a document
+is never lost over it.
+
+Both halves of `untranslatedReason` were needed, and a live run is what proved
+it. The alphabet test catches a name and misses a sentence: eight lines of
+Russian prose reached one Spanish edition, every one of them carrying a Latin
+word — a competition, an album, a composer — that acquitted it. The identity
+test catches those exactly, because a fragment with no source-language words in
+it is answered locally and never sent at all.
+
 ## What the prompt is *not* for
 
 The poems in `garcia_lorca.bio.md` are translated equally well by every prompt version tested,

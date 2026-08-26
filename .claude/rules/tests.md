@@ -14,7 +14,7 @@ Full account: [docs/ref/testing.md](../../docs/ref/testing.md).
 
   | fence | is | answer with |
   |---|---|---|
-  | ` ```json ` | a `{key: text}` batch | `echoTable()` — identity translation |
+  | ` ```json ` | a `{key: text}` batch | `echoTable()` — transliterates, because an answer that returns the source is now *rejected* |
   | ` ```markdown ` | an article | `DEFAULT_FACTS` |
   | ` ```yaml ` | a web-search identity card | whatever the test needs |
   | none, `json_object` | extraction | the supplied facts |

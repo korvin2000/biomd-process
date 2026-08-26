@@ -131,9 +131,9 @@ export interface FakeCall {
  * told apart by what the request actually carries: a `json` fenced block is a
  * `{key: text}` batch, a `markdown` one is an article.
  *
- *  - a `json` block  → a string batch, answered by echoing every key (an
- *    identity translation, the one answer guaranteed to keep the structure and
- *    every mask token intact);
+ *  - a `json` block  → a string batch, answered by transliterating every value
+ *    (see {@link translated}: the cheapest answer that changes alphabet and
+ *    still keeps the structure and every mask token intact);
  *  - `json_object` without one → extraction, answered with the supplied facts;
  *  - otherwise → whole-document translation, answered with the document itself.
  */
@@ -226,12 +226,43 @@ function lastFencedBlock(request: CompletionRequest, info = 'markdown'): string 
   return matches.at(-1)?.[1] ?? user;
 }
 
-/** Echoes a `{key: text}` batch back, optionally transforming each value. */
-export function echoTable(request: CompletionRequest, transform?: (text: string, key: string) => string): string {
+const CYRILLIC_TO_LATIN: Record<string, string> = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh',
+  з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o',
+  п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'kh', ц: 'ts',
+  ч: 'ch', ш: 'sh', щ: 'shch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu',
+  я: 'ya',
+};
+
+/**
+ * What a model that actually translated would hand back.
+ *
+ * The fake used to echo its input, and a translator that returns the source is
+ * a translator that cannot fail the one way translators here really do — every
+ * document it produced was "complete" and none of it was translated. Since
+ * `untranslatedReason` now rejects exactly that, the fake has to do the
+ * minimum a translation does: change alphabet.
+ *
+ * Deliberately *only* letters. Every space, mask token, dash and Markdown
+ * marker survives untouched, which is what lets a test say "the whole document
+ * came back" as `translated(ARTICLE)` — transforming the article as a whole and
+ * transforming each fragment and splicing give the identical string.
+ */
+export function translated(text: string): string {
+  return [...text]
+    .map((char) => {
+      const mapped = CYRILLIC_TO_LATIN[char.toLowerCase()];
+      if (mapped === undefined) return char;
+      if (char === char.toLowerCase()) return mapped;
+      return mapped.charAt(0).toUpperCase() + mapped.slice(1);
+    })
+    .join('');
+}
+
+/** Echoes a `{key: text}` batch back, translated — or transformed however the caller says. */
+export function echoTable(request: CompletionRequest, transform: (text: string, key: string) => string = translated): string {
   const table = JSON.parse(lastFencedBlock(request, 'json')) as Record<string, string>;
-  const answer = Object.fromEntries(
-    Object.entries(table).map(([key, text]) => [key, transform ? transform(text, key) : text]),
-  );
+  const answer = Object.fromEntries(Object.entries(table).map(([key, text]) => [key, transform(text, key)]));
   return JSON.stringify(answer);
 }
 

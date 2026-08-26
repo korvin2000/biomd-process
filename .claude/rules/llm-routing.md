@@ -28,6 +28,14 @@ provider quirks: [docs/ref/providers.md](../../docs/ref/providers.md).
   free". The lane semaphore is acquired **before** the endpoint's, never after.
 - **`least-busy` ranks on how full an endpoint is, never on free slot count.** A count hands the
   most generous endpoint every request from the first one onward.
+- **`adaptive` sorts by load *then* score, and the score applies at every load level.** Ranking
+  only the least-loaded tier and leaving the remainder in cost order switches the strategy off:
+  models sharing an endpoint always share a load value, so they were ranked on price alone —
+  51-0-0 across three of them on a live run. Full account:
+  [docs/ref/adaptive-routing.md](../../docs/ref/adaptive-routing.md).
+- **An unmeasured target must be explored, or it is never measured.** Without
+  `EXPLORATION_BONUS` the first completed call decides the whole run: whoever answered fastest
+  once out-scores a pool-mate that has nothing but its profile to argue with, forever.
 - **`prefer` means what `preferMode` says.** `reorder` (the default) floats the list to the front
   and keeps the rest of the pool behind it as the fallback chain. `restrict` makes the list the
   variant's *whole* chain: a one-entry list is then a pool of one, and a list whose models are all

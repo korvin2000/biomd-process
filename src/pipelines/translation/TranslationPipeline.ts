@@ -30,6 +30,7 @@ import {
   hasOwnScript,
   introducedMixedScriptWords,
   isTranslatable,
+  untranslatedReason,
 } from '../shared/script.js';
 import { complexityOf } from '../../routing/strategies/adaptive/ComplexityScorer.js';
 import { translateUnits } from '../shared/stringBatch.js';
@@ -231,12 +232,28 @@ export class TranslationPipeline implements DocumentPipeline {
       }),
       // A dropped mask token means a lost URL, and a *displaced* one means a
       // lost link — catch both while a retry is still one fragment cheap.
-      verify: (unit, translation) => {
+      verify: (unit, translation, strict) => {
         const missing = missingMasks(unit.text, translation);
         if (missing.length > 0) return `placeholder(s) ${missing.join(', ')} were not preserved`;
         const displaced = displacedMasks(unit.text, translation);
         if (displaced.length > 0) {
           return `placeholder(s) ${displaced.join(', ')} are no longer the target of a link — keep "](" and the token together`;
+        }
+        // A fragment handed back unchanged, or handed back with every letter
+        // still in the source alphabet, was charged for and not answered.
+        // Rejected on the strict round too: this is a defect another model
+        // demonstrably does not have, and reaching one is the point.
+        const untranslated = untranslatedReason(unit.text, translation, document.language, targetLang);
+        if (untranslated) return untranslated;
+        // Half a name in each alphabet is the other model's other habit. Only
+        // ever re-asked, never failed: which half is right is not knowable from
+        // here, so a mixture that survives the re-ask is published with the note
+        // `introducedMixedScriptWords` already writes over the whole document.
+        if (!strict) {
+          const mixed = introducedMixedScriptWords(unit.text, translation);
+          if (mixed.length > 0) {
+            return `${mixed.join(', ')} changed alphabet halfway through — transliterate the whole word`;
+          }
         }
         // The span this key came from, for the one check that needs to know
         // what kind of line the fragment was lifted out of.

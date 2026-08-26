@@ -1,7 +1,7 @@
 import type { ExecutionContext, PlannedTask } from '../../core/types.js';
 import { addUsage } from '../../llm/CostCalculator.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
-import { MessageBuilder } from '../../prompts/MessageBuilder.js';
+import { buildPromptBundle } from '../../prompts/PromptBundle.js';
 import type { PromptVariables } from '../../prompts/types.js';
 import { isOutputTruncated } from '../../reliability/errors.js';
 import { complexityOf } from '../../routing/strategies/adaptive/ComplexityScorer.js';
@@ -69,8 +69,20 @@ export interface StringBatchSpec {
   complexity?: number;
   /** Per-batch template variables, on top of the task's own. */
   variables(batch: readonly LocalizationUnit[]): PromptVariables;
-  /** Extra per-string validation, e.g. "every mask token survived". */
-  verify?: (unit: LocalizationUnit, translation: string) => string | undefined;
+  /**
+   * Extra per-string validation, e.g. "every mask token survived".
+   *
+   * `strict` says whether a rejection still has a cheap way out. On a lenient
+   * round the key is simply re-asked, on its own, of the model already chosen;
+   * on the strict round there is nowhere left to go and the rejection fails the
+   * call, which is what escalates the batch to the next model in the chain.
+   *
+   * A check that catches something *wrong* should reject on both — that is how
+   * the fallback model gets a chance at it. A check that catches something
+   * merely *worse* should reject only while `strict` is false, so a defect
+   * nobody can repair costs a re-ask and never a document.
+   */
+  verify?: (unit: LocalizationUnit, translation: string, strict: boolean) => string | undefined;
 }
 
 export interface StringBatchResult {
@@ -240,8 +252,7 @@ async function callOnce(
   const table: Record<string, string> = Object.fromEntries(batch.map((unit) => [unit.key, unit.text]));
   const payload = JSON.stringify(table);
 
-  const prompt = await context.prompts.render(spec.promptId, spec.variables(batch));
-  const messages = MessageBuilder.build(prompt, [
+  const prompt = await buildPromptBundle(context.prompts, spec.promptId, spec.variables(batch), [
     // Context first, strings last: both are volatile, and the model should know
     // what it is reading before it reads it.
     ...(spec.articleContext ? [{ title: 'About this article', body: spec.articleContext, volatile: true }] : []),
@@ -252,16 +263,17 @@ async function callOnce(
 
   const result = await context.llm.complete(
     {
-      messages,
+      messages: prompt.messages,
       responseFormat: { type: 'json_object' },
       correlationId: task.taskId,
-      promptCache: { key: `${spec.promptId}:${prompt.version}`, mode: 'explicit' },
+      promptCache: prompt.promptCache,
+      ...(prompt.variants ? { variants: prompt.variants } : {}),
     },
     {
       pipeline: task.pipeline,
       pool: spec.pool,
       variant: task.variant,
-      estimatedInputTokens: context.estimator.estimateMessages(messages),
+      estimatedInputTokens: context.estimator.estimateMessages(prompt.messages),
       // The answer repeats every key and runs longer than the source.
       expectedOutputTokens: Math.ceil(context.estimator.estimateText(payload) * 1.6) + 128,
       // The caller's document-level measurement when there is one; the batch
@@ -272,7 +284,7 @@ async function callOnce(
       signal: context.signal,
       validate: (response) => {
         parsed = undefined;
-        const verdict = parseTable(response.text, batch, spec.verify);
+        const verdict = parseTable(response.text, batch, spec.verify, strict);
         if (!verdict.ok) return { ok: false, reason: verdict.reason };
 
         // A lenient round hands back whatever was usable and lets the caller
@@ -317,6 +329,7 @@ function parseTable(
   text: string,
   batch: readonly LocalizationUnit[],
   verify: StringBatchSpec['verify'],
+  strict: boolean,
 ): TableVerdictOk | { ok: false; reason: string } {
   const block = extractJsonBlock(text);
   if (!block) return { ok: false, reason: 'response contained no JSON object' };
@@ -339,7 +352,7 @@ function parseTable(
     }
     // A dropped mask token means a lost URL: treat it exactly like a missing
     // answer so the repair round asks for that fragment again.
-    const problem = verify?.(unit, value);
+    const problem = verify?.(unit, value, strict);
     if (problem) {
       unanswered.push(unit.key);
       problems.push(`${unit.key}: ${problem}`);

@@ -15,7 +15,7 @@ import type { Dossier } from '../../domain/types.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import { PipelineError } from '../../shared/errors.js';
 import { hashStructure } from '../../shared/hash.js';
-import { halfTransliteratedNote, introducedMixedScriptWords } from '../shared/script.js';
+import { halfTransliteratedNote, introducedMixedScriptWords, untranslatedReason } from '../shared/script.js';
 import { readJsonFile } from '../../shared/fs.js';
 import type { JsonValue } from '../../shared/json.js';
 import {
@@ -24,6 +24,7 @@ import {
   outputDossierPath,
   sourceDossierPath,
 } from '../shared/dossierSource.js';
+import { complexityOf } from '../../routing/strategies/adaptive/ComplexityScorer.js';
 import { translateUnits } from '../shared/stringBatch.js';
 import { applyUnits, collectUnits, missingKeys, type LocalizationOptions } from './StringTable.js';
 import { TranslationMemory } from './TranslationMemory.js';
@@ -131,6 +132,12 @@ export class LocalizePipeline implements DocumentPipeline {
       units,
       maxPerCall: config.maxStringsPerCall,
       repairAttempts: config.repairAttempts,
+      // The article, not the fields drawn from it. A dossier is a flat table of
+      // names and places with no structure of its own, so scoring the batch
+      // reports "trivial" for every entry in the corpus and the routing term
+      // stops discriminating — the same defect `translate` had. What actually
+      // varies between entries is the article they were extracted from.
+      complexity: complexityOf(item.content),
       // A retry is not served the previous attempt's answers: they are what
       // failed. Without this the cache makes task-level fallback a no-op here —
       // every fragment would be a hit, no model would be called, and the second
@@ -149,6 +156,26 @@ export class LocalizePipeline implements DocumentPipeline {
         targetLanguageName: languageName(targetLang),
         count: part.length,
       }),
+      // The values here are the ones the leak actually shows up in: a forename,
+      // a birthplace, a teacher — one or two words, no sentence around them to
+      // carry the model along. `metadata.forename: "Наталья"` in the Spanish
+      // edition is not a translation with a flaw, it is the source string, and
+      // it reaches the catalogue index as the name the page is filed under.
+      verify: (unit, translation, strict) => {
+        const untranslated = untranslatedReason(unit.text, translation, item.language, targetLang);
+        if (untranslated) return untranslated;
+        // Localization *is* romanization, so this is where a half-transliterated
+        // name is made rather than passed through. Re-asked while that is free
+        // and never failed — see the whole-dossier note below, which still
+        // reports whatever survives.
+        if (!strict) {
+          const mixed = introducedMixedScriptWords(unit.text, translation);
+          if (mixed.length > 0) {
+            return `${mixed.join(', ')} changed alphabet halfway through — transliterate the whole word`;
+          }
+        }
+        return undefined;
+      },
     });
 
     const localized = applyUnits(source, options, batch.translations);

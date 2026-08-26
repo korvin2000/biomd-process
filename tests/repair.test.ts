@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { runJob } from '../src/app/runJob.js';
 import type { CompletionResponse } from '../src/llm/types.js';
-import { FakeClient, Workspace, echoTable, requestedTable, respond, type FakeCall } from './helpers/workspace.js';
+import { FakeClient, Workspace, echoTable, requestedTable, respond, translated, type FakeCall } from './helpers/workspace.js';
 
 /**
  * The failure this file is about: a model answers all but one key of a
@@ -49,7 +49,12 @@ function dropsOneKeyOnce(): { client: FakeClient; batches: FakeCall[] } {
     if (batches.length > 1) return respond(echoTable(call.request));
 
     const table = requestedTable(call);
-    const answered = Object.entries(table).slice(0, -1);
+    // Translated, like any other answer: an untranslated value is now a
+    // *rejected* value, and this fixture is about a key that never came back at
+    // all rather than one that came back wrong.
+    const answered = Object.entries(table)
+      .slice(0, -1)
+      .map(([key, text]) => [key, translated(text)]);
     return respond(JSON.stringify(Object.fromEntries(answered)));
   });
 
@@ -79,8 +84,8 @@ describe('partial batch answers', () => {
 
     await runJob(app);
 
-    const translated = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
-    expect(translated.trim()).toBe(ARTICLE.trim());
+    const document = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
+    expect(document.trim()).toBe(translated(ARTICLE).trim());
   });
 
   it('counts the repair as an ordinary call, not a retry', async () => {
@@ -176,8 +181,8 @@ describe('a batch whose answer does not fit', () => {
     const { client } = cutsOffAbove(1);
     await runJob(workspace.app({ tasks: TRANSLATE_ONLY }, client));
 
-    const translated = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
-    expect(translated.trim()).toBe(ARTICLE.trim());
+    const document = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
+    expect(document.trim()).toBe(translated(ARTICLE).trim());
   });
 
   it('does not retry the identical payload before narrowing it', async () => {
@@ -207,7 +212,7 @@ describe('translation memory', () => {
 
     const first = workspace.app(
       { tasks: { translate: { ...TWO_DOCS.translate, useTranslationMemory: 'persistent' } }, run: { resume: 'off' } },
-      FakeClient.batch((text) => `EN:${text}`),
+      FakeClient.batch((text) => `EN:${translated(text)}`),
     );
     await runJob(first);
     const paidFor = first.metrics.snapshot().llmRequests;
@@ -216,20 +221,20 @@ describe('translation memory', () => {
     // A fresh app, a fresh run directory — only the memory file survives.
     const second = workspace.app(
       { tasks: { translate: { ...TWO_DOCS.translate, useTranslationMemory: 'persistent' } }, run: { resume: 'off' } },
-      FakeClient.batch((text) => `EN:${text}`),
+      FakeClient.batch((text) => `EN:${translated(text)}`),
     );
     await runJob(second);
 
     expect(second.metrics.snapshot().llmRequests).toBe(0);
-    const translated = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
-    expect(translated).toContain('EN:');
+    const document = await readFile(workspace.path('out/en/andres-segovia.bio.md'), 'utf8');
+    expect(document).toContain('EN:');
   });
 
   it('does not carry a run-scoped memory into the next run', async () => {
-    const first = workspace.app({ tasks: TWO_DOCS, run: { resume: 'off' } }, FakeClient.batch((text) => text));
+    const first = workspace.app({ tasks: TWO_DOCS, run: { resume: 'off' } }, FakeClient.batch(translated));
     await runJob(first);
 
-    const second = workspace.app({ tasks: TWO_DOCS, run: { resume: 'off' } }, FakeClient.batch((text) => text));
+    const second = workspace.app({ tasks: TWO_DOCS, run: { resume: 'off' } }, FakeClient.batch(translated));
     await runJob(second);
 
     expect(second.metrics.snapshot().llmRequests).toBeGreaterThan(0);

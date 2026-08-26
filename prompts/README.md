@@ -10,8 +10,48 @@ prompts/
   translation/{system.md,user.md}           translate, mode: document
   translation/{segments-system.md,          translate, mode: segments  (default)
                segments-user.md}
+  translation/minimax-m3/segments-system.md translate, but only for that model
   localization/{system.md,user.md}          localize
 ```
+
+## Per-model templates
+
+A subdirectory named after a **model id** — the `id:` in `llm.models[]`, not the
+provider's slug — shadows the file it sits beside. Nothing in the config names
+it; it is found because it is there. `biomd prompts list` shows every one that
+was found, and `biomd prompts show <task> --model <id>` renders it.
+
+Shadowing is **per file**: the example above changes what `minimax-m3` gets as a
+system prompt and leaves `segments-user.md` shared with everyone.
+
+This exists because a prompt is tuned against a model, not against a task. The
+shared `segments-system.md` is a hundred lines of rules that were each measured
+before they were written down; a rule added to correct one model's habit is
+three more lines every other model pays for on every call and may read
+differently to each of them.
+
+**Extend, do not fork.** An override is rendered with the shared text already
+resolved, as `sharedSystem` and `sharedUser`. The shape that keeps a two-line
+correction two lines long:
+
+```eta
+<%= it.sharedSystem %>
+
+## One correction, for this model only
+…
+```
+
+A wholesale replacement is possible — just do not mention the variable — and is
+the escape hatch, not the pattern. Two copies of the same hundred rules is how
+they end up disagreeing.
+
+**Which model answers is not knowable when the request is built.** Routing picks
+per call, and a fallback may reach a model the first attempt never considered, so
+every rendering travels with the request and the gateway selects one at dispatch
+(`CompletionRequest.variants`). Two consequences: each variant gets its own
+prompt-cache key, since two different prefixes sharing one is a wrong hit; and
+`estimatedInputTokens` is measured on the shared rendering, so an override that
+is the shared prompt plus a few lines is estimated a few tokens short.
 
 ## Conventions
 
@@ -31,6 +71,10 @@ worth knowing before editing one:
   is `tR+="…"` on the line above, and automatic semicolon insertion does not fire
   before an open parenthesis. Start with a keyword instead —
   `<% var card = it.fields || []; card.forEach(… %>`.
+- **A comment is `<% /* … */ %>`.** Eta 3 has no `<%# … %>` form; it raises "Bad
+  template syntax". Use it for anything a maintainer needs and a model does not —
+  why a rule is worded the way it is, what a change was measured against. Prose
+  left in a template is prose the model reads and is billed for on every call.
 
 **System = stable, user = instructions, payload = a later message.** The document body —
 or, in the batch modes, the `{hash: text}` table — is *never* a template variable.
@@ -51,6 +95,15 @@ bearing, not decorative.
 **Versioning.** Both files are hashed into a `promptVersion` that feeds each
 task's fingerprint. Editing a template therefore invalidates previously completed
 work and it will be redone on the next run; unchanged templates cost nothing.
+
+Per-model overrides hash in too, and they invalidate the task for **every**
+model rather than only the one they name. A fingerprint is computed at plan time
+and the model is chosen per call, so it can never mean "this model's prompt" —
+the choice is between over-invalidating and silently serving the output of a
+prompt that has since been replaced. Adding the first override to a task
+therefore re-plans that task across the corpus; `--skip-existing` is the way to
+stop it costing a full re-run. A task with no override keeps exactly the version
+it had before overrides existed.
 
 ## Working on a template
 

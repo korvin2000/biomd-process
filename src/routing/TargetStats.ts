@@ -1,4 +1,4 @@
-import { emptyStats, RECENT_WINDOW, type TargetStats } from './types.js';
+import { emptyStats, HEALTH_WINDOW, RECENT_WINDOW, type TargetStats } from './types.js';
 
 /** Live per-target counters, read by strategies and reported in the run summary. */
 export class TargetStatsRegistry {
@@ -28,6 +28,7 @@ export class TargetStatsRegistry {
     entry.totalLatencyMs += latencyMs;
     entry.costUsd += costUsd;
     entry.lastUsedAt = Date.now();
+    push(entry.outcomes, true);
     if (completionTokens > 0 && latencyMs > 0) {
       entry.recent.push({ latencyMs, completionTokens });
       if (entry.recent.length > RECENT_WINDOW) entry.recent.splice(0, entry.recent.length - RECENT_WINDOW);
@@ -40,9 +41,19 @@ export class TargetStatsRegistry {
     entry.failures += 1;
     entry.consecutiveFailures += 1;
     entry.lastUsedAt = Date.now();
+    push(entry.outcomes, false);
   }
 
   snapshot(): TargetStats[] {
-    return [...this.stats.values()].map((entry) => ({ ...entry, recent: [...entry.recent] }));
+    return [...this.stats.values()].map((entry) => ({
+      ...entry,
+      recent: [...entry.recent],
+      outcomes: [...entry.outcomes],
+    }));
   }
+}
+
+function push(window: boolean[], outcome: boolean): void {
+  window.push(outcome);
+  if (window.length > HEALTH_WINDOW) window.splice(0, window.length - HEALTH_WINDOW);
 }

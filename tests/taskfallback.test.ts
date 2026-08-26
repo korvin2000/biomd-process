@@ -16,7 +16,7 @@ import { AllTargetsFailedError, LlmCallError } from '../src/reliability/index.js
 import { Router } from '../src/routing/Router.js';
 import { RoutingStrategyRegistry } from '../src/routing/StrategyRegistry.js';
 import { TargetStatsRegistry } from '../src/routing/TargetStats.js';
-import { Workspace, echoTable, isStringBatch, respond } from './helpers/workspace.js';
+import { Workspace, echoTable, isStringBatch, respond, translated } from './helpers/workspace.js';
 
 /**
  * Fallback for the failure the gateway cannot see: every call returned 200 and
@@ -319,7 +319,7 @@ class Careless implements LlmClient {
     const sloppy = this.careless.includes(model.modelId) && !behaves;
     // A heading, not a bullet: a stray list marker is escaped at the splice
     // now, so it never reaches the task at all. Invented structure does.
-    return respond(sloppy ? echoTable(request, (text) => `## ${text}`) : echoTable(request));
+    return respond(sloppy ? echoTable(request, (text) => `## ${translated(text)}`) : echoTable(request));
   }
 }
 

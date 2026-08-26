@@ -23,8 +23,22 @@ const SAMPLE_VARIABLES: Record<string, Record<string, unknown>> = {
     partial: false,
     partLabel: 'full',
   },
-  translateSegments: { sourceLanguage: 'ru', targetLanguage: 'en', count: 12 },
-  localize: { sourceLanguage: 'ru', targetLanguage: 'en', count: 12 },
+  // The names as well as the codes, exactly as the pipelines pass them —
+  // without them the rendered sample reads "Source language: **undefined**".
+  translateSegments: {
+    sourceLanguage: 'ru',
+    targetLanguage: 'en',
+    sourceLanguageName: 'Russian',
+    targetLanguageName: 'English',
+    count: 12,
+  },
+  localize: {
+    sourceLanguage: 'ru',
+    targetLanguage: 'en',
+    sourceLanguageName: 'Russian',
+    targetLanguageName: 'English',
+    count: 12,
+  },
 };
 
 export function createPromptsCommand(): Command {
@@ -43,6 +57,16 @@ export function createPromptsCommand(): Command {
         process.stdout.write(`${pc.bold(taskId)} ${pc.dim(`@ ${version}`)}\n`);
         process.stdout.write(pc.dim(`  system  ${files.system}\n`));
         process.stdout.write(pc.dim(`  user    ${files.user}\n`));
+
+        // A per-model template is discovered from the directory tree and named
+        // nowhere in the config, so this listing is the only place it shows up
+        // without going looking for it.
+        for (const modelId of await app.prompts.variantsOf(taskId)) {
+          const variant = await app.prompts.filesOf(taskId, modelId);
+          process.stdout.write(`  ${pc.yellow(modelId)} ${pc.dim('gets instead:')}\n`);
+          if (variant.system !== files.system) process.stdout.write(pc.dim(`    system  ${variant.system}\n`));
+          if (variant.user !== files.user) process.stdout.write(pc.dim(`    user    ${variant.user}\n`));
+        }
       }
     });
 
@@ -51,9 +75,10 @@ export function createPromptsCommand(): Command {
     .description('Render a template with sample variables — no tokens are spent')
     .option('-c, --config <file>', 'path to the config file')
     .option('--messages', 'show the assembled wire messages instead of the raw render')
-    .action(async (task: string, options: { config?: string; messages?: boolean }) => {
+    .option('--model <id>', 'render the template this model gets, if it has one of its own')
+    .action(async (task: string, options: { config?: string; messages?: boolean; model?: string }) => {
       const app = createApp(await loadConfig({ file: options.config }), { dryRun: true });
-      const prompt = await app.prompts.render(task, SAMPLE_VARIABLES[task] ?? {});
+      const prompt = await app.prompts.render(task, SAMPLE_VARIABLES[task] ?? {}, options.model);
 
       if (options.messages) {
         const messages = MessageBuilder.build(prompt, [

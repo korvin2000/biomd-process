@@ -161,3 +161,6 @@ bakeoff/
 .claude/worktrees/
 .claude/settings.local.json
 CLAUDE.local.md
+
+# A/B translation experiments (tools/score-translations.ts)
+.ab/

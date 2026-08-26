@@ -38,7 +38,7 @@ cli → app → core ─┬→ pipelines → io
 | `localization/` | `LocalizePipeline` | `StringTable.ts` — `collectUnits` `applyUnits` `keyOf` `missingKeys` · `TranslationMemory.ts` · `TranslationMemoryRegistry.ts` |
 | `portrait/` | `PortraitPipeline` `assetPath` | none — all logic lives in `src/images` |
 | `catalog/` | `CatalogPipeline` | `names.ts` — `displayNamesOf` `latinTitleOf` `AliasPolicy`, and a re-export of `DisplayNameOrder` (which lives in `domain/types.ts`, because `validate` holds the same opinion for `INV-15`) |
-| `shared/` | cross-pipeline helpers | `escalation.ts` — `runWithEscalation` `EscalationSpec` · `stringBatch.ts` — `translateUnits` (repair + narrowing ladders) · `dossierSource.ts` — `findSourceDossier` `findDossierToLocalize` `outputDossierPath` · `script.ts` — `isTranslatable` `hasOwnScript` `mixedScriptWords` · `roster.ts` — `rosterEntryFor` |
+| `shared/` | cross-pipeline helpers | `escalation.ts` — `runWithEscalation` `EscalationSpec` · `stringBatch.ts` — `translateUnits` (repair + narrowing ladders) · `dossierSource.ts` — `findSourceDossier` `findDossierToLocalize` `outputDossierPath` · `script.ts` — `isTranslatable` `hasOwnScript` `mixedScriptWords` `introducedMixedScriptWords` `untranslatedReason` · `roster.ts` — `rosterEntryFor` |
 
 ## src/documents — reading Markdown and putting it back
 
@@ -101,7 +101,8 @@ cli → app → core ─┬→ pipelines → io
 | `observability/Logger.ts` | JSONL app log; **envelope written last** | `AppLogger` `nullLogger` |
 | `roster/` | `data/names.json`: format, load, and the two judgement calls | `NameRosterStore` `toRosterEntry` `isNamePart` `RosterEntry` |
 | `prompts/MessageBuilder.ts` | **the cache-friendly message order** | `MessageBuilder` `PromptSection` |
-| `prompts/PromptRepository.ts` | template load and `promptVersion` hashing | — |
+| `prompts/PromptRepository.ts` | template load, per-model overrides, `promptVersion` hashing | `versionOf` `variantsOf` `render(task, vars, modelId?)` |
+| `prompts/PromptBundle.ts` | one task's prompt rendered for every model that could answer it | `buildPromptBundle` `PromptBundle` |
 | `shared/` | errors, hashing, atomic fs, safe JSON, timeouts | `AppError` `ConfigError` `PipelineError` `sha` `hashStructure` `writeFileAtomic` `safeJsonParse` `extractJsonBlock` `withTimeout` |
 
 ## tests
@@ -114,6 +115,8 @@ cli → app → core ─┬→ pipelines → io
 | `documents.test.ts` · `segmentation.test.ts` · `media.test.ts` | Markdown in and out |
 | `routing.test.ts` · `providerrouting.test.ts` · `lanes.test.ts` · `reliability.test.ts` · `ratelimiter.test.ts` · `taskfallback.test.ts` | the call path |
 | `extraction.test.ts` · `repair.test.ts` · `websearch.test.ts` · `portrait.test.ts` · `roster.test.ts` | pipeline behaviour |
+| `scriptgate.test.ts` · `modelprompts.test.ts` | an answer that was not translated · a template for one model |
+| `adaptive.test.ts` · `adaptive.simulation.test.ts` | the `adaptive` strategy, and a whole corpus through it against a fake provider |
 | `config.test.ts` · `io-and-prompts.test.ts` · `progresslog.test.ts` · `streaming.test.ts` | edges |
 
 ## Non-source inputs, read but never written

@@ -20,6 +20,10 @@ what crosses the wire: [docs/ref/cost-mechanisms.md](../../docs/ref/cost-mechani
   an article's silence from an unsent sentence, so partial context attempts are dropped at plan time.
 - **The repair ladder moves on the cheap axis first**: a missing key is re-asked alone, a truncated
   batch is halved on the *same* model, and only then does it fall back to a wider one.
+- **`verify` gets `strict`, and it decides how much a rejection may cost.** On a lenient round the
+  key is re-asked alone, on the model already chosen; on the strict round the rejection fails the
+  call and escalates the batch. Reject on both for something *wrong*; reject only while `!strict`
+  for something merely *worse*, or a defect nobody can repair costs a document.
 - **A retry must not be served the previous attempt's answers** — they are what failed. That is what
   `ExecutionContext.attempt` is for.
 - **`src/documents/markdown/inline.ts` holds the one link/image pattern.** Five private copies once

@@ -32,6 +32,9 @@ export interface RecentCall {
 /** How many completed calls a target's rolling window keeps. */
 export const RECENT_WINDOW = 4;
 
+/** How many outcomes, success or failure, the health window keeps. */
+export const HEALTH_WINDOW = 10;
+
 export interface TargetStats {
   key: string;
   requests: number;
@@ -50,6 +53,29 @@ export interface TargetStats {
    * in barely dents it. A short window forgets, which is the point.
    */
   recent: RecentCall[];
+  /**
+   * The last {@link HEALTH_WINDOW} outcomes, oldest first, `true` for success.
+   *
+   * The cumulative `failures/requests` never forgets, and over a long run that
+   * is the wrong shape: a target that failed five calls in the first minute and
+   * was not asked again sits at a failure rate of 1.0 for the next hour, which
+   * is a claim about a minute presented as a claim about the run. A window
+   * forgets at a fixed rate, so recovery is possible on evidence rather than
+   * only through the circuit breaker's timer.
+   */
+  outcomes: boolean[];
+}
+
+/**
+ * Failure rate over the health window, or `undefined` while it is empty.
+ *
+ * Deliberately separate from `failures / requests`, which stays as the run-long
+ * account the summary prints.
+ */
+export function recentFailureRate(stats: TargetStats): number | undefined {
+  if (stats.outcomes.length === 0) return undefined;
+  const failures = stats.outcomes.reduce((n, ok) => (ok ? n : n + 1), 0);
+  return failures / stats.outcomes.length;
 }
 
 /**
@@ -203,6 +229,7 @@ export function emptyStats(key: string): TargetStats {
     costUsd: 0,
     lastUsedAt: 0,
     recent: [],
+    outcomes: [],
   };
 }
 

@@ -18,6 +18,7 @@ token. The other conditional tier is `.claude/rules/*.md`, which loads when Clau
 | [cost-mechanisms.md](cost-mechanisms.md) | touching a prompt, a pipeline, a context strategy, or anything that decides what crosses the wire |
 | [throughput.md](throughput.md) | configuring for speed or for cost: strategies, lanes, `run.concurrency`, `prefer`, and a symptom→cause table |
 | [providers.md](providers.md) | adding or tuning a model target — OmniRoute, OpenRouter, llama.cpp, and what each one silently ignores |
+| [adaptive-routing.md](adaptive-routing.md) | the `adaptive` strategy: its five inputs, its two subjective numbers, which knob moves which model, and the local harness that replaced paid experiments |
 | [failure-modes.md](failure-modes.md) | before a real run · when a run "succeeded" but the data is wrong · when an endpoint behaves oddly |
 | [domain-format.md](domain-format.md) | anything about dates, names, aliases, collectives, the catalogue merge, or `biomd validate` |
 | [pipelines.md](pipelines.md) | working on one of the six tasks — what it reads, returns, and refuses to do |

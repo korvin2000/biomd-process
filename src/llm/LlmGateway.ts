@@ -544,17 +544,27 @@ export class LlmGateway implements LlmPort {
   }
 
   /**
-   * Model-level params from config, with the caller's request winning — and the
-   * attempt's own tuning winning over both, because it is the deliberate last
-   * word of a task that has already failed with everyone else's settings.
+   * The request as this target will actually receive it.
+   *
+   * Two substitutions, both of which can only be made here because both depend
+   * on which target routing settled on: the model's own params, and — where the
+   * caller supplied one — the model's own prompt. `variants` is stripped rather
+   * than passed through, since it is an instruction to the gateway and not a
+   * field any provider knows.
+   *
+   * Model-level params come from config, with the caller's request winning, and
+   * the attempt's own tuning winning over both — it is the deliberate last word
+   * of a task that has already failed with everyone else's settings.
    */
   private withTargetParams(
     target: ModelTarget,
     request: CompletionRequest,
     options: GatewayCallOptions,
   ): CompletionRequest {
+    const { variants, ...rest } = request;
     return {
-      ...request,
+      ...rest,
+      ...(variants?.[target.modelId] ?? {}),
       params: {
         ...target.params,
         maxOutputTokens: target.maxOutputTokens,

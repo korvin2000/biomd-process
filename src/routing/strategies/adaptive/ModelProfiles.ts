@@ -129,7 +129,11 @@ const PROFILES: Readonly<Record<string, ModelProfile>> = {
     tolerance: 0.6,
     proseQuality: 0.7,
     priorThroughput: 78,
-    priorFailureRate: 0.05,
+    // Higher than a plain quality estimate would justify, and deliberately: a
+    // metered free tier's characteristic failure is a 429, not a bad answer,
+    // and 5% is what it looks like before the allowance runs out rather than
+    // across a whole corpus.
+    priorFailureRate: 0.08,
     maxComfortableTokens: 2600,
   },
 

@@ -5,6 +5,7 @@ import { addUsage } from '../../llm/CostCalculator.js';
 import { EMPTY_USAGE, type TokenUsage } from '../../llm/types.js';
 import type { PromptSection } from '../../prompts/MessageBuilder.js';
 import { MessageBuilder } from '../../prompts/MessageBuilder.js';
+import { buildPromptBundle } from '../../prompts/PromptBundle.js';
 import type { PromptVariables } from '../../prompts/types.js';
 import { isAbortError } from '../../shared/async.js';
 import { AbortedError, BudgetExceededError, PipelineError, errorMessage } from '../../shared/errors.js';
@@ -158,8 +159,9 @@ async function callSegment<T>(
   checkAcceptance: boolean,
 ): Promise<{ value: T; usage: TokenUsage; costUsd: number; notes: string[] }> {
   const { context, task } = spec;
-  const prompt = await context.prompts.render(spec.promptId, spec.variables(attempt, segment));
-  const messages = MessageBuilder.build(prompt, [spec.section(segment)]);
+  const prompt = await buildPromptBundle(context.prompts, spec.promptId, spec.variables(attempt, segment), [
+    spec.section(segment),
+  ]);
 
   // The parse result of the accepted response, captured by the validator so the
   // response is parsed exactly once even though validation happens inside the gateway.
@@ -167,17 +169,18 @@ async function callSegment<T>(
 
   const result = await context.llm.complete(
     {
-      messages,
+      messages: prompt.messages,
       responseFormat: spec.responseFormat,
       correlationId: task.taskId,
-      promptCache: { key: `${spec.promptId}:${prompt.version}`, mode: 'explicit' },
+      promptCache: prompt.promptCache,
+      ...(prompt.variants ? { variants: prompt.variants } : {}),
     },
     {
       pipeline: task.pipeline,
       pool: spec.pool,
       variant: task.variant,
       requiredCapabilities: spec.requiredCapabilities,
-      estimatedInputTokens: context.estimator.estimateMessages(messages),
+      estimatedInputTokens: context.estimator.estimateMessages(prompt.messages),
       expectedOutputTokens: spec.expectedOutputTokens,
       signal: context.signal,
       validate: (response) => {

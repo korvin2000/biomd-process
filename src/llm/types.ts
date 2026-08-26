@@ -71,6 +71,24 @@ export interface CompletionRequest {
   promptCache?: PromptCacheRequest;
   /** Opaque correlation data forwarded to providers that accept a `user`/`metadata` field. */
   correlationId?: string;
+  /**
+   * What to send *instead* when a particular model answers, keyed by
+   * `ModelTarget.modelId`. Applied by the gateway once routing has chosen, and
+   * never sent to a provider.
+   *
+   * The caller cannot pick the prompt itself: which model serves a call is
+   * decided per attempt, inside the fallback chain, after the request is built.
+   * So a per-model prompt has to travel with the request and be selected at the
+   * point of dispatch. See {@link ../prompts/PromptRepository.js}.
+   */
+  variants?: Readonly<Record<string, RequestVariant>>;
+}
+
+/** One model's replacement for the parts of a request a prompt decides. */
+export interface RequestVariant {
+  messages: ChatMessage[];
+  /** Its own cache key: a different prefix must never share one. */
+  promptCache?: PromptCacheRequest;
 }
 
 export interface TokenUsage {
