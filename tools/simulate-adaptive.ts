@@ -1,12 +1,31 @@
 /**
- * Dry-run of the `adaptive` strategy over a real corpus — no LLM, no network.
+ * Which model wins each **document**, with empty stats and nothing learning.
+ *
+ *   npx tsx tools/simulate-adaptive.ts out/ru [model-ids]
  *
  * Answers the two questions a scoring strategy cannot be trusted on until they
  * are asked of real documents: what the complexity scores actually look like
- * (a scorer that rates everything 0.5 is an expensive no-op), and how the work
- * would split across the pool as a result.
+ * (a scorer that rates everything 0.5 is an expensive no-op), and which way the
+ * preference runs across the complexity range.
  *
- *   npx tsx tools/simulate-adaptive.ts out/ru
+ * ## What it is not
+ *
+ * It is **not** the split a run produces, and it should never be used to fit a
+ * constant against one. Two reasons, and the second is not obvious:
+ *
+ *  - nothing here learns. `Router.select` reads stats and never writes them, so
+ *    every document below is scored against an empty registry: profile priors,
+ *    a full exploration bonus for everybody, and no health drift. That is a
+ *    useful thing to see on its own — it is the *preference*, stripped of
+ *    dynamics — and it is not what a scheduler does.
+ *  - it counts documents, and a run serves **calls**. Complexity is a density,
+ *    so it is negatively correlated with length (r = -0.39 on `input/ru`); the
+ *    short documents that score hardest are the ones carrying the least work.
+ *    A per-document map therefore over-reports the high-tolerance model against
+ *    a real run, by about two to one on this corpus.
+ *
+ * For a split, use `tools/split-adaptive.ts`, which runs the actual scheduler
+ * repeatedly and reports a mean and a spread.
  */
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -48,7 +67,11 @@ function target(modelId: string, endpointId: string, inputPer1M: number, outputP
       stream: false,
       enabled: true,
     },
-  } as ModelTarget;
+    // Neither reaches routing; they are here so this file compiles against the
+    // real `ModelTarget` rather than a cast that hides a drifting shape. Which
+    // is what it was: `tools/` sat outside `npm run typecheck` until this
+    // needed it, and the cast had been wrong for two fields for some time.
+  } as unknown as ModelTarget;
 }
 
 /** The `translate` pool as `biomd.config.yaml` currently declares it. */

@@ -6,7 +6,12 @@ import { Router } from '../src/routing/Router.js';
 import { RoutingStrategyRegistry } from '../src/routing/StrategyRegistry.js';
 import { TargetStatsRegistry } from '../src/routing/TargetStats.js';
 import type { OccupancyView, RoutingContext } from '../src/routing/types.js';
-import { adaptive, scoreTargets } from '../src/routing/strategies/adaptive/AdaptiveStrategy.js';
+import {
+  adaptive,
+  adaptiveWith,
+  DEFAULT_TUNING,
+  scoreTargets,
+} from '../src/routing/strategies/adaptive/AdaptiveStrategy.js';
 import { complexityOf, scoreComplexity } from '../src/routing/strategies/adaptive/ComplexityScorer.js';
 import { profileFor, profiledModelIds } from '../src/routing/strategies/adaptive/ModelProfiles.js';
 
@@ -69,9 +74,13 @@ function makeRouter(stats = new TargetStatsRegistry(), loads: Record<string, num
   );
 }
 
+/** USD for this request on this target, the way `Router.buildContext` computes it. */
+function priceOf(target: ModelTarget, inputTokens: number, outputTokens: number): number {
+  return (target.pricing.inputPer1M * inputTokens + target.pricing.outputPer1M * outputTokens) / 1e6;
+}
+
 /** A minimal RoutingContext, for asserting on the arithmetic rather than the winner. */
-function contextFor(complexity: number): RoutingContext {
-  const stats = new TargetStatsRegistry();
+function contextFor(complexity: number, stats = new TargetStatsRegistry(), realPrices = false): RoutingContext {
   return {
     candidates: [],
     request: {
@@ -85,7 +94,7 @@ function contextFor(complexity: number): RoutingContext {
     fits: () => true,
     headroom: () => 1000,
     outputHeadroom: () => 1000,
-    estimatedCost: () => 0.001,
+    estimatedCost: (target) => (realPrices ? priceOf(target, 2000, 2000) : 0.001),
     freeSlots: () => Number.POSITIVE_INFINITY,
     inFlight: () => 0,
     load: () => 0,
@@ -272,6 +281,207 @@ describe('the adaptive strategy', () => {
 
     expect(unmeasured.map((t) => t.modelId)).toEqual(neutral.map((t) => t.modelId));
     expect(easy[0]!.modelId).toBe('deepseek');
+  });
+});
+
+/**
+ * The arithmetic of the four terms, asserted directly.
+ *
+ * Every one of these pins a defect that a winner-take-all assertion could not
+ * see: the ranking came out the same and the number underneath it was wrong.
+ */
+describe('the scoring arithmetic', () => {
+  it('lets a sustained measurement overrule the profile prior', () => {
+    // The prior is a hand-derived number from a few hundred historical calls,
+    // and it used to hold 3/7 of this term for the whole run whatever arrived:
+    // confidence was weighted by the *window* length, which `RECENT_WINDOW` caps
+    // at four. A target sustaining 200 tok/s against a prior of 81 read as 149.
+    // The window is the estimate; the cumulative success count is the evidence.
+    const stats = new TargetStatsRegistry();
+    for (let i = 0; i < 40; i += 1) stats.recordSuccess(deepseek.key, 1000, 0.001, 200);
+
+    const row = scoreTargets([deepseek], contextFor(0.3, stats))[0]!;
+    expect(profileFor('deepseek').priorThroughput).toBe(81);
+    expect(row.throughput).toBeGreaterThan(180);
+  });
+
+  it('still refuses to believe one impossible call', () => {
+    const stats = new TargetStatsRegistry();
+    stats.recordSuccess(minimax.key, 100, 0, 100_000); // a million tokens/sec
+    const row = scoreTargets([minimax], contextFor(0.3, stats))[0]!;
+    // The ceiling binds the window, not the blend: three times the prior, no
+    // matter how confident the cumulative count says we should be.
+    expect(row.throughput).toBeLessThanOrEqual(profileFor('minimax-m3').priorThroughput * 3);
+  });
+
+  it('compares two paid targets the same way whether or not a free one is present', () => {
+    // `min / value` is the obvious lower-is-better normalisation and it breaks
+    // on the one case this pool always contains: a free candidate makes `min`
+    // zero, every paid target collapses onto the floor, and two targets four
+    // times apart in price become indistinguishable. Measured before the fix,
+    // the deepseek-to-minimax gap on this term fell from 0.82 to 0.045 — an
+    // eighteen-fold change in a comparison the free tier is not part of.
+    const gapOf = (pool: ModelTarget[]): number => {
+      const rows = scoreTargets(pool, contextFor(0.3, new TargetStatsRegistry(), true));
+      const find = (id: string): number => rows.find((r) => r.target.modelId === id)!.score;
+      return find('deepseek') - find('minimax-m3');
+    };
+
+    expect(gapOf([deepseek, minimax, minimaxFree])).toBeCloseTo(gapOf([deepseek, minimax]), 10);
+  });
+
+  it('gives a target that is failing every call no reward for being tolerant', () => {
+    // The safety property, stated as a mechanism rather than as a threshold.
+    // `COMPLEXITY_PULL` used to have a ceiling above which a health-0 target
+    // started winning the hardest documents in the corpus — the ones it is
+    // least able to answer — and that ceiling was a consequence of the four
+    // weights, so it moved whenever one of them did. Documented at 0.85; the
+    // arithmetic said 0.658. Now the reward half of the bend is worth what
+    // health says it is worth, and a dead target's is worth nothing.
+    const stats = new TargetStatsRegistry();
+    for (let i = 0; i < 6; i += 1) stats.recordFailure(minimax.key);
+
+    const scoreAt = (complexity: number): { broken: number; healthy: number; brokenHealth: number } => {
+      const rows = scoreTargets([deepseek, minimax], contextFor(complexity, stats));
+      const broken = rows.find((r) => r.target.modelId === 'minimax-m3')!;
+      return {
+        broken: broken.score,
+        brokenHealth: broken.health,
+        healthy: rows.find((r) => r.target.modelId === 'deepseek')!.score,
+      };
+    };
+
+    const neutral = scoreAt(0.5);
+    const tangled = scoreAt(1);
+    expect(neutral.brokenHealth).toBe(0); // six failures in six calls, and no older evidence
+    // The document got twice as hard and the broken target gained nothing by it.
+    expect(tangled.broken).toBeCloseTo(neutral.broken, 10);
+    // …while the healthy low-tolerance one honestly loses something, which is
+    // the statement the bend is for.
+    expect(tangled.healthy).toBeLessThan(neutral.healthy);
+    expect(tangled.healthy).toBeGreaterThan(tangled.broken);
+  });
+
+  it('ramps the size penalty rather than cutting a target off at its ceiling', () => {
+    const ceiling = profileFor('minimax-m3-free').maxComfortableTokens!;
+    const penaltyAt = (inputTokens: number): number => {
+      const context = { ...contextFor(0.3), request: { ...ask(0.3), estimatedInputTokens: inputTokens } };
+      return scoreTargets([minimaxFree], context as RoutingContext)[0]!.oversize;
+    };
+
+    expect(penaltyAt(ceiling)).toBe(0);
+    expect(penaltyAt(ceiling * 1.25)).toBeGreaterThan(0);
+    expect(penaltyAt(ceiling * 1.25)).toBeLessThan(penaltyAt(ceiling * 1.75));
+    // Bounded, so it stays a preference: the target keeps its place in the
+    // chain and still catches a failure above it.
+    expect(penaltyAt(ceiling * 10)).toBe(penaltyAt(ceiling * 2));
+  });
+
+  it('spends the exploration bonus down as a target becomes a known quantity', () => {
+    const stats = new TargetStatsRegistry();
+    const exploreNow = (): number => scoreTargets([deepseek], contextFor(0.3, stats))[0]!.explore;
+
+    const cold = exploreNow();
+    for (let i = 0; i < 4; i += 1) stats.recordSuccess(deepseek.key, 1000, 0, 500);
+    const warm = exploreNow();
+    for (let i = 0; i < 20; i += 1) stats.recordSuccess(deepseek.key, 1000, 0, 500);
+    const known = exploreNow();
+
+    expect(cold).toBeGreaterThan(0.25);
+    expect(warm).toBeLessThan(cold / 4);
+    // Gone long before it could distort a split, but never negative.
+    expect(known).toBeLessThan(0.02);
+    expect(known).toBeGreaterThan(0);
+  });
+
+  it('runs at whatever tuning it is handed, so a sweep measures the real formula', () => {
+    // `tools/calibrate-adaptive.ts` fits constants by registering instances of
+    // this. Before `AdaptiveTuning` existed it kept its own transcription of the
+    // arithmetic, which had drifted — it modelled neither the oversize penalty
+    // nor the exploration bonus — so the constants it produced were fitted
+    // against a formula the router does not run.
+    const flat = adaptiveWith({ ...DEFAULT_TUNING, complexityPull: 0 }, 'flat');
+    const router = new Router(
+      new RoutingStrategyRegistry().register(flat),
+      routingSchema.parse({ strategy: 'flat' }),
+      new TargetStatsRegistry(),
+      fitting,
+      occupancy(),
+    );
+
+    // With no bend at all, a tangled document and a clean one rank identically.
+    const tangled = router.select([deepseek, minimax], { ...ask(0.95), pool: 'p' });
+    const clean = router.select([deepseek, minimax], { ...ask(0.05), pool: 'p' });
+    expect(tangled.map((t) => t.modelId)).toEqual(clean.map((t) => t.modelId));
+    // …which the real tuning does not do.
+    expect(makeRouter().select([deepseek, minimax], { ...ask(0.95), pool: 'p' })[0]!.modelId).toBe('minimax-m3');
+  });
+});
+
+/**
+ * How the ranking answers a target that has become slow.
+ *
+ * Two requirements that pull against each other, asserted together because
+ * either alone is trivially satisfiable. Speed on openrouter is only sometimes a
+ * fact about the model: one id is served by dozens of providers, one managing
+ * ten tokens a second while another does a hundred, and the population drifts
+ * with the time of day. So a moderate reading is probably the lottery and must
+ * not overturn a quality judgement — and a large one probably is not, and must.
+ *
+ * Asserted on `scoreTargets` rather than on a run, deliberately. A run's split
+ * also carries exploration, task order and endpoint timing, and over a short
+ * corpus those swamp the effect being measured: the same question asked of
+ * twenty-four documents answered "48% at 2x" and "45% at 2.5x", which is the
+ * noise talking. The requirement is a property of the scoring function, so it is
+ * pinned where it lives.
+ */
+describe('the response to a target becoming slow', () => {
+  /** Warm stats in which deepseek measures `factor` times slower than its profile. */
+  function slowed(factor: number): TargetStatsRegistry {
+    const stats = new TargetStatsRegistry();
+    const rate: Record<string, number> = {
+      deepseek: profileFor('deepseek').priorThroughput / factor,
+      'minimax-m3': profileFor('minimax-m3').priorThroughput,
+      'minimax-m3-free': profileFor('minimax-m3-free').priorThroughput,
+    };
+    for (const t of [deepseek, minimax, minimaxFree]) {
+      for (let i = 0; i < 30; i += 1) stats.recordSuccess(t.key, 1000, 0.001, rate[t.modelId] ?? 60);
+    }
+    return stats;
+  }
+
+  const scoreAt = (factor: number): number => {
+    const rows = scoreTargets([deepseek, minimax, minimaxFree], contextFor(0.24, slowed(factor), true));
+    return rows.find((r) => r.target.modelId === 'deepseek')!.score;
+  };
+
+  it('treats a reading inside the provider lottery as nearly a tie, and one outside it as evidence', () => {
+    const nominal = scoreAt(1);
+    const lottery = scoreAt(2.5);
+    const real = scoreAt(3.5);
+    const severe = scoreAt(5);
+
+    // It notices — a term that is flat here is switched off, not tolerant…
+    expect(lottery).toBeLessThan(nominal);
+    // …but only just. A 2.5x reading may not survive the next four calls.
+    const insideBand = nominal - lottery;
+    expect(insideBand).toBeLessThan(0.02);
+
+    // Past the knee the same *increment* of slowness costs several times as
+    // much. That ratio is the requirement; the absolutes are a corpus property.
+    const firstOctaveOut = lottery - real;
+    expect(firstOctaveOut).toBeGreaterThan(insideBand * 3);
+    expect(severe).toBeLessThan(real);
+  });
+
+  it('never lets a speed reading alone overturn the quality judgement inside the band', () => {
+    // The pool ranked at every step from parity to the edge of the band: the
+    // structure-holding model must not take a clean document off the prose model
+    // on a reading this uncertain, whatever the reading says.
+    for (const factor of [1, 1.5, 2, 2.5]) {
+      const rows = scoreTargets([deepseek, minimax, minimaxFree], contextFor(0.24, slowed(factor), true));
+      expect(rows[0]!.target.modelId, `minimax-m3 took a clean document at ${factor}x`).not.toBe('minimax-m3');
+    }
   });
 });
 

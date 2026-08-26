@@ -1,209 +1,173 @@
 /**
- * Fit the `adaptive` constants to a target split, against a real corpus.
+ * Sweep one `adaptive` constant against a target split, over repeated real runs.
  *
- * The scoring maths below is a transcription of `AdaptiveStrategy.scoreTargets`
- * with the module constants lifted into parameters, because those constants are
- * compile-time by design — they are claims, not settings.
+ *   npx tsx tools/calibrate-adaptive.ts complexityPull 0.15,0.25,0.35,0.43
+ *   npx tsx tools/calibrate-adaptive.ts prose 0.2,0.35,0.5 --fix=complexityPull=0.3
+ *   npx tsx tools/calibrate-adaptive.ts --target=deepseek=65,minimax-m3=25,minimax-m3-free=10
  *
- * That transcription can drift, and a fitted constant is worthless if it was
- * fitted to a formula the router does not run. The cross-check is
- * `tools/simulate-adaptive.ts`, which drives the real `Router` and the real
- * strategy: pick a row here, put its values in `AdaptiveStrategy.ts`, and the
- * simulator must reproduce the same split. It currently does, exactly, on both
- * `input/ru` and `out/ru`. Re-check it after changing either file.
+ * Sweepable names are the fields of `AdaptiveTuning`: `throughput`, `health`,
+ * `cost`, `prose`, `complexityPull`, `explorationBonus`.
  *
- *   npx tsx tools/calibrate-adaptive.ts input/ru --target=deepseek=65,minimax-m3=25,minimax-m3-free=10
- *   npx tsx tools/simulate-adaptive.ts input/ru gemma-local,gpt-luna,deepseek,minimax-m3,minimax-m3-free
+ * ## Two things this file is deliberately not
+ *
+ * It does **not** transcribe the scoring maths. The version before this one did,
+ * with a header admitting the transcription could drift — and it had: it modelled
+ * neither the oversize penalty nor the exploration bonus, so it under-reported
+ * the free tier badly, and a constant fitted against it was a number about a
+ * formula the router does not run. `AdaptiveTuning` exists so this can drive
+ * `scoreTargets` itself.
+ *
+ * It does **not** score a static preference map, either. Counting which model
+ * would win each document ignores that the corpus is served as *calls*, that the
+ * strategy learns while it serves them, and that endpoint occupancy decides who
+ * is even eligible. Each point below is a real `runJob` over the real Router.
+ *
+ * ## And it reports a mean and a spread, never a point
+ *
+ * The split is not a function of these constants. Whichever target draws the
+ * first requests accumulates measured throughput and pulls ahead, and task order
+ * under `run.concurrency` varies. Two candidates whose means differ by less than
+ * their spreads are not distinguishable by this instrument, however precise the
+ * numbers look; raise `--runs` or accept that they are the same.
  */
-import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
-import { scoreComplexity } from '../src/routing/strategies/adaptive/ComplexityScorer.js';
-import { profileFor } from '../src/routing/strategies/adaptive/ModelProfiles.js';
-
-interface Knobs {
-  wThroughput: number;
-  wHealth: number;
-  wCost: number;
-  wProse: number;
-  pull: number;
-  /** Per-model tolerance overrides, on top of the compiled profiles. */
-  tolerance: Record<string, number>;
-  /** How well a model renders prose — the axis the four criteria have no term for. */
-  prose: Record<string, number>;
-  /** Never reward a model for being fragile; see the critique in the report. */
-  clampFragile: boolean;
-  /** Failure-rate overrides, for testing what a rate-limited free tier does. */
-  failure: Record<string, number>;
-}
-
-const CURRENT: Knobs = {
-  wThroughput: 1.0,
-  wHealth: 1.5,
-  wCost: 0.2,
-  wProse: 0.5,
-  pull: 0.45,
-  tolerance: {},
-  prose: {},
-  clampFragile: true,
-  failure: {},
-};
-
-/**
- * How well each model renders prose, 0..1 — the user's stated reason for
- * wanting deepseek to carry most of the corpus, and the one axis none of the
- * four criteria measures.
- */
-const PROSE: Record<string, number> = {
-  deepseek: 0.95,
-  'minimax-m3': 0.7,
-  'minimax-m3-free': 0.7,
-};
+import { loadCorpus, runOnce } from '../tests/helpers/adaptiveHarness.js';
+import { DEFAULT_TUNING, type AdaptiveTuning } from '../src/routing/strategies/adaptive/AdaptiveStrategy.js';
 
 /** The three that actually compete once the free endpoints are saturated. */
 const CONTENDERS = ['deepseek', 'minimax-m3', 'minimax-m3-free'] as const;
 
-/** USD for one 2000-in / 2000-out call, from `biomd.config.yaml`. */
-const COST: Record<string, number> = {
-  deepseek: (2000 * 0.08 + 2000 * 0.18) / 1e6,
-  'minimax-m3': (2000 * 0.3 + 2000 * 1.2) / 1e6,
-  'minimax-m3-free': 0,
-};
-
-const NEUTRAL_TOLERANCE = 0.5;
-
-function proportional(values: readonly number[], higherIsBetter: boolean): number[] {
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  if (max <= 0) return values.map(() => 0.5);
-  if (higherIsBetter) return values.map((v) => Math.min(1, v / max));
-  const floor = max / 100;
-  return values.map((v) => Math.min(1, (min + floor) / (v + floor)));
+interface Point {
+  value: number;
+  /** Mean openrouter share per contender, %. */
+  share: Record<string, number>;
+  /** Standard deviation of the same, %. */
+  spread: Record<string, number>;
+  /** Sum of absolute deviations from the target split, percentage points. */
+  error: number;
 }
 
-function winnerFor(complexity: number, knobs: Knobs): string {
-  const rows = CONTENDERS.map((id) => {
-    const profile = profileFor(id);
-    return {
-      id,
-      throughput: profile.priorThroughput,
-      health: 1 - (knobs.failure[id] ?? profile.priorFailureRate),
-      prose: knobs.prose[id] ?? PROSE[id] ?? 0.5,
-      cost: COST[id] ?? 0,
-      tolerance: knobs.tolerance[id] ?? profile.tolerance,
-    };
-  });
+function parseTarget(argv: readonly string[]): Record<string, number> {
+  const flag = argv.find((a) => a.startsWith('--target='));
+  if (!flag) return { deepseek: 65, 'minimax-m3': 25, 'minimax-m3-free': 10 };
+  const wanted: Record<string, number> = {};
+  for (const pair of flag.slice('--target='.length).split(',')) {
+    const [id, value] = pair.split('=');
+    if (id && value) wanted[id.trim()] = Number(value);
+  }
+  return wanted;
+}
 
-  const t = proportional(rows.map((r) => r.throughput), true);
-  const h = proportional(rows.map((r) => r.health), true);
-  const c = proportional(rows.map((r) => r.cost), false);
-  const p = proportional(rows.map((r) => r.prose), true);
-  const total = knobs.wThroughput + knobs.wHealth + knobs.wCost + knobs.wProse;
+function numberFlag(argv: readonly string[], name: string, fallback: number): number {
+  const flag = argv.find((a) => a.startsWith(`--${name}=`));
+  return flag ? Number(flag.slice(name.length + 3)) : fallback;
+}
 
-  let best = rows[0]!.id;
-  let bestScore = -Infinity;
-  rows.forEach((row, i) => {
-    const quality =
-      (t[i]! * knobs.wThroughput + h[i]! * knobs.wHealth + c[i]! * knobs.wCost + p[i]! * knobs.wProse) / total;
-    let bend = knobs.pull * (complexity - 0.5) * 2 * (row.tolerance - NEUTRAL_TOLERANCE);
-    if (knobs.clampFragile && row.tolerance < NEUTRAL_TOLERANCE) bend = Math.min(0, bend);
-    const score = quality + bend;
-    if (score > bestScore) {
-      bestScore = score;
-      best = row.id;
+/**
+ * `--fix=prose=0.35,complexityPull=0.3` — constants held away from their
+ * defaults for the whole sweep.
+ *
+ * Two knobs are the usual case rather than the exception, because the split has
+ * a level and a slope and they are different questions. The weights decide who
+ * the *default* winner is; `complexityPull` decides how far from average a
+ * document has to be to overturn that default. Fitting the level by turning the
+ * slope is how the previous calibration ended up at a `complexityPull` whose
+ * best value was very nearly zero — the split came out right and the complexity
+ * term, which is the entire reason this strategy exists, had stopped doing
+ * anything.
+ */
+function fixedFlags(argv: readonly string[]): Partial<AdaptiveTuning> {
+  const flag = argv.find((a) => a.startsWith('--fix='));
+  if (!flag) return {};
+  const held: Record<string, number> = {};
+  for (const pair of flag.slice('--fix='.length).split(',')) {
+    const [name, value] = pair.split('=');
+    if (!name || !value) continue;
+    if (!(name in DEFAULT_TUNING)) throw new Error(`Unknown constant "${name}" in --fix`);
+    held[name] = Number(value);
+  }
+  return held as Partial<AdaptiveTuning>;
+}
+
+async function measure(
+  corpus: readonly { slug: string; text: string }[],
+  tuning: AdaptiveTuning,
+  runs: number,
+  target: Record<string, number>,
+  value: number,
+): Promise<Point> {
+  const samples: Record<string, number[]> = Object.fromEntries(CONTENDERS.map((m) => [m, []]));
+  for (let run = 0; run < runs; run += 1) {
+    const outcome = await runOnce(corpus, undefined, tuning);
+    for (const model of CONTENDERS) {
+      samples[model]!.push((100 * (outcome.byTarget.get(model) ?? 0)) / Math.max(outcome.onOpenRouter, 1));
     }
-  });
-  return best;
-}
+  }
 
-function distribution(scores: readonly number[], knobs: Knobs): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const id of CONTENDERS) counts[id] = 0;
-  for (const score of scores) counts[winnerFor(score, knobs)] = (counts[winnerFor(score, knobs)] ?? 0) + 1;
-  const out: Record<string, number> = {};
-  for (const [id, n] of Object.entries(counts)) out[id] = (100 * n) / scores.length;
-  return out;
-}
-
-function distanceTo(actual: Record<string, number>, target: Record<string, number>): number {
-  let sum = 0;
-  for (const [id, want] of Object.entries(target)) sum += Math.abs((actual[id] ?? 0) - want);
-  return sum;
-}
-
-function render(dist: Record<string, number>): string {
-  return CONTENDERS.map((id) => `${id} ${(dist[id] ?? 0).toFixed(1)}%`).join('  |  ');
+  const share: Record<string, number> = {};
+  const spread: Record<string, number> = {};
+  let error = 0;
+  for (const model of CONTENDERS) {
+    const values = samples[model]!;
+    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+    share[model] = mean;
+    spread[model] = Math.sqrt(values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length);
+    error += Math.abs(mean - (target[model] ?? 0));
+  }
+  return { value, share, spread, error };
 }
 
 async function main(): Promise<void> {
-  const dir = process.argv[2] ?? 'input/ru';
-  const args = process.argv.slice(3);
-  const files = (await readdir(dir)).filter((f) => f.endsWith('.bio.md'));
+  const argv = process.argv.slice(2);
+  const positional = argv.filter((a) => !a.startsWith('--'));
+  const knob = positional[0] as keyof AdaptiveTuning | undefined;
+  const values = positional[1]?.split(',').map(Number);
 
-  const scores: number[] = [];
-  for (const file of files) {
-    scores.push(scoreComplexity(await readFile(join(dir, file), 'utf8')).score);
+  const runs = numberFlag(argv, 'runs', 5);
+  const documents = numberFlag(argv, 'docs', 20);
+  const target = parseTarget(argv);
+  const held = fixedFlags(argv);
+  const base: AdaptiveTuning = { ...DEFAULT_TUNING, ...held };
+
+  const corpus = await loadCorpus(documents, argv.find((a) => a.startsWith('--corpus='))?.slice(9));
+  if (corpus.length === 0) throw new Error('No corpus: expected .bio.md files under input/ru or out/ru');
+
+  if (knob !== undefined && !(knob in DEFAULT_TUNING)) {
+    throw new Error(`Unknown constant "${knob}". Sweepable: ${Object.keys(DEFAULT_TUNING).join(', ')}`);
   }
-  const sorted = [...scores].sort((a, b) => a - b);
-  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
 
-  console.log(`\ncorpus: ${dir} — ${files.length} documents`);
+  const sweep = knob && values?.length ? values : [base[knob ?? 'complexityPull']];
   console.log(
-    `complexity  min ${at(0).toFixed(3)}  p25 ${at(0.25).toFixed(3)}  median ${at(0.5).toFixed(3)}` +
-      `  p75 ${at(0.75).toFixed(3)}  p90 ${at(0.9).toFixed(3)}  max ${at(1).toFixed(3)}\n`,
+    `\ntarget ${CONTENDERS.map((m) => `${m}=${target[m] ?? 0}`).join(' / ')}` +
+      `   ·   ${runs} runs × ${corpus.length} documents per point` +
+      `${knob && values?.length ? `   ·   sweeping ${knob}` : '   ·   current tuning only'}\n`,
   );
 
-  console.log(`AS CONFIGURED NOW:  ${render(distribution(scores, CURRENT))}\n`);
-
-  const targetArg = args.find((a) => a.startsWith('--target='))?.slice('--target='.length);
-  if (!targetArg) return;
-
-  const target: Record<string, number> = {};
-  for (const pair of targetArg.split(',')) {
-    const [id, value] = pair.split('=');
-    if (id && value) target[id.trim()] = Number(value);
-  }
-  console.log(`TARGET:             ${CONTENDERS.map((id) => `${id} ${target[id] ?? 0}%`).join('  |  ')}\n`);
-
-  const results: { knobs: Knobs; dist: Record<string, number>; distance: number }[] = [];
-  for (const pull of [0.35, 0.45, 0.55, 0.65]) {
-    for (const wCost of [0.1, 0.2, 0.3]) {
-      for (const wProse of [0.5, 0.8, 1.1, 1.4, 1.8]) {
-        for (const freeFail of [0.05, 0.08, 0.12]) {
-          for (const freeTol of [0.5, 0.6, 0.7]) {
-          const knobs: Knobs = {
-            wThroughput: 1.0,
-            wHealth: 1.5,
-            wCost,
-            wProse,
-            pull,
-            tolerance: { 'minimax-m3-free': freeTol },
-            prose: {},
-            clampFragile: true,
-            failure: { 'minimax-m3-free': freeFail },
-          };
-          const dist = distribution(scores, knobs);
-          results.push({ knobs, dist, distance: distanceTo(dist, target) });
-          }
-        }
-      }
-    }
-  }
-
-  results.sort((a, b) => a.distance - b.distance);
-  console.log('BEST FITS (clampFragile on, W_THROUGHPUT 1.0, W_HEALTH 1.5)');
-  console.log(
-    `  ${'PULL'.padStart(5)} ${'W_COST'.padStart(7)} ${'W_PROSE'.padStart(8)} ${'fail(free)'.padStart(11)}` +
-      `   ${'off-by'.padStart(7)}   distribution`,
-  );
-  for (const row of results.slice(0, 10)) {
-    const k = row.knobs;
+  const points: Point[] = [];
+  for (const value of sweep) {
+    const tuning: AdaptiveTuning = knob ? { ...base, [knob]: value } : { ...base };
+    const point = await measure(corpus, tuning, runs, target, value);
+    points.push(point);
     console.log(
-      `  ${k.pull.toFixed(2).padStart(5)} ${k.wCost.toFixed(2).padStart(7)} ${k.wProse.toFixed(2).padStart(8)}` +
-        ` ${(k.failure['minimax-m3-free'] ?? 0).toFixed(2).padStart(11)}` +
-        ` ${(k.tolerance['minimax-m3-free'] ?? 0).toFixed(2).padStart(10)}` +
-        `   ${row.distance.toFixed(1).padStart(7)}   ${render(row.dist)}`,
+      `  ${(knob ?? 'current').padEnd(17)} ${String(value).padStart(6)}   ` +
+        CONTENDERS.map(
+          (m) => `${m} ${point.share[m]!.toFixed(1).padStart(5)}±${point.spread[m]!.toFixed(1)}`,
+        ).join('   ') +
+        `   |err| ${point.error.toFixed(1)}`,
     );
+  }
+
+  const best = [...points].sort((a, b) => a.error - b.error)[0];
+  if (best && points.length > 1) {
+    const rivals = points.filter(
+      (p) => p !== best && p.error - best.error < CONTENDERS.reduce((s, m) => s + best.spread[m]!, 0),
+    );
+    console.log(`\nbest ${knob} = ${best.value}  (|err| ${best.error.toFixed(1)} points)`);
+    if (rivals.length > 0) {
+      console.log(
+        `  indistinguishable from ${rivals.map((p) => p.value).join(', ')} at this run count — ` +
+          `the gap is inside the spread. Raise --runs before believing the ordering.`,
+      );
+    }
   }
   console.log();
 }

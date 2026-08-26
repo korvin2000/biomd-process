@@ -93,7 +93,10 @@ npm run score -- input/ru out
   documents average 0.265 complexity, the prose drawn from them 0.082, and scoring the batch
   reports "simple" for the whole corpus. Its throughput term is **generated** tokens over wall
   clock; counting prompt tokens overstated targets 3.7–6.4× and *unevenly*, which reorders them.
-  Verify changes with `tests/adaptive.simulation.test.ts`, never with a live run.
+  Verify changes with `tools/split-adaptive.ts` over **repeated** runs, never with a live run and
+  never with one run — and check the measured-tok/s row it prints, which is the harness proving it
+  is not lying. It was: a fake that answered instantly made throughput a first-mover bonus, and
+  every constant in the file had been fitted against that.
 
 - **`omniroute` needs `stream: true`** — with buffered answers, two *overlapping* requests get the
   same completion, and a web-search answer about the wrong guitarist is well-formed, sourced, and

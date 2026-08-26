@@ -18,6 +18,26 @@
  * assume? They are a starting point that live measurements overwrite, not a
  * verdict — see `shrink()` in the strategy.
  *
+ * ### A throughput prior for an openrouter model is a mixture, not a property
+ *
+ * `local` and `omniroute` each front one deployment, so a number measured there
+ * describes a thing. An openrouter model id does not: it is served by dozens of
+ * providers at once, one of which will do ten tokens a second while another does
+ * a hundred, and which one answers is not ours to choose. On top of that the
+ * whole population moves with the clock — faster in the evening, slower through
+ * a working day.
+ *
+ * So the openrouter entries below are the **mean of a distribution that is wide
+ * and that drifts**, and the honest thing to take from them is the *ratio*
+ * rather than either absolute: minimax-m3 runs about 30% faster than deepseek,
+ * which holds across providers because it is a property of the models. Two
+ * consequences, both already in the strategy:
+ *
+ *  - the measurement has to be able to win. Confidence comes from the cumulative
+ *    success count, so after a few dozen calls this file is barely consulted;
+ *  - and it has to be able to go stale. `THROUGHPUT_DECAY_MS` exists because
+ *    tonight's provider is not this afternoon's.
+ *
  * Failure rates are Laplace-smoothed — `(failures + 1) / (attempts + 2)` — and
  * not the raw ratio. Two targets in this table went 0-for-53 and 0-for-52, and
  * writing that down as `0.0` would claim a model that cannot fail from fifty
@@ -103,10 +123,30 @@ const PROFILES: Readonly<Record<string, ModelProfile>> = {
 
   /**
    * Follows instructions; renders prose less well. The fastest generator in this
-   * pool by a wide margin — 127 tok/s — but on only 12 calls, so the figure is
-   * shrunk hard towards whatever the run measures.
+   * pool.
+   *
+   * 105 rather than the 127 this file carried, and derived rather than measured:
+   * 127 came off twelve calls through whichever providers openrouter happened to
+   * pick that hour, which is a sample of a mixture and not a speed. The durable
+   * fact is the ratio — about 30% faster than deepseek — so this is deepseek's
+   * 81 times 1.3. It is a starting point and the run overwrites it.
+   *
+   * `proseQuality` was 0.7, and the evidence for that number has since been
+   * superseded by evidence this repo produced itself. 0.7 recorded a Spanish A/B
+   * in which this model left proper names untransliterated in headings and
+   * captions — 19 occurrences over 20 documents against deepseek's zero. That
+   * defect was then fixed at the prompt level: with the override in
+   * `prompts/translation/minimax-m3/`, it scored 20/20 structurally clean with
+   * **zero** Cyrillic leakage in two separate 20-document runs, matching
+   * deepseek. What is still measured between them is `dashΔ` (50 against 18) and
+   * one work title in twenty-one, and the session that measured those found them
+   * inside single-run noise.
+   *
+   * So 0.85 rather than 0.95: the gap that was demonstrated has closed, and what
+   * is left is a smaller preference that has not been demonstrated either way.
+   * See `docs/ref/adaptive-routing.md`.
    */
-  'minimax-m3': { tolerance: 0.95, proseQuality: 0.7, priorThroughput: 127, priorFailureRate: 0.0182 },
+  'minimax-m3': { tolerance: 0.95, proseQuality: 0.85, priorThroughput: 105, priorFailureRate: 0.0182 },
 
   /**
    * Not the same deployment as the paid entry despite the shared name: a single
@@ -126,8 +166,24 @@ const PROFILES: Readonly<Record<string, ModelProfile>> = {
    * work and the long articles go to something that is paid for anyway.
    */
   'minimax-m3-free': {
-    tolerance: 0.6,
+    // **Below deepseek's 0.25, not above it.** This was 0.6 — placed between
+    // deepseek and the paid minimax on the theory that the model is the same
+    // and only the quantization differs. The deployment's own account of it is
+    // the opposite: on large and structurally busy requests this variant fails
+    // *more often than deepseek does*, and it is the one member of the pool
+    // with no `structured_outputs` to fall back on if a pipeline ever asks.
+    //
+    // Below the neutral 0.5 the fragility clamp in `scoreTargets` engages, and
+    // that is the point: a tangled document can only ever cost this target
+    // something. At 0.6 it collected a small *bonus* on exactly the payloads it
+    // is least able to hold together, which is not a preference anybody holds.
+    // Size is handled separately by `maxComfortableTokens`; this is the other
+    // half of "large and complex".
+    tolerance: 0.2,
     proseQuality: 0.7,
+    // Not derived from the paid entry's ratio, and deliberately: this one is a
+    // single named host rather than a mixture, so 78 is a measurement of a
+    // thing rather than an average over providers that vary tenfold.
     priorThroughput: 78,
     // Higher than a plain quality estimate would justify, and deliberately: a
     // metered free tier's characteristic failure is a 429, not a bad answer,
@@ -147,8 +203,17 @@ const PROFILES: Readonly<Record<string, ModelProfile>> = {
    */
   'gemma-local': { tolerance: 0.7, proseQuality: 0.7, priorThroughput: 53, priorFailureRate: 0.0185 },
 
-  /** No `response_format` support at all; JSON is prompt-only, so structure is fragile. */
-  nemotron: { tolerance: 0.35, proseQuality: 0.7, priorThroughput: 60, priorFailureRate: 0.05 },
+  /**
+   * No `response_format` support at all; JSON is prompt-only, so structure is
+   * fragile.
+   *
+   * Keyed as `nemotron-free`, which is the `id:` `biomd.config.yaml` actually
+   * declares. It was keyed `nemotron` and therefore matched nothing — harmless
+   * only for as long as no pool names it, and the kind of thing that is
+   * discovered by a target quietly scoring at `DEFAULT_PROFILE` in a run nobody
+   * is watching.
+   */
+  'nemotron-free': { tolerance: 0.35, proseQuality: 0.7, priorThroughput: 60, priorFailureRate: 0.05 },
 };
 
 /** Neutral stance for a model nobody has characterised. */

@@ -142,7 +142,19 @@ export class FakeClient implements LlmClient {
   readonly calls: FakeCall[] = [];
 
   constructor(
-    private readonly behaviour: (call: FakeCall, index: number) => CompletionResponse | Error = () => new Error('unset'),
+    /**
+     * May return a promise, which `complete` awaits.
+     *
+     * Needed by anything that measures *time*: the gateway records
+     * `Date.now() - startedAt`, so a behaviour that returns instantly reports
+     * every call as having taken no time at all, whatever `latencyMs` it puts
+     * in the response. See `tests/adaptive.simulation.test.ts`, where that made
+     * every target's measured throughput read as its outlier ceiling.
+     */
+    private readonly behaviour: (
+      call: FakeCall,
+      index: number,
+    ) => CompletionResponse | Error | Promise<CompletionResponse | Error> = () => new Error('unset'),
   ) {}
 
   static happyPath(facts: unknown = DEFAULT_FACTS): FakeClient {
@@ -163,7 +175,7 @@ export class FakeClient implements LlmClient {
     const index = this.calls.length;
     this.calls.push(call);
 
-    const outcome = this.behaviour(call, index);
+    const outcome = await this.behaviour(call, index);
     if (outcome instanceof Error) throw outcome;
 
     // Convenience for the happy path only: a *cooperative* search provider

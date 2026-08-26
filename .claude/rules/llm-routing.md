@@ -36,6 +36,19 @@ provider quirks: [docs/ref/providers.md](../../docs/ref/providers.md).
 - **An unmeasured target must be explored, or it is never measured.** Without
   `EXPLORATION_BONUS` the first completed call decides the whole run: whoever answered fastest
   once out-scores a pool-mate that has nothing but its profile to argue with, forever.
+- **A short window is the *estimate*; the cumulative count is the *confidence*.** Both measured
+  terms in `adaptive` keep the two apart, and both got it wrong once. Weighting health by window
+  length capped every target's certainty at ten and handed the decision to cost; weighting
+  throughput by window length left the hand-set prior holding 3/7 of the term for the whole run, so
+  a target sustaining 200 tok/s against a prior of 81 scored as 149.
+- **Anything measured must be able to go stale.** A slow window demotes a target, and being demoted
+  is what stops the next measurement arriving. `STREAK_DECAY_MS` and `THROUGHPUT_DECAY_MS` exist so
+  the evidence expires rather than the target.
+- **A fake provider that answers instantly measures nothing.** The gateway records
+  `Date.now() - startedAt` and ignores a response's declared `latencyMs`, so a test double that
+  returns synchronously reports every call as free. `tests/helpers/adaptiveHarness.ts` sleeps a
+  compressed duration and reports proportionally fewer tokens, keeping tok/s exact; the first
+  assertion in `tests/adaptive.simulation.test.ts` checks that it still does.
 - **`prefer` means what `preferMode` says.** `reorder` (the default) floats the list to the front
   and keeps the rest of the pool behind it as the fallback chain. `restrict` makes the list the
   variant's *whole* chain: a one-entry list is then a pool of one, and a list whose models are all

@@ -75,28 +75,60 @@ const PRIOR_STRENGTH = 3;
  * At these values the mean over five runs is roughly 63 / 21 / 16 against a
  * stated target of 65 / 25 / 10.
  */
-const W_THROUGHPUT = 1.0;
-const W_HEALTH = 1.5;
-const W_COST = 0.2;
-const W_PROSE = 0.50;
+const W_THROUGHPUT = 0.8;
+const W_HEALTH = 1.8;
+const W_COST = 1.2;
+const W_PROSE = 0.8;
 
 /**
  * How far complexity is allowed to bend the quality score.
  *
- * This used to carry a hard safety ceiling — above some value the bend outvoted
- * a target that was failing *right now*, and a broken target started collecting
- * the hardest documents in the corpus. That ceiling was documented at 0.85 and
- * the arithmetic put it at 0.658, which is the trouble with a bound that is a
- * consequence of four weights rather than a rule: it moves when any of them
- * does, silently, and nothing says so. The reward half of the bend is now
- * scaled by measured health instead (see `scoreTargets`), so a target at health
- * 0 gets no bend at all and there is no value of this constant that makes it
- * the first choice. `tests/adaptive.test.ts` pins that at 10.
+ * There is a safety ceiling on this constant, because the bend must never be
+ * able to outvote a target that is failing *right now* — the hardest documents
+ * in the corpus are exactly the ones a broken target answers worst. Worth
+ * knowing two things about it.
  *
- * What is left is a calibration knob with no cliff in it. Fitted on this
- * corpus, averaged over ten harness runs.
+ * The first is that it is a *consequence* of the four weights rather than a
+ * rule, so it moves whenever any of them does, silently. The comment here used
+ * to state 0.85; the arithmetic, once run, put it at **0.658** — the healthy
+ * target's margin was a third of what this file claimed.
+ *
+ * The second is that most of the danger came from a term that had no business
+ * being in the comparison at all: a target with health 0 was still collecting
+ * the *reward* half of its bend. Scaling that half by measured health (see
+ * `scoreTargets`) removes it, and moves the ceiling to roughly **1.85** — where
+ * what finally loses the comparison is the healthy low-tolerance target's own
+ * penalty on a tangled document, which is a real statement rather than an
+ * artefact. 0.43 now sits a factor of four under the bound instead of a factor
+ * of one and a half, and `tests/adaptive.test.ts` pins the mechanism rather
+ * than the number, so the next weight change cannot move it back unnoticed.
+ *
+ * Fitted on this corpus, averaged over ten harness runs.
  */
-const COMPLEXITY_PULL = 0.43;
+const COMPLEXITY_PULL = 0.7;
+
+/**
+ * The complexity a document has to beat to count as a hard one.
+ *
+ * The bend is centred here, and this used to be hard-coded to 0.5 — the midpoint
+ * of the 0…1 scale, chosen because it is the midpoint of the *scale*. That is
+ * not a fact about any corpus, and on this one it was quietly wrong: the median
+ * document scores 0.24 and the mean 0.265, so measuring "above average" from 0.5
+ * made roughly 93% of the corpus below average and handed the tolerant model a
+ * penalty on nearly every document it saw. The complexity term was not
+ * discriminating between documents; it was a blanket levy with a rebate for the
+ * top 7%.
+ *
+ * Centring on what the corpus actually looks like restores the thing the term is
+ * for — above this line the structure-holding model, below it the prose model —
+ * and it is the constant to change when the corpus changes, which
+ * `tools/simulate-adaptive.ts` prints the distribution for.
+ *
+ * Note that this is **not** the same quantity as `DEFAULT_PROFILE.tolerance`,
+ * which is also 0.5 and is the neutral point of a different axis. They were the
+ * same number by coincidence.
+ */
+const COMPLEXITY_MIDPOINT = 0.16;
 
 /** A consecutive-failure streak counts this many times over against a target. */
 const STREAK_PENALTY = 0.12;
@@ -117,6 +149,41 @@ const STREAK_DECAY_MS = 60_000;
 
 /** Most a short window may claim over a target's historical throughput. */
 const OUTLIER_CEILING = 3;
+
+/**
+ * How large a speed difference is still, most likely, the provider lottery.
+ *
+ * The other three terms compare properties of a *model*. Speed on openrouter is
+ * not one: a model id there is served by dozens of providers at once, one
+ * managing ten tokens a second while another does a hundred, and the population
+ * drifts with the time of day. Two identical models measured over four calls
+ * each can differ threefold for no reason that will still be true in a minute.
+ *
+ * So this term is scored through a knee rather than in proportion, and the knee
+ * is placed at the noise floor. Inside {@link SPEED_TOLERANCE} a difference
+ * costs {@link SPEED_TOLERANCE_PENALTY} at most — enough to break a tie, not
+ * enough to overturn a quality judgement. Beyond it the difference is more
+ * likely to be real, and the remaining score is spent over the octaves up to
+ * {@link SPEED_FULL_PENALTY_RATIO}.
+ *
+ * `v / max` — what this used to be, and what the other three terms still are —
+ * has the response backwards for that job. It is steepest exactly where the
+ * measurement is least trustworthy: a 2.5x reading costs 0.6 of the term, and
+ * going on to 3.5x costs only 0.11 more, so the strategy reacted hardest to the
+ * differences most likely to be noise and had almost nothing left to say about
+ * the ones that were not.
+ *
+ * The band is set from the harness's own `SPREAD`: +-55% per call on an
+ * openrouter id means two identical targets can read as far apart as 3.4x on a
+ * bad pair of draws.
+ */
+const SPEED_TOLERANCE = 3.0;
+
+/** What a target exactly {@link SPEED_TOLERANCE} times slower gives up, 0…1. */
+const SPEED_TOLERANCE_PENALTY = 0.06;
+
+/** Speed ratio at which this term is spent entirely and the score reaches 0. */
+const SPEED_FULL_PENALTY_RATIO = 8;
 
 /**
  * How long a throughput measurement keeps counting for a target that is not
@@ -164,6 +231,51 @@ const EXPLORATION_BONUS = 0.3;
  * it. Reached at twice the declared ceiling.
  */
 const OVERSIZE_PENALTY = 0.35;
+
+/**
+ * The six constants a calibration would ever sweep, in one object.
+ *
+ * They are compile-time in production — {@link DEFAULT_TUNING} is what
+ * `adaptive` runs and nothing in `biomd.config.yaml` reaches it — and a
+ * parameter here only so that a calibration tool can drive the **real** scoring
+ * function instead of a copy of it. `tools/calibrate-adaptive.ts` used to hold
+ * its own transcription of the arithmetic below, with a comment admitting the
+ * transcription could drift; it had, and a constant fitted against a formula the
+ * router does not run is a number about nothing.
+ *
+ * The rest of the constants in this file are structural rather than fitted —
+ * how long evidence survives, how far a single window may overreach — and
+ * turning them is a design change, not a calibration.
+ */
+export interface AdaptiveTuning {
+  throughput: number;
+  health: number;
+  cost: number;
+  prose: number;
+  complexityPull: number;
+  /** Complexity above which a document counts as hard. See {@link COMPLEXITY_MIDPOINT}. */
+  complexityMidpoint: number;
+  explorationBonus: number;
+  /** Speed ratio still inside the provider lottery. See {@link SPEED_TOLERANCE}. */
+  speedTolerance: number;
+  /** What a target exactly `speedTolerance` times slower gives up, 0…1. */
+  speedTolerancePenalty: number;
+  /** Speed ratio at which the term is spent entirely. */
+  speedFullPenaltyRatio: number;
+}
+
+export const DEFAULT_TUNING: AdaptiveTuning = Object.freeze({
+  throughput: W_THROUGHPUT,
+  health: W_HEALTH,
+  cost: W_COST,
+  prose: W_PROSE,
+  complexityPull: COMPLEXITY_PULL,
+  complexityMidpoint: COMPLEXITY_MIDPOINT,
+  explorationBonus: EXPLORATION_BONUS,
+  speedTolerance: SPEED_TOLERANCE,
+  speedTolerancePenalty: SPEED_TOLERANCE_PENALTY,
+  speedFullPenaltyRatio: SPEED_FULL_PENALTY_RATIO,
+});
 
 export interface TargetScore {
   target: ModelTarget;
@@ -233,6 +345,37 @@ function proportional(values: readonly number[], higherIsBetter: boolean): numbe
   return values.map((value) => clamp01(1 - value / max));
 }
 
+/**
+ * Speed against the fastest candidate, through the knee described at
+ * {@link SPEED_TOLERANCE}.
+ *
+ * Piecewise-linear in **octaves** rather than in the ratio, because a speed
+ * difference is naturally multiplicative: "twice as slow" is one step whether it
+ * happens at 40 tok/s or at 400. The two segments are a gentle slope inside the
+ * lottery band and a steep one outside it, and both are stated as *what the
+ * target gives up* so the constants can be read without doing the arithmetic.
+ */
+function speedScores(values: readonly number[], tuning: AdaptiveTuning): number[] {
+  let max = -Infinity;
+  for (const value of values) if (value > max) max = value;
+  if (!Number.isFinite(max) || max <= 0) return values.map(() => 0.5);
+
+  // Guard the logs: a tolerance of 1 or below has no band, and a full-penalty
+  // ratio at or under the tolerance has no second segment.
+  const knee = Math.log2(Math.max(1.0001, tuning.speedTolerance));
+  const tail = Math.max(1e-6, Math.log2(Math.max(tuning.speedFullPenaltyRatio, tuning.speedTolerance * 1.0001)) - knee);
+  const insideSlope = clamp01(tuning.speedTolerancePenalty) / knee;
+  const outsideSlope = (1 - clamp01(tuning.speedTolerancePenalty)) / tail;
+
+  return values.map((value) => {
+    if (!(value > 0)) return 0;
+    const octavesBehind = Math.log2(max / value);
+    const inside = Math.min(octavesBehind, knee);
+    const outside = Math.max(0, octavesBehind - knee);
+    return clamp01(1 - inside * insideSlope - outside * outsideSlope);
+  });
+}
+
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0.5;
   return value < 0 ? 0 : value > 1 ? 1 : value;
@@ -248,7 +391,11 @@ function complexityOfRequest(context: RoutingContext): number | undefined {
  * Score every candidate, best first. Exported so a test — and `biomd models` —
  * can show the arithmetic rather than only its conclusion.
  */
-export function scoreTargets(candidates: readonly ModelTarget[], context: RoutingContext): TargetScore[] {
+export function scoreTargets(
+  candidates: readonly ModelTarget[],
+  context: RoutingContext,
+  tuning: AdaptiveTuning = DEFAULT_TUNING,
+): TargetScore[] {
   const complexity = complexityOfRequest(context);
   // Read once, so every candidate in one ranking is judged against the same
   // instant. Two clock reads inside the loop would let the targets scored later
@@ -321,7 +468,7 @@ export function scoreTargets(candidates: readonly ModelTarget[], context: Routin
     // Optimism proportional to ignorance: full at zero observations, gone by
     // roughly ten. `requests` and not `recent.length`, so a target that has
     // only ever failed stops being explored too.
-    const explore = EXPLORATION_BONUS / (1 + stats.requests);
+    const explore = tuning.explorationBonus / (1 + stats.requests);
 
     return {
       target,
@@ -335,18 +482,32 @@ export function scoreTargets(candidates: readonly ModelTarget[], context: Routin
     };
   });
 
-  const throughputScores = proportional(rows.map((row) => row.throughput), true);
-  const healthScores = proportional(rows.map((row) => row.health), true);
-  const costScores = proportional(rows.map((row) => row.cost), false);
-  const proseScores = proportional(rows.map((row) => row.prose), true);
-  const totalWeight = W_THROUGHPUT + W_HEALTH + W_COST + W_PROSE;
+  // Speed alone is scored through a knee rather than in proportion; the other
+  // three terms describe the model rather than whichever host answered.
+  const throughputScores = speedScores(
+    rows.map((row) => row.throughput),
+    tuning,
+  );
+  const healthScores = proportional(
+    rows.map((row) => row.health),
+    true,
+  );
+  const costScores = proportional(
+    rows.map((row) => row.cost),
+    false,
+  );
+  const proseScores = proportional(
+    rows.map((row) => row.prose),
+    true,
+  );
+  const totalWeight = tuning.throughput + tuning.health + tuning.cost + tuning.prose;
 
   const scored = rows.map((row, index): TargetScore => {
     const quality =
-      (throughputScores[index]! * W_THROUGHPUT +
-        healthScores[index]! * W_HEALTH +
-        costScores[index]! * W_COST +
-        proseScores[index]! * W_PROSE) /
+      (throughputScores[index]! * tuning.throughput +
+        healthScores[index]! * tuning.health +
+        costScores[index]! * tuning.cost +
+        proseScores[index]! * tuning.prose) /
       totalWeight;
 
     // Centred on **both** axes, and the complexity half is the one that is easy
@@ -364,7 +525,10 @@ export function scoreTargets(candidates: readonly ModelTarget[], context: Routin
     let bend =
       complexity === undefined
         ? 0
-        : COMPLEXITY_PULL * (complexity - 0.5) * 2 * (row.tolerance - DEFAULT_PROFILE.tolerance);
+        : tuning.complexityPull *
+          (complexity - tuning.complexityMidpoint) *
+          2 *
+          (row.tolerance - DEFAULT_PROFILE.tolerance);
 
     // Fragility is never a merit. Below the neutral tolerance the symmetric
     // form above turns into a *bonus* on clean documents — the model is being
@@ -374,21 +538,20 @@ export function scoreTargets(candidates: readonly ModelTarget[], context: Routin
     // cost it something on documents it cannot hold together.
     if (row.tolerance < DEFAULT_PROFILE.tolerance) bend = Math.min(0, bend);
 
-    // Tolerance is a claim about a model that is *working*. Scaling the reward
-    // half of the bend by measured health is what removes the one genuinely
-    // dangerous property this formula had: without it `COMPLEXITY_PULL` has an
-    // upper bound past which a target failing every call starts winning the
-    // hardest documents in the corpus — precisely the documents it is least
-    // able to answer — and that bound moved every time a weight changed. It was
-    // documented at 0.85 and the arithmetic put it at 0.658.
+    // Tolerance is a claim about a model that is *working*, so the reward half
+    // of the bend is worth what the target's health says it is worth. Without
+    // this a target that had failed its last six calls — health driven to
+    // literally 0 — still banked the full "this document needs my tolerance"
+    // bonus, and that is what set the ceiling on `COMPLEXITY_PULL`: it put the
+    // margin at 0.658 rather than the 0.85 this file claimed, and moved it
+    // again on every weight change. Gating it here costs nothing in normal
+    // operation — `healthScores` is proportional, so the healthiest candidate
+    // is exactly 1 and a pool of working targets sits within a percent of it —
+    // and buys back a factor of three in the safety margin.
     //
-    // Only the reward half. Halving a *penalty* for a broken target would make
-    // brokenness pay on clean documents, which is the fragility bug above
+    // The reward half only. Softening a *penalty* for a broken target would
+    // make brokenness pay on clean documents, which is the fragility bug above
     // wearing a different hat.
-    //
-    // The cost in normal operation is nil: `healthScores` is proportional, so
-    // the healthiest candidate scores exactly 1 and a pool of working targets
-    // sits within a percent of it.
     if (bend > 0) bend *= healthScores[index]!;
 
     return { ...row, score: quality + bend + row.explore - row.oversize };
@@ -397,39 +560,51 @@ export function scoreTargets(candidates: readonly ModelTarget[], context: Routin
   return scored.sort((a, b) => b.score - a.score || a.cost - b.cost || b.target.weight - a.target.weight);
 }
 
-export const adaptive: RoutingStrategy = {
-  id: 'adaptive',
-  description:
-    'Measured throughput, health and cost among the least-loaded targets, bent by payload complexity.',
-  select(context) {
-    const candidates = [...context.candidates];
-    if (candidates.length <= 1) return fittingFirst(candidates, context);
+/**
+ * The strategy at one set of constants.
+ *
+ * `adaptive` is this at {@link DEFAULT_TUNING}. A calibration registers other
+ * instances under the same id to sweep a constant end to end — see
+ * `tools/calibrate-adaptive.ts` — which is the only way to fit one against the
+ * real scheduler rather than against a static preference map.
+ */
+export function adaptiveWith(tuning: AdaptiveTuning, id = 'adaptive'): RoutingStrategy {
+  return {
+    id,
+    description:
+      'Measured throughput, health and cost among the least-loaded targets, bent by payload complexity.',
+    select(context) {
+      const candidates = [...context.candidates];
+      if (candidates.length <= 1) return fittingFirst(candidates, context);
 
-    // Occupancy is the primary key and the score is the secondary one, applied
-    // at **every** load level rather than only at the emptiest.
-    //
-    // The first version of this scored the least-loaded tier and left the rest
-    // in `least-busy` order — load, then cost. That reads as a conservative
-    // choice and is in fact a way of switching the strategy off. Models sharing
-    // an endpoint always share a load value, so a pool spread over three
-    // endpoints puts two thirds of itself in that remainder at any moment, and
-    // there they were ranked by price alone: the cheapest openrouter model took
-    // every openrouter request, whatever the document looked like. A live run
-    // over 96 tasks went 49-0-0 across the three of them before this changed.
-    //
-    // Ordering by load first keeps the property that matters — an emptier
-    // endpoint is still always preferred, so nobody queues behind a full one
-    // while another sits idle — and lets the score decide among equals, which
-    // is the only comparison it was ever meant to make.
-    const score = new Map<string, number>();
-    for (const row of scoreTargets(candidates, context)) score.set(row.target.key, row.score);
+      // Occupancy is the primary key and the score is the secondary one, applied
+      // at **every** load level rather than only at the emptiest.
+      //
+      // The first version of this scored the least-loaded tier and left the rest
+      // in `least-busy` order — load, then cost. That reads as a conservative
+      // choice and is in fact a way of switching the strategy off. Models sharing
+      // an endpoint always share a load value, so a pool spread over three
+      // endpoints puts two thirds of itself in that remainder at any moment, and
+      // there they were ranked by price alone: the cheapest openrouter model took
+      // every openrouter request, whatever the document looked like. A live run
+      // over 96 tasks went 49-0-0 across the three of them before this changed.
+      //
+      // Ordering by load first keeps the property that matters — an emptier
+      // endpoint is still always preferred, so nobody queues behind a full one
+      // while another sits idle — and lets the score decide among equals, which
+      // is the only comparison it was ever meant to make.
+      const score = new Map<string, number>();
+      for (const row of scoreTargets(candidates, context, tuning)) score.set(row.target.key, row.score);
 
-    const ranked = candidates.sort(
-      (a, b) =>
-        context.load(a) - context.load(b) ||
-        (score.get(b.key) ?? 0) - (score.get(a.key) ?? 0) ||
-        b.weight - a.weight,
-    );
-    return fittingFirst(ranked, context);
-  },
-};
+      const ranked = candidates.sort(
+        (a, b) =>
+          context.load(a) - context.load(b) ||
+          (score.get(b.key) ?? 0) - (score.get(a.key) ?? 0) ||
+          b.weight - a.weight,
+      );
+      return fittingFirst(ranked, context);
+    },
+  };
+}
+
+export const adaptive: RoutingStrategy = adaptiveWith(DEFAULT_TUNING);

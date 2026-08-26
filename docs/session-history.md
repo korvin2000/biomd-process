@@ -506,3 +506,170 @@ The robust finding is **zero Cyrillic leakage in two different 20-document overr
 
 
 
+
+---
+
+# Session 3 — audit of the arithmetic, and the instrument that was measuring nothing
+
+Goal: review `AdaptiveStrategy.ts` for logical, arithmetic and reliability defects; fix what is
+real; make it ready for production use. Six defects were found, one of which invalidates every
+calibration recorded above.
+
+## 1. The harness never spent wall clock — everything above was fitted to an artefact
+
+`LlmGateway` records `Date.now() - startedAt` and **ignores** the `latencyMs` a `CompletionResponse`
+declares. The simulation's `FakeClient` returned synchronously, so every call was measured as taking
+~0ms, and `completionTokens / 0ms` is not a throughput — it is whatever `OUTLIER_CEILING` clamps it
+to. Confirmed by instrumenting a run: deepseek's measured throughput climbed to 238 tok/s against
+its 81 prior and stayed there, while untouched targets sat at their priors.
+
+Consequences:
+
+- the throughput term was a **first-mover bonus**. Whichever target answered first was pinned at 3×
+  its prior for the rest of the run, because the window only refills for a target being called;
+- this is the source of the run-to-run variance recorded in §9.4. minimax-m3's share ranged 0.8% to
+  25.4% between *identical* runs because it depended on whether it drew an early call;
+- every constant fitted with this harness — the 63/21/16, `W_PROSE 0.50`, `COMPLEXITY_PULL 0.43` —
+  was fitted against that.
+
+Fixed by making the fake sleep. `TIME_SCALE = 80` divides both the reported completion tokens and
+the sleep, so tokens/second is exact and a call costs ~100ms. After the fix, measured throughput
+lands within 2–6% of what each target was asked to model, and the spread of minimax-m3's share fell
+from σ 8.7 to σ 2.0. `tests/adaptive.simulation.test.ts` now asserts this **first**, because
+nothing below it means anything otherwise.
+
+## 2. Throughput confidence was capped at four observations
+
+`shrink(measured, prior, stats.recent.length)` — and `RECENT_WINDOW` is 4, so the hand-set prior kept
+3/7 of the term for the entire run however much evidence arrived. Measured: a target sustaining
+200 tok/s against a prior of 81 read as **149**; one sustaining 40 against a prior of 127 read as
+**77**. A 5:1 speed difference scored as 1.9:1.
+
+This is the *same* mistake the file already documented and fixed for health — the window supplies
+the estimate, the cumulative count supplies the confidence — left unfixed for throughput. Confidence
+is now `stats.successes`, and the outlier ceiling is applied to the window value *before* the blend
+rather than after.
+
+## 3. Throughput had no way to go stale, and health had two
+
+A slow window demotes a target, and being demoted is what stops the next measurement arriving. Health
+recovers through the rolling window and through `STREAK_DECAY_MS`; throughput had neither, so the
+first bad window a target drew was the one it was judged on for the rest of the run. Added
+`THROUGHPUT_DECAY_MS = 120_000`: confidence fades with idleness, so the target reverts to its profile
+and gets another turn. The same shape as the breaker's half-open probe.
+
+## 4. The cost term collapsed whenever a free target was in the pool
+
+`proportional(values, false)` computed `(min + floor) / (value + floor)`. With a free candidate `min`
+is zero, so every paid target scored on the floor alone. Measured on the real pool: the
+deepseek-to-minimax gap on this term was **0.82** without the free tier and **0.045** with it — an
+eighteen-fold change in a comparison the free tier is not part of. Which is exactly the
+magnitude-destroying behaviour of min-max that `proportional` was written to avoid, arriving by
+another route.
+
+Replaced with `1 − value / max`, the mirror of the higher-is-better branch. Pinned by a test that
+asserts two paid targets compare identically with and without a free one present.
+
+## 5. The `COMPLEXITY_PULL` safety ceiling was wrong, and is now a mechanism
+
+Documented at 0.85. The arithmetic put it at **0.658** — a health-0 target was still banking the
+full reward half of its complexity bend. Worse, the bound is a *consequence* of the four weights, so
+it moves whenever one of them does and nothing says so.
+
+Fixed structurally: the reward half of the bend is now multiplied by the target's health score, so a
+target failing every call gets no bend at all. Margin at complexity 1.0 went from 0.16 to 0.36, the
+ceiling from 0.658 to ~1.85, and the test pins the mechanism rather than the number. It costs
+nothing in normal operation — `healthScores` is proportional, so a pool of working targets sits
+within a percent of 1.
+
+## 6. `tools/` was outside the typecheck gate
+
+Which is how `calibrate-adaptive.ts` drifted. `tools/simulate-adaptive.ts` had a live type error (its
+fake `ModelTarget` was missing `apiFormat` and `provider`). `tsconfig.json` now includes
+`tools/**/*.ts`; `tsconfig.build.json` still emits `src` only.
+
+## 7. Throughput priors are a mixture, not a property
+
+User correction, and it reframes what a prior is. `local` and `omniroute` each front one deployment,
+but an openrouter model id is served by dozens of providers at once — one managing 10 tok/s while
+another does 100 — and the population drifts with the time of day (faster in the evening, slower
+through a working day). The durable fact is the **ratio**: minimax-m3 runs about 30% faster than
+deepseek.
+
+- `minimax-m3` prior 127 → **105** (= 81 × 1.3). The 127 came off twelve calls through one
+  afternoon's providers, which is a sample of a mixture rather than a speed.
+- `minimax-m3-free` keeps 78: one named fp8 host, so it is a measurement of a thing.
+- This is independent support for §2 and §3 — a prior that is a wide moving average *must* be
+  overrulable, and a measurement of it *must* expire.
+- The harness gained a `SPREAD` term (±55% per call on openrouter ids, ±10–15% on the
+  single-deployment ones) and a test that the pool stays in play when speeds swing between calls.
+- `RECENT_WINDOW` was considered and deliberately **left at 4**: forgetting a degraded provider
+  within four calls is worth the noise.
+
+## 8. Recalibration, and what a share target can and cannot be
+
+With the instrument honest, theory and measurement agree for the first time. At `proseQuality 0.70`
+minimax-m3 was 0.02 behind deepseek at complexity 0.5, so the crossover sat at `c* = 0.553` and **no
+value of `COMPLEXITY_PULL` could put its share past the ~7% of documents above that line.** A sweep
+duly reported `complexityPull = 0.05` as the best fit to 65/25/10 — because at that value the three
+scores are within a hair of each other and the split is decided by exploration and task order. That
+is not routing; it is a lottery that happens to average correctly.
+
+`proseQuality` for minimax-m3 raised 0.70 → **0.85**, on evidence this repo produced *after* 0.70
+was set: with the model-specific prompt override, minimax-m3 scored 20/20 structurally clean with
+zero Cyrillic leakage in two separate 20-document runs, matching deepseek. `minimax-m3-free` keeps
+0.70 — different deployment, fp8, never measured.
+
+Measured over 5 runs of the **whole 196-document corpus**, share of openrouter calls:
+
+| | deepseek | minimax-m3 | minimax-m3-free |
+|---|---:|---:|---:|
+| `proseQuality 0.70` | 91.4 ± 0.8 | 6.7 ± 0.5 | 1.9 ± 0.7 |
+| **`proseQuality 0.85` (shipped)** | **88.5 ± 0.6** | **9.8 ± 0.8** | **1.7 ± 0.3** |
+
+`c*` is now 0.489. Standard deviations are under one point, against 8.7 before the harness fix.
+
+**The free tier is the outstanding mismatch**: policy said 10–15%, it carries 1.7%. On merit it is
+last — marginally slower than deepseek, lower tolerance, the same prose, an oversize penalty on the
+larger half of the corpus, and a deliberately high `priorFailureRate`. Being free is worth at most
+`W_COST / ΣW` = 6.25% of the score. `W_COST` is the lever and it has not been turned.
+
+## 9. Tooling
+
+- `tests/helpers/adaptiveHarness.ts` — the pool, the timing-aware fake and the run driver, shared by
+  the simulation test and both tools, so a constant fitted with a tool is fitted against what the
+  test asserts.
+- `tools/split-adaptive.ts` (new) — mean and spread over N real runs, plus a **measured tok/s row
+  next to each prior**, which is the instrument checking itself. That row is what would have caught
+  §1 on day one.
+- `tools/calibrate-adaptive.ts` (rewritten) — drives the real `scoreTargets` through a new
+  `AdaptiveTuning` parameter instead of transcribing the arithmetic, sweeps any of the six weights,
+  holds others with `--fix=`, and refuses to claim an ordering that is inside the spread.
+- `tools/simulate-adaptive.ts` — header corrected. It scores **documents** with empty stats, and
+  because complexity is a density it is negatively correlated with length (r = −0.39), so a
+  per-document map over-reports the tolerant model against a per-call run by about two to one. Use
+  it for the complexity distribution, never to fit a share.
+- A test that wrote to the hardcoded absolute path `C:/work.ai/biomd-process/.ab/split.txt` was
+  deleted; the tool does that job properly.
+- `nemotron-free` profile key corrected (was `nemotron`, matched nothing).
+
+## 10. Where it stands
+
+623 tests pass, typecheck clean including `tools/`. Nine new assertions cover throughput confidence,
+the outlier ceiling, cost-term pool-invariance, the health-gated bend, the oversize ramp,
+exploration decay, tuning parameterisation, staleness decay, and the harness's own timing.
+
+Open, in the order they are worth doing:
+
+1. **`W_COST` for the free tier.** The only calibration question left, and a policy one: how much of
+   a metered allowance is worth spending down.
+2. **A second-language A/B.** Still the strongest evidence available about `proseQuality`, and the
+   only thing that would say anything at all about `tolerance`, which has never been measured.
+3. **`extract` still routes with `least-busy`** and passes no `signals.complexity`; it goes through
+   `escalation.ts` rather than `stringBatch.ts`.
+4. **`EXPLORATION_BONUS` is sweepable now and has not been swept.**
+5. **`OUTLIER_CEILING` is relative to the prior**, so an uncharacterised model can never measure
+   faster than 3× `DEFAULT_PROFILE.priorThroughput`.
+6. **`estimatedCost` ignores prompt caching.** A warm target is scored at list price.
+7. **`invalid_request` and `context_length` count against health** though neither says the target is
+   unreliable.
